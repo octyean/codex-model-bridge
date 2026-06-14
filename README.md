@@ -38,133 +38,63 @@ Codex CLI / App
 
 ## 一键安装/更新
 
-### 准备二进制
+### Linux / macOS
 
-从 GitHub Releases 下载对应平台的二进制，放到项目目录或任意固定路径。
+直接安装最新 release，并注册用户级服务：
 
-常见文件名：
+```bash
+curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | bash
+```
+
+带上 DeepSeek key：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | env CODEX_BRIDGE_API_KEY="sk-xxx" bash
+```
+
+安装脚本会自动完成这些事：
+
+- 按系统和 CPU 架构下载 GitHub Releases latest 里的二进制。
+- 安装到 `~/.codex-bridge/bin/codex-bridge`。
+- 首次运行时创建 `~/.codex-bridge/config.toml`。
+- 写入 Codex provider 和模型目录配置。
+- Linux 注册 systemd user service，macOS 注册 launchd agent。
+- 启动或重启 bridge 服务。
+
+可选环境变量：
+
+```bash
+CODEX_BRIDGE_API_KEY="sk-xxx"
+CODEX_BRIDGE_BASE_URL="https://api.deepseek.com"
+CODEX_BRIDGE_MODEL="deepseek-v4-flash"
+CODEX_BRIDGE_HOME="$HOME/.codex-bridge"
+CODEX_BRIDGE_CONFIG="$HOME/.codex-bridge/config.toml"
+```
+
+重复执行同一条安装命令即可更新。配置文件不会被覆盖。
+
+### Windows
+
+打开 [GitHub Releases latest](https://github.com/octyean/codex-model-bridge/releases/latest)，下载对应的 Windows 二进制：
 
 ```text
-codex-bridge-linux-amd64
-codex-bridge-linux-arm64
-codex-bridge-darwin-amd64
-codex-bridge-darwin-arm64
 codex-bridge-windows-amd64.exe
 codex-bridge-windows-arm64.exe
 ```
 
-Linux / macOS：
+把 exe 放到一个固定目录，双击运行。
 
-```bash
-chmod +x codex-bridge-linux-amd64
-./codex-bridge-linux-amd64 config check --config config/config.toml
-./codex-bridge-linux-amd64 --config config/config.toml
-```
-
-Windows PowerShell：
-
-```powershell
-.\codex-bridge-windows-amd64.exe config check --config .\config\config.toml
-.\codex-bridge-windows-amd64.exe --config .\config\config.toml
-```
-
-### Linux / macOS 一键安装
-
-先确认 `dist/` 里有当前平台对应的二进制。需要本地构建时执行：
-
-```bash
-scripts/build-release.sh
-```
-
-安装并注册用户级服务：
-
-```bash
-scripts/install-service.sh --config config/config.toml
-```
-
-指定二进制：
-
-```bash
-scripts/install-service.sh \
-  --binary dist/codex-bridge-linux-amd64 \
-  --config config/config.toml
-```
-
-指定安装目录：
-
-```bash
-scripts/install-service.sh \
-  --config config/config.toml \
-  --install-dir "$HOME/.codex-bridge"
-```
-
-也可以用环境变量：
-
-```bash
-CODEX_BRIDGE_HOME="$HOME/.codex-bridge" \
-CODEX_BRIDGE_BINARY="dist/codex-bridge-linux-amd64" \
-scripts/install-service.sh --config config/config.toml
-```
-
-Linux 会创建 systemd user service：
+第一次双击时会在 exe 所在目录创建：
 
 ```text
-~/.config/systemd/user/codex-bridge.service
+config.toml
 ```
 
-macOS 会创建 launchd agent：
+同时会写入 Codex provider 和模型目录配置，并启动 bridge。首次运行后，把 `config.toml` 里的 `api_key = "sk-xxx"` 改成自己的 key，再双击 exe 启动即可。
 
-```text
-~/Library/LaunchAgents/com.codex-bridge.plist
-```
+更新时下载新版 exe 覆盖旧文件，然后重新双击。
 
-### Windows 一键安装
-
-PowerShell：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1 -ConfigPath .\config\config.toml
-```
-
-指定二进制：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1 `
-  -BinaryPath .\dist\codex-bridge-windows-amd64.exe `
-  -ConfigPath .\config\config.toml
-```
-
-脚本会把二进制复制到：
-
-```text
-%LOCALAPPDATA%\codex-bridge\bin\codex-bridge.exe
-```
-
-并注册登录启动任务：
-
-```text
-codex-bridge
-```
-
-### 更新
-
-更新二进制时，重新执行安装脚本即可。脚本会覆盖安装目录里的旧文件，并启动或重启服务。
-
-Linux / macOS：
-
-```bash
-scripts/install-service.sh --binary dist/codex-bridge-linux-amd64 --config config/config.toml
-```
-
-Windows：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-service.ps1 `
-  -BinaryPath .\dist\codex-bridge-windows-amd64.exe `
-  -ConfigPath .\config\config.toml
-```
-
-只修改 `config/config.toml` 时，重启服务即可。服务启动时会刷新 model catalog。
+### 重启服务
 
 Linux：
 
@@ -178,12 +108,7 @@ macOS：
 launchctl kickstart -k "gui/$(id -u)/com.codex-bridge"
 ```
 
-Windows：
-
-```powershell
-Stop-ScheduledTask -TaskName codex-bridge
-Start-ScheduledTask -TaskName codex-bridge
-```
+Windows 直接关闭当前窗口，再双击 exe 启动。
 
 ### 从源码运行
 
@@ -212,13 +137,15 @@ go build -o dist/codex-bridge ./cmd/codex-bridge
 
 ## 配置
 
-默认配置路径：
+配置文件位置取决于安装方式：
 
 ```text
-config/config.toml
+Linux / macOS 一键安装：~/.codex-bridge/config.toml
+Windows 双击运行：exe 同目录下的 config.toml
+源码运行：config/config.toml
 ```
 
-Unix 上运行前执行：
+源码运行时，Unix 上执行：
 
 ```bash
 chmod 600 config/config.toml
@@ -451,6 +378,8 @@ model = "deepseek-v4-flash"
 
 ## 管理命令
 
+下面的 `codex-bridge` 可以替换成实际二进制路径，例如 `~/.codex-bridge/bin/codex-bridge`。
+
 ### 配置检查
 
 ```bash
@@ -536,15 +465,6 @@ loginctl enable-linger "$USER"
 launchctl print "gui/$(id -u)/com.codex-bridge"
 launchctl kickstart -k "gui/$(id -u)/com.codex-bridge"
 launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.codex-bridge.plist"
-```
-
-### Windows 任务命令
-
-```powershell
-Get-ScheduledTask -TaskName codex-bridge
-Start-ScheduledTask -TaskName codex-bridge
-Stop-ScheduledTask -TaskName codex-bridge
-Unregister-ScheduledTask -TaskName codex-bridge
 ```
 
 ### Codex CLI 验证
@@ -634,18 +554,13 @@ codex-bridge codex configure --config config/config.toml
 
 bridge 会把 Codex 的 `web_search` 转成同名 Chat function tool。工具名保持为 `web_search`，模型更容易按预期调用搜索。
 
-### Windows 任务启动失败
+### Windows 双击后没有看到 bridge 模型
 
-先手动跑：
-
-```powershell
-%LOCALAPPDATA%\codex-bridge\bin\codex-bridge.exe config check --config C:\path\to\config.toml
-%LOCALAPPDATA%\codex-bridge\bin\codex-bridge.exe --config C:\path\to\config.toml
-```
-
-再看任务状态：
+打开 PowerShell，进入 exe 所在目录后手动运行：
 
 ```powershell
-Get-ScheduledTask -TaskName codex-bridge
-Get-ScheduledTaskInfo -TaskName codex-bridge
+.\codex-bridge-windows-amd64.exe config check --config .\config.toml
+.\codex-bridge-windows-amd64.exe --config .\config.toml
 ```
+
+这样可以看到完整错误信息。常见原因是端口被占用、`api_key` 仍是占位值，或 Codex 配置没有写入成功。

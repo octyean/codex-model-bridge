@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -21,6 +23,13 @@ import (
 func main() {
 	command := "serve"
 	args := os.Args[1:]
+	defaultConfigPath := "config/config.toml"
+	autoConfigure := false
+	defaultConfigCreated := false
+	if runtime.GOOS == "windows" && len(args) == 0 {
+		defaultConfigPath = windowsDefaultConfigPath()
+		autoConfigure = true
+	}
 	if len(args) > 0 && args[0] != "--config" && args[0] != "-config" {
 		command = args[0]
 		args = args[1:]
@@ -40,13 +49,21 @@ func main() {
 	}
 
 	flags := flag.NewFlagSet(command, flag.ExitOnError)
-	configPath := flags.String("config", "config/config.toml", "Path to codex-bridge config")
+	configPath := flags.String("config", defaultConfigPath, "Path to codex-bridge config")
 	codexHome := flags.String("codex-home", "", "Path to Codex home, defaults to CODEX_HOME or ~/.codex")
 	providerName := flags.String("provider-name", "codex_bridge", "Codex model provider name to write")
 	providerDisplayName := flags.String("provider-display-name", "Codex Bridge", "Codex model provider display name")
 	baseURL := flags.String("base-url", "", "Bridge base URL to write into Codex config, defaults to server.listen + /v1")
 	if err := flags.Parse(args); err != nil {
 		os.Exit(1)
+	}
+	if autoConfigure {
+		created, err := ensureDefaultConfig(*configPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		defaultConfigCreated = created
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -71,15 +88,7 @@ func main() {
 		if configBaseURL == "" {
 			configBaseURL = cfg.BridgeBaseURL()
 		}
-		result, err := codexconfig.Configure(codexconfig.Settings{
-			CodexHome:           *codexHome,
-			ProviderName:        *providerName,
-			ProviderDisplayName: *providerDisplayName,
-			BaseURL:             configBaseURL,
-			ModelCatalogPath:    cfg.Codex.ModelCatalogPath,
-			DefaultModel:        cfg.Codex.DefaultModel,
-			BearerToken:         cfg.Codex.LocalToken,
-		})
+		result, err := configureCodex(cfg, *codexHome, *providerName, *providerDisplayName, configBaseURL)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -96,6 +105,14 @@ func main() {
 	}
 
 	logger := logging.New(os.Stdout)
+	if autoConfigure && defaultConfigCreated {
+		result, err := configureCodex(cfg, *codexHome, *providerName, *providerDisplayName, cfg.BridgeBaseURL())
+		if err != nil {
+			logger.Warn("codex_configure_failed", slog.String("error", err.Error()))
+		} else {
+			logger.Info("codex_configured", slog.String("path", result.ConfigPath))
+		}
+	}
 	if err := cfg.WriteCatalog(); err != nil {
 		logger.Error("catalog_write_failed", slog.String("error", err.Error()))
 		os.Exit(1)
@@ -140,4 +157,44 @@ func main() {
 		logger.Error("server_shutdown_failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+}
+
+func windowsDefaultConfigPath() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return "config.toml"
+	}
+	return filepath.Join(filepath.Dir(executable), "config.toml")
+}
+
+func ensureDefaultConfig(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("check config: %w", err)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return false, fmt.Errorf("resolve user home: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, fmt.Errorf("create config directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(config.DefaultConfigText(homeDir)), 0o600); err != nil {
+		return false, fmt.Errorf("write default config: %w", err)
+	}
+	fmt.Printf("created config at %s\n", path)
+	return true, nil
+}
+
+func configureCodex(cfg *config.Config, codexHome string, providerName string, providerDisplayName string, baseURL string) (codexconfig.Result, error) {
+	return codexconfig.Configure(codexconfig.Settings{
+		CodexHome:           codexHome,
+		ProviderName:        providerName,
+		ProviderDisplayName: providerDisplayName,
+		BaseURL:             baseURL,
+		ModelCatalogPath:    cfg.Codex.ModelCatalogPath,
+		DefaultModel:        cfg.Codex.DefaultModel,
+		BearerToken:         cfg.Codex.LocalToken,
+	})
 }
