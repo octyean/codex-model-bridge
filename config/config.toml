@@ -1,0 +1,91 @@
+[server]
+listen = "127.0.0.1:8787"
+
+[codex]
+model_catalog_path = "/home/you/.codex/models.codex-bridge.json"
+default_model = "deepseek-v4-flash"
+local_token = "codex-bridge-local-token"
+
+[model_discovery]
+enabled = true
+mode = "config"
+cache_ttl = "10m"
+
+[extensions.network]
+proxy_url = ""
+
+[capabilities.search]
+enabled = false
+providers = ["jina"]
+max_results = 5
+read_top_k = 3
+
+[capabilities.vision]
+enabled = false
+provider = "jina_vlm"
+mode = "describe"
+
+[search_providers.jina]
+type = "jina"
+search_base_url = "https://s.jina.ai"
+reader_base_url = "https://r.jina.ai"
+api_key = "jina_xxx"
+
+[search_providers.jina_mcp]
+type = "mcp"
+server_url = "https://mcp.jina.ai/v1?include_tags=search,read"
+authorization = "Bearer jina_xxx"
+search_tool = "search_web"
+read_tool = "read_url"
+
+[search_providers.searxng_local]
+type = "searxng"
+base_url = "http://127.0.0.1:8080"
+
+[search_providers.brave]
+type = "brave"
+api_key = "brave_xxx"
+
+[search_providers.tavily]
+type = "tavily"
+api_key = "tvly_xxx"
+
+[search_providers.serper]
+type = "serper"
+api_key = "serper_xxx"
+
+[search_providers.duckduckgo_ia]
+type = "duckduckgo_instant_answer"
+
+[search_providers.firecrawl]
+type = "firecrawl"
+base_url = "https://api.firecrawl.dev"
+api_key = "fc_xxx"
+
+[search_providers.wikipedia]
+type = "wikipedia"
+base_url = "https://en.wikipedia.org"
+
+[search_providers.semantic_scholar]
+type = "semantic_scholar"
+api_key = ""
+
+[vision_providers.jina_vlm]
+type = "openai_chat_compatible_vision"
+base_url = "https://api-beta-vlm.jina.ai/v1"
+api_key = "jina_xxx"
+model = "jina-vlm"
+
+[providers.deepseek]
+type = "openai_chat_compatible"
+base_url = "https://api.deepseek.com"
+api_key = "sk-xxx"
+profile = "deepseek"
+
+[models.deepseek-v4-flash]
+display_name = "DeepSeek V4 Flash"
+provider = "deepseek"
+upstream_model = "deepseek-v4-flash"
+context_window = 64000
+supports_parallel_tool_calls = true
+apply_patch_tool_type = "freeform"

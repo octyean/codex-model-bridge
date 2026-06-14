@@ -1,0 +1,13 @@
+[Unit]
+Description=Codex Bridge
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.codex-bridge/bin/codex-bridge --config /absolute/path/to/config.toml
+Restart=always
+RestartSec=2
+WorkingDirectory=/absolute/path/to/codex-custom-llm
+
+[Install]
+WantedBy=default.target
