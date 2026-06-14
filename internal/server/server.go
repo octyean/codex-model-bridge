@@ -103,6 +103,15 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "provider is not available: "+modelCfg.Provider)
 		return
 	}
+	if s.cfg.UpstreamProtocol(modelCfg, providerCfg) == "responses" {
+		responsesProvider, ok := provider.(providers.ResponsesProvider)
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "provider does not support responses protocol: "+modelCfg.Provider)
+			return
+		}
+		s.forwardResponses(w, r, requestID, req, modelCfg, responsesProvider)
+		return
+	}
 
 	transcriptResult, err := transcript.ToChatMessagesWithRuntime(r.Context(), req, adapter, s.runtime)
 	if err != nil {
@@ -121,7 +130,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	chatReq = s.addInternalTools(req, chatReq)
 	if req.ParallelToolCalls && !toolCtx.IsEmpty() {
-		enabled := true
+		enabled := !toolCtx.HasFileWriteTool()
 		chatReq.ParallelToolCalls = &enabled
 	}
 	chatReq = adapter.PrepareChatRequest(chatReq)
@@ -170,6 +179,45 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Output:    items,
 		Usage:     codexUsage(usage),
 	})
+}
+
+func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider) {
+	upstreamReq := cloneResponseRequest(req.Raw)
+	upstreamReq["model"] = modelCfg.UpstreamModel
+	if req.Stream {
+		stream, err := provider.StreamResponse(r.Context(), upstreamReq)
+		if err != nil {
+			s.logger.Error("upstream_response_stream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writer := codex.NewSSEWriter(w)
+		for event := range stream {
+			if event.Err != nil {
+				_ = writer.Event(map[string]any{
+					"type": "response.failed",
+					"response": map[string]any{
+						"error": map[string]any{"message": event.Err.Error(), "type": "server_error"},
+					},
+				})
+				return
+			}
+			if event.Done {
+				return
+			}
+			replaceResponseModel(event.Data, req.Model)
+			_ = writer.Event(event.Data)
+		}
+		return
+	}
+	resp, err := provider.CreateResponse(r.Context(), upstreamReq)
+	if err != nil {
+		s.logger.Error("upstream_response_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	replaceResponseModel(resp, req.Model)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter) {
@@ -260,6 +308,25 @@ func responseID(id string) string {
 		return id
 	}
 	return fmt.Sprintf("resp_%d", time.Now().UnixNano())
+}
+
+func cloneResponseRequest(raw map[string]any) map[string]any {
+	out := make(map[string]any, len(raw))
+	for key, value := range raw {
+		out[key] = value
+	}
+	return out
+}
+
+func replaceResponseModel(value map[string]any, model string) {
+	if _, ok := value["model"]; ok {
+		value["model"] = model
+	}
+	if response, ok := value["response"].(map[string]any); ok {
+		if _, exists := response["model"]; exists {
+			response["model"] = model
+		}
+	}
 }
 
 func codexUsage(usage providers.NormalizedUsage) map[string]any {

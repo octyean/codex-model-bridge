@@ -47,10 +47,11 @@ api_key = "jina_xxx"
 model = "jina-vlm"
 
 [providers.deepseek]
-type = "openai_chat_compatible"
+type = "openai_compatible"
 base_url = "https://api.deepseek.com"
 api_key = "sk-xxx"
 profile = "deepseek"
+protocol = "chat_completions"
 
 [models.deepseek-v4-flash]
 display_name = "DeepSeek V4 Flash"

@@ -173,10 +173,11 @@ cache_ttl = "10m"
 proxy_url = ""
 
 [providers.deepseek]
-type = "openai_chat_compatible"
+type = "openai_compatible"
 base_url = "https://api.deepseek.com"
 api_key = "sk-xxx"
 profile = "deepseek"
+protocol = "chat_completions"
 
 [models.deepseek-v4-flash]
 display_name = "DeepSeek V4 Flash"
@@ -206,6 +207,32 @@ context_window = 128000
 supports_parallel_tool_calls = true
 apply_patch_tool_type = "freeform"
 ```
+
+`type` 支持两种写法：
+
+- `openai_chat_compatible`：老兼容模式，始终向上游请求 `/chat/completions`。
+- `openai_compatible`：同时支持 Chat Completions 和 Responses。`protocol` 可写 `chat_completions`、`responses` 或 `auto`；不写时，`gpt-*`、`o3*`、`o4*` upstream 模型会走 `/responses`，其他模型走 `/chat/completions`。
+
+如果上游是 OpenAI 原生 GPT / o 系列模型，建议使用：
+
+```toml
+[providers.openai]
+type = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-xxx"
+profile = "default"
+protocol = "auto"
+
+[models.gpt-5-bridge]
+display_name = "GPT 5 Bridge"
+provider = "openai"
+upstream_model = "gpt-5.4"
+context_window = 400000
+supports_parallel_tool_calls = true
+apply_patch_tool_type = "freeform"
+```
+
+这条路径会把 Codex 的 `/v1/responses` 请求原样转给上游 `/responses`，只替换 `model` 为 `upstream_model`，因此 `reasoning`、`verbosity` 和 Responses 原生工具语义不会被降级成 Chat Completions 字段。
 
 `profile` 当前支持：
 

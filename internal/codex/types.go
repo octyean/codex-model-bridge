@@ -13,6 +13,21 @@ type ResponsesRequest struct {
 	Raw               map[string]any  `json:"-"`
 }
 
+func (r *ResponsesRequest) UnmarshalJSON(data []byte) error {
+	type alias ResponsesRequest
+	var base alias
+	if err := json.Unmarshal(data, &base); err != nil {
+		return err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*r = ResponsesRequest(base)
+	r.Raw = raw
+	return nil
+}
+
 type ResponseTool struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name"`

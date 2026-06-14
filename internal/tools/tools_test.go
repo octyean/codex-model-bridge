@@ -33,16 +33,30 @@ func TestExtractCustomInput(t *testing.T) {
 func TestDeepSeekApplyPatchDescription(t *testing.T) {
 	chatTools, _ := FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.DeepSeekName))
 	description := chatTools[0].Function.Description
-	if !strings.Contains(description, "*** Begin Patch") || !strings.Contains(description, "*** End Patch") {
+	if !strings.Contains(description, "*** Begin Patch") || !strings.Contains(description, "*** End Patch") || !strings.Contains(description, "read the current target lines again") {
 		t.Fatalf("description should include patch boundaries: %q", description)
 	}
 }
 
 func TestNormalizeCustomInputRemovesMarkdownFence(t *testing.T) {
-	got := adapters.Get(adapters.DefaultName).NormalizeCustomInput("apply_patch", "```patch\n*** Begin Patch\n*** End Patch\n```")
+	got := adapters.Get(adapters.DefaultName).NormalizeCustomInput("apply_patch", "```patch\r\n*** Begin Patch\r\n*** End Patch\r\n```")
 	want := "*** Begin Patch\n*** End Patch"
 	if got != want {
 		t.Fatalf("normalized input = %q, want %q", got, want)
+	}
+}
+
+func TestApplyPatchToolCarriesPatchSemantics(t *testing.T) {
+	_, ctx := FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.DeepSeekName))
+	entry := ctx.Entry("apply_patch")
+	if entry.Kind() != KindPatch {
+		t.Fatalf("kind = %q", entry.Kind())
+	}
+	if entry.Descriptor.InputMode != InputModeFreeform || entry.Descriptor.SideEffect != SideEffectWriteFiles {
+		t.Fatalf("descriptor = %#v", entry.Descriptor)
+	}
+	if !ctx.HasFileWriteTool() {
+		t.Fatalf("patch tool should be classified as file write")
 	}
 }
 
@@ -54,10 +68,10 @@ func TestToolSearchAndLocalShellBecomeChatFunctions(t *testing.T) {
 	if len(chatTools) != 2 {
 		t.Fatalf("tools len = %d", len(chatTools))
 	}
-	if ctx.Entry("tool_search").Kind != KindToolSearch {
+	if ctx.Entry("tool_search").Kind() != KindToolSearch {
 		t.Fatalf("tool_search entry = %#v", ctx.Entry("tool_search"))
 	}
-	if ctx.Entry("shell").Kind != KindShell {
+	if ctx.Entry("shell").Kind() != KindShell {
 		t.Fatalf("shell entry = %#v", ctx.Entry("shell"))
 	}
 }

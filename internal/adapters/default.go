@@ -3,7 +3,6 @@ package adapters
 import (
 	"encoding/json"
 
-	"codex-bridge/internal/codex"
 	"codex-bridge/internal/providers"
 )
 
@@ -25,7 +24,7 @@ func (defaultAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) pr
 	return req
 }
 
-func (defaultAdapter) CustomToolDescription(name string, tool codex.ResponseTool) string {
+func (defaultAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	if len(tool.Raw) > 0 {
 		if meta := canonicalJSON(tool.Raw); meta != "" {
 			return "Submit complete freeform input for this Codex custom tool.\nOriginal tool metadata: " + meta
@@ -42,6 +41,10 @@ func (defaultAdapter) NormalizeCustomInput(name string, input string) string {
 		return normalizeApplyPatchInput(input)
 	}
 	return input
+}
+
+func (defaultAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
+	return DefaultToolOutput(tool, output)
 }
 
 func objectParameters() json.RawMessage {

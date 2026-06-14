@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strings"
 
-	"codex-bridge/internal/codex"
 	"codex-bridge/internal/providers"
 )
 
@@ -26,8 +25,23 @@ type Adapter interface {
 	Name() string
 	Capabilities() Capabilities
 	PrepareChatRequest(providers.ChatCompletionRequest) providers.ChatCompletionRequest
-	CustomToolDescription(name string, tool codex.ResponseTool) string
+	CustomToolDescription(tool ToolDescriptor) string
 	NormalizeCustomInput(name string, input string) string
+	FormatToolOutput(tool ToolDescriptor, output string) string
+}
+
+type ToolDescriptor struct {
+	Name         string
+	Kind         string
+	InputMode    string
+	SideEffect   string
+	OriginalType string
+	Description  string
+	Raw          map[string]any
+}
+
+func DefaultToolOutput(_ ToolDescriptor, output string) string {
+	return output
 }
 
 func ForcedToolName(toolChoice any) string {
@@ -97,7 +111,9 @@ func NormalizeInputModalities(values []string) []string {
 }
 
 func normalizeApplyPatchInput(input string) string {
-	text := strings.TrimSpace(input)
+	text := strings.ReplaceAll(input, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "```") {
 		lines := strings.Split(text, "\n")
 		if len(lines) >= 2 {

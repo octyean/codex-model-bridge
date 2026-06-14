@@ -196,3 +196,38 @@ func TestApplyPatchCallOutputRoundsTrip(t *testing.T) {
 		t.Fatalf("messages = %#v", result.Messages)
 	}
 }
+
+func TestDeepSeekApplyPatchContextFailureCarriesRecoverySemantics(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"apply_patch_call_output","call_id":"call_1","output":"Failed to find context"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if len(result.Messages) != 1 || result.Messages[0].Role != "tool" {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+	content, _ := result.Messages[0].Content.(string)
+	if !strings.Contains(content, "inspect the current target lines") || !strings.Contains(content, "smaller patch") {
+		t.Fatalf("tool output = %q", content)
+	}
+}
+
+func TestDeepSeekCustomApplyPatchOutputCarriesRecoverySemantics(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"Failed to find context"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if len(result.Messages) != 2 || result.Messages[1].Role != "tool" {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+	content, _ := result.Messages[1].Content.(string)
+	if !strings.Contains(content, "inspect the current target lines") || !strings.Contains(content, "smaller patch") {
+		t.Fatalf("tool output = %q", content)
+	}
+}

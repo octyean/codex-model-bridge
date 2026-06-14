@@ -1,9 +1,6 @@
 package adapters
 
-import (
-	"codex-bridge/internal/codex"
-	"codex-bridge/internal/providers"
-)
+import "codex-bridge/internal/providers"
 
 type mimoAdapter struct{}
 
@@ -24,10 +21,14 @@ func (mimoAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) provi
 	return defaultAdapter{}.PrepareChatRequest(req)
 }
 
-func (mimoAdapter) CustomToolDescription(name string, tool codex.ResponseTool) string {
-	return defaultAdapter{}.CustomToolDescription(name, tool)
+func (mimoAdapter) CustomToolDescription(tool ToolDescriptor) string {
+	return defaultAdapter{}.CustomToolDescription(tool)
 }
 
 func (mimoAdapter) NormalizeCustomInput(name string, input string) string {
 	return defaultAdapter{}.NormalizeCustomInput(name, input)
+}
+
+func (mimoAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
+	return defaultAdapter{}.FormatToolOutput(tool, output)
 }

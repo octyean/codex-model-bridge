@@ -136,12 +136,12 @@ func (s *streamState) ToolCallCount() int {
 }
 
 func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, adapter adapters.Adapter) codex.ResponseItem {
-	switch entry.Kind {
-	case tools.KindCustom, tools.KindApplyPatch:
+	switch entry.Kind() {
+	case tools.KindCustom, tools.KindPatch:
 		return codex.ResponseItem{
 			"type":    "custom_tool_call",
 			"call_id": callID,
-			"name":    entry.OriginalName,
+			"name":    entry.OriginalName(),
 			"input":   tools.ExtractCustomToolInput(entry, arguments, adapter),
 			"status":  "completed",
 		}
@@ -164,7 +164,7 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 		item := codex.ResponseItem{
 			"type":      "function_call",
 			"call_id":   callID,
-			"name":      entry.OriginalName,
+			"name":      entry.OriginalName(),
 			"arguments": arguments,
 			"status":    "completed",
 		}
@@ -185,7 +185,7 @@ func inProgressItem(callID string, entry tools.Entry) map[string]any {
 }
 
 func argumentDeltaEvent(callID string, entry tools.Entry, delta string) map[string]any {
-	switch entry.Kind {
+	switch entry.Kind() {
 	case tools.KindFunction:
 		return map[string]any{
 			"type":    "response.function_call_arguments.delta",
@@ -264,8 +264,10 @@ func messageText(content any) string {
 func logToolTranslation(logger *slog.Logger, requestID string, entry tools.Entry, itemType string) {
 	logger.Info("tool_call_translated",
 		slog.String("request_id", requestID),
-		slog.String("tool", entry.Name),
-		slog.String("kind", entry.Kind),
+		slog.String("tool", entry.Name()),
+		slog.String("kind", entry.Kind()),
+		slog.String("input_mode", entry.Descriptor.InputMode),
+		slog.String("side_effect", entry.Descriptor.SideEffect),
 		slog.String("from", "chat_function_call"),
 		slog.String("to", itemType),
 	)

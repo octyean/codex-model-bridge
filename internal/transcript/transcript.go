@@ -39,6 +39,7 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 		return Result{}, err
 	}
 	var pendingToolCalls []providers.ChatToolCall
+	toolCallsByID := map[string]providers.ChatToolCall{}
 	for _, item := range items {
 		itemType, _ := item["type"].(string)
 		switch itemType {
@@ -56,25 +57,39 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				Content: contentParts(ctx, item["content"], adapters.HasImageInput(adapter.Capabilities()), runtime),
 			})
 		case "function_call":
-			pendingToolCalls = append(pendingToolCalls, functionToolCall(item))
+			call := functionToolCall(item)
+			pendingToolCalls = append(pendingToolCalls, call)
+			toolCallsByID[call.ID] = call
 		case "custom_tool_call":
-			pendingToolCalls = append(pendingToolCalls, customToolCall(item, adapter))
+			call := customToolCall(item, adapter)
+			pendingToolCalls = append(pendingToolCalls, call)
+			toolCallsByID[call.ID] = call
 		case "apply_patch_call":
-			pendingToolCalls = append(pendingToolCalls, applyPatchToolCall(item, adapter))
+			call := applyPatchToolCall(item, adapter)
+			pendingToolCalls = append(pendingToolCalls, call)
+			toolCallsByID[call.ID] = call
 		case "tool_search_call":
-			pendingToolCalls = append(pendingToolCalls, toolSearchCall(item))
+			call := toolSearchCall(item)
+			pendingToolCalls = append(pendingToolCalls, call)
+			toolCallsByID[call.ID] = call
 		case "shell_call", "local_shell_call":
-			pendingToolCalls = append(pendingToolCalls, shellToolCall(item))
+			call := shellToolCall(item)
+			pendingToolCalls = append(pendingToolCalls, call)
+			toolCallsByID[call.ID] = call
 		case "function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output", "shell_call_output", "local_shell_call_output":
 			if len(pendingToolCalls) > 0 {
 				messages = append(messages, providers.ChatMessage{Role: "assistant", ToolCalls: pendingToolCalls})
 				pendingToolCalls = nil
 			}
 			callID, _ := item["call_id"].(string)
+			descriptor := outputToolDescriptor(item)
+			if call, ok := toolCallsByID[callID]; ok {
+				descriptor = outputToolDescriptorForCall(item, call)
+			}
 			messages = append(messages, providers.ChatMessage{
 				Role:       "tool",
 				ToolCallID: callID,
-				Content:    outputText(item),
+				Content:    adapter.FormatToolOutput(descriptor, outputText(item)),
 			})
 		case "additional_tools", "reasoning":
 			continue
@@ -321,6 +336,48 @@ func outputText(item map[string]any) string {
 	default:
 		return valueText(item["output"])
 	}
+}
+
+func outputToolDescriptor(item map[string]any) adapters.ToolDescriptor {
+	itemType, _ := item["type"].(string)
+	switch itemType {
+	case "custom_tool_call_output":
+		return adapters.ToolDescriptor{Name: "custom", Kind: tools.KindCustom, InputMode: tools.InputModeFreeform, SideEffect: tools.SideEffectNone, OriginalType: itemType}
+	case "apply_patch_call_output":
+		return adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindPatch, InputMode: tools.InputModeFreeform, SideEffect: tools.SideEffectWriteFiles, OriginalType: itemType}
+	case "tool_search_output":
+		return adapters.ToolDescriptor{Name: "tool_search", Kind: tools.KindToolSearch, InputMode: tools.InputModeJSON, SideEffect: tools.SideEffectRead, OriginalType: itemType}
+	case "shell_call_output", "local_shell_call_output":
+		return adapters.ToolDescriptor{Name: "shell", Kind: tools.KindShell, InputMode: tools.InputModeAction, SideEffect: tools.SideEffectExecute, OriginalType: itemType}
+	default:
+		return adapters.ToolDescriptor{Kind: tools.KindFunction, InputMode: tools.InputModeJSON, SideEffect: tools.SideEffectNone, OriginalType: itemType}
+	}
+}
+
+func outputToolDescriptorForCall(item map[string]any, call providers.ChatToolCall) adapters.ToolDescriptor {
+	descriptor := outputToolDescriptor(item)
+	switch call.Function.Name {
+	case "apply_patch":
+		descriptor.Name = "apply_patch"
+		descriptor.Kind = tools.KindPatch
+		descriptor.InputMode = tools.InputModeFreeform
+		descriptor.SideEffect = tools.SideEffectWriteFiles
+	case "tool_search":
+		descriptor.Name = "tool_search"
+		descriptor.Kind = tools.KindToolSearch
+		descriptor.InputMode = tools.InputModeJSON
+		descriptor.SideEffect = tools.SideEffectRead
+	case "shell":
+		descriptor.Name = "shell"
+		descriptor.Kind = tools.KindShell
+		descriptor.InputMode = tools.InputModeAction
+		descriptor.SideEffect = tools.SideEffectExecute
+	default:
+		if call.Function.Name != "" {
+			descriptor.Name = call.Function.Name
+		}
+	}
+	return descriptor
 }
 
 func valueText(value any) string {

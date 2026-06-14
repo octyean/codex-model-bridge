@@ -11,12 +11,20 @@ import (
 )
 
 const (
-	KindFunction    = "function"
-	KindCustom      = "custom"
-	KindApplyPatch  = "apply_patch"
-	KindToolSearch  = "tool_search"
-	KindShell       = "shell"
-	KindUnsupported = "unsupported"
+	KindFunction   = "function"
+	KindCustom     = "custom"
+	KindPatch      = "patch"
+	KindToolSearch = "tool_search"
+	KindShell      = "shell"
+
+	InputModeJSON     = "json"
+	InputModeFreeform = "freeform"
+	InputModeAction   = "action"
+
+	SideEffectNone       = "none"
+	SideEffectRead       = "read"
+	SideEffectWriteFiles = "write_files"
+	SideEffectExecute    = "execute"
 )
 
 var (
@@ -32,11 +40,24 @@ type Context struct {
 }
 
 type Entry struct {
-	Name         string
-	Kind         string
-	Namespace    string
-	OriginalName string
-	OriginalType string
+	Descriptor adapters.ToolDescriptor
+	Namespace  string
+}
+
+func (e Entry) Name() string {
+	return e.Descriptor.Name
+}
+
+func (e Entry) Kind() string {
+	return e.Descriptor.Kind
+}
+
+func (e Entry) OriginalName() string {
+	return e.Descriptor.Name
+}
+
+func (e Entry) OriginalType() string {
+	return e.Descriptor.OriginalType
 }
 
 func FromCodex(responseTools []codex.ResponseTool, adapter adapters.Adapter) ([]providers.ChatTool, Context) {
@@ -45,10 +66,11 @@ func FromCodex(responseTools []codex.ResponseTool, adapter adapters.Adapter) ([]
 	for _, tool := range responseTools {
 		converted := convertTool(tool, adapter)
 		for _, item := range converted {
-			if _, exists := ctx.Tools[item.entry.Name]; exists {
+			name := item.entry.Name()
+			if _, exists := ctx.Tools[name]; exists {
 				continue
 			}
-			ctx.Tools[item.entry.Name] = item.entry
+			ctx.Tools[name] = item.entry
 			out = append(out, item.tool)
 		}
 	}
@@ -76,10 +98,11 @@ func FromAdditionalTools(items []map[string]any, adapter adapters.Adapter, ctx *
 				continue
 			}
 			for _, converted := range convertTool(tool, adapter) {
-				if _, exists := ctx.Tools[converted.entry.Name]; exists {
+				name := converted.entry.Name()
+				if _, exists := ctx.Tools[name]; exists {
 					continue
 				}
-				ctx.Tools[converted.entry.Name] = converted.entry
+				ctx.Tools[name] = converted.entry
 				out = append(out, converted.tool)
 			}
 		}
@@ -89,21 +112,30 @@ func FromAdditionalTools(items []map[string]any, adapter adapters.Adapter, ctx *
 
 func (ctx Context) Entry(name string) Entry {
 	if ctx.Tools == nil {
-		return Entry{Name: name, Kind: KindFunction, OriginalName: name, OriginalType: KindFunction}
+		return newEntry(name, KindFunction, InputModeJSON, SideEffectNone, KindFunction, "", nil)
 	}
 	if entry, ok := ctx.Tools[name]; ok {
 		return entry
 	}
-	return Entry{Name: name, Kind: KindFunction, OriginalName: name, OriginalType: KindFunction}
+	return newEntry(name, KindFunction, InputModeJSON, SideEffectNone, KindFunction, "", nil)
 }
 
 func (ctx Context) IsCustom(name string) bool {
 	entry := ctx.Entry(name)
-	return entry.Kind == KindCustom || entry.Kind == KindApplyPatch
+	return entry.Kind() == KindCustom || entry.Kind() == KindPatch
 }
 
 func (ctx Context) IsEmpty() bool {
 	return len(ctx.Tools) == 0
+}
+
+func (ctx Context) HasFileWriteTool() bool {
+	for _, entry := range ctx.Tools {
+		if entry.Descriptor.SideEffect == SideEffectWriteFiles {
+			return true
+		}
+	}
+	return false
 }
 
 func ExtractCustomInput(arguments string) string {
@@ -121,7 +153,7 @@ func ExtractCustomInput(arguments string) string {
 }
 
 func ExtractCustomToolInput(entry Entry, arguments string, adapter adapters.Adapter) string {
-	return adapter.NormalizeCustomInput(entry.OriginalName, ExtractCustomInput(arguments))
+	return adapter.NormalizeCustomInput(entry.OriginalName(), ExtractCustomInput(arguments))
 }
 
 func ToolChoice(value any, ctx Context) any {
@@ -208,19 +240,11 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 		tool.Name = "apply_patch"
 		return convertCustom(tool, adapter)
 	case "tool_search":
-		return []convertedTool{chatFunction("tool_search", descriptionOrDefault(tool.Description, "Search for deferred tools to load before continuing."), toolSearchParameters, Entry{
-			Name:         "tool_search",
-			Kind:         KindToolSearch,
-			OriginalName: "tool_search",
-			OriginalType: "tool_search",
-		})}
+		entry := newEntry("tool_search", KindToolSearch, InputModeJSON, SideEffectRead, "tool_search", descriptionOrDefault(tool.Description, "Search for deferred tools to load before continuing."), tool.Raw)
+		return []convertedTool{chatFunction(entry, toolSearchParameters)}
 	case "local_shell", "shell":
-		return []convertedTool{chatFunction("shell", descriptionOrDefault(tool.Description, "Run a local shell command through Codex."), shellParameters, Entry{
-			Name:         "shell",
-			Kind:         KindShell,
-			OriginalName: "shell",
-			OriginalType: toolType,
-		})}
+		entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, toolType, descriptionOrDefault(tool.Description, "Run a local shell command through Codex."), tool.Raw)
+		return []convertedTool{chatFunction(entry, shellParameters)}
 	default:
 		name := rawString(tool.Raw, "name", tool.Name)
 		if name == "" {
@@ -266,13 +290,9 @@ func convertFunction(tool codex.ResponseTool, _ adapters.Adapter, namespace stri
 	if len(params) == 0 {
 		params = objectParameters()
 	}
-	return []convertedTool{chatFunction(name, tool.Description, params, Entry{
-		Name:         name,
-		Kind:         kind,
-		Namespace:    namespace,
-		OriginalName: name,
-		OriginalType: "function",
-	})}
+	entry := newEntry(name, kind, InputModeJSON, SideEffectNone, "function", tool.Description, tool.Raw)
+	entry.Namespace = namespace
+	return []convertedTool{chatFunction(entry, params)}
 }
 
 func objectParameters() json.RawMessage {
@@ -286,30 +306,42 @@ func convertCustom(tool codex.ResponseTool, adapter adapters.Adapter) []converte
 	}
 	kind := KindCustom
 	params := customParameters
+	inputMode := InputModeFreeform
+	sideEffect := SideEffectNone
 	if name == "apply_patch" {
-		kind = KindApplyPatch
+		kind = KindPatch
 		params = applyPatchParameters
+		sideEffect = SideEffectWriteFiles
 	}
-	return []convertedTool{chatFunction(name, adapter.CustomToolDescription(name, tool), params, Entry{
-		Name:         name,
-		Kind:         kind,
-		OriginalName: name,
-		OriginalType: rawString(tool.Raw, "type", tool.Type),
-	})}
+	entry := newEntry(name, kind, inputMode, sideEffect, rawString(tool.Raw, "type", tool.Type), tool.Description, tool.Raw)
+	entry.Descriptor.Description = adapter.CustomToolDescription(entry.Descriptor)
+	return []convertedTool{chatFunction(entry, params)}
 }
 
-func chatFunction(name string, description string, parameters json.RawMessage, entry Entry) convertedTool {
+func chatFunction(entry Entry, parameters json.RawMessage) convertedTool {
 	return convertedTool{
 		tool: providers.ChatTool{
 			Type: "function",
 			Function: providers.ChatFunction{
-				Name:        name,
-				Description: description,
+				Name:        entry.Name(),
+				Description: entry.Descriptor.Description,
 				Parameters:  parameters,
 			},
 		},
 		entry: entry,
 	}
+}
+
+func newEntry(name string, kind string, inputMode string, sideEffect string, originalType string, description string, raw map[string]any) Entry {
+	return Entry{Descriptor: adapters.ToolDescriptor{
+		Name:         name,
+		Kind:         kind,
+		InputMode:    inputMode,
+		SideEffect:   sideEffect,
+		OriginalType: originalType,
+		Description:  description,
+		Raw:          raw,
+	}}
 }
 
 func responseToolFromMap(toolMap map[string]any) (codex.ResponseTool, bool) {

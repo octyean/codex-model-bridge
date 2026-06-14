@@ -4,7 +4,6 @@ import (
 	"sort"
 	"strings"
 
-	"codex-bridge/internal/codex"
 	"codex-bridge/internal/providers"
 )
 
@@ -39,13 +38,15 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 	return req
 }
 
-func (deepSeekAdapter) CustomToolDescription(name string, tool codex.ResponseTool) string {
-	if name != "apply_patch" {
-		return defaultAdapter{}.CustomToolDescription(name, tool)
+func (deepSeekAdapter) CustomToolDescription(tool ToolDescriptor) string {
+	if tool.Kind != "patch" {
+		return defaultAdapter{}.CustomToolDescription(tool)
 	}
 	parts := []string{
-		"Submit a complete Codex apply_patch patch as the input string.",
-		"The input must start with *** Begin Patch and end with *** End Patch.",
+		"This is Codex's file-editing patch tool encoded through Chat Completions. Treat it as a freeform patch, not as a normal JSON function payload.",
+		"The input string must start with *** Begin Patch and end with *** End Patch.",
+		"Use small, exact context from the current file. If a patch fails to find context, read the current target lines again before retrying.",
+		"Blank context lines are significant and must keep the patch line prefix. Do not use stale context from a previous failed edit.",
 		"Do not wrap the patch in Markdown fences, JSON text, or explanatory prose.",
 		"Example: *** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n",
 	}
@@ -62,6 +63,17 @@ func (deepSeekAdapter) NormalizeCustomInput(name string, input string) string {
 		return normalizeApplyPatchInput(input)
 	}
 	return input
+}
+
+func (deepSeekAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
+	if tool.Kind == "patch" && isPatchContextMismatch(output) {
+		return output + "\n\nTool result semantics: the patch was not applied because its context did not match the current file. This is recoverable. Before retrying, inspect the current target lines and generate a smaller patch with exact current context."
+	}
+	return DefaultToolOutput(tool, output)
+}
+
+func isPatchContextMismatch(output string) bool {
+	return strings.Contains(output, "Failed to find context")
 }
 
 func stableTools(tools []providers.ChatTool) []providers.ChatTool {

@@ -14,10 +14,30 @@ func TestChatCompletionsURL(t *testing.T) {
 		{name: "base", base: "https://api.deepseek.com", want: "https://api.deepseek.com/chat/completions"},
 		{name: "v1", base: "https://example.test/v1", want: "https://example.test/v1/chat/completions"},
 		{name: "full path", base: "https://example.test/v1/chat/completions", want: "https://example.test/v1/chat/completions"},
+		{name: "responses path", base: "https://example.test/v1/responses", want: "https://example.test/v1/chat/completions"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := chatCompletionsURL(tc.base); got != tc.want {
+				t.Fatalf("url = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResponsesURL(t *testing.T) {
+	tests := []struct {
+		name string
+		base string
+		want string
+	}{
+		{name: "v1", base: "https://example.test/v1", want: "https://example.test/v1/responses"},
+		{name: "chat path", base: "https://example.test/v1/chat/completions", want: "https://example.test/v1/responses"},
+		{name: "responses path", base: "https://example.test/v1/responses", want: "https://example.test/v1/responses"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := responsesURL(tc.base); got != tc.want {
 				t.Fatalf("url = %q, want %q", got, tc.want)
 			}
 		})

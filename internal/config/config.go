@@ -40,10 +40,11 @@ type CodexConfig struct {
 }
 
 type ProviderConfig struct {
-	Type    string `toml:"type"`
-	BaseURL string `toml:"base_url"`
-	APIKey  string `toml:"api_key"`
-	Profile string `toml:"profile"`
+	Type     string `toml:"type"`
+	BaseURL  string `toml:"base_url"`
+	APIKey   string `toml:"api_key"`
+	Profile  string `toml:"profile"`
+	Protocol string `toml:"protocol"`
 }
 
 type ModelDiscoveryConfig struct {
@@ -197,8 +198,15 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf("codex.default_model %q is not configured", cfg.Codex.DefaultModel)
 	}
 	for name, provider := range cfg.Providers {
-		if provider.Type != "openai_chat_compatible" {
-			return fmt.Errorf("providers.%s.type must be openai_chat_compatible", name)
+		if provider.Type != "openai_chat_compatible" && provider.Type != "openai_compatible" {
+			return fmt.Errorf("providers.%s.type must be openai_compatible or openai_chat_compatible", name)
+		}
+		if provider.Protocol != "" {
+			switch provider.Protocol {
+			case "auto", "chat_completions", "responses":
+			default:
+				return fmt.Errorf("providers.%s.protocol must be auto, chat_completions, or responses", name)
+			}
 		}
 		if provider.BaseURL == "" {
 			return fmt.Errorf("providers.%s.base_url is required", name)
@@ -347,6 +355,26 @@ func (cfg *Config) ProfileName(model ModelConfig, provider ProviderConfig) strin
 	return adapters.DefaultName
 }
 
+func (cfg *Config) UpstreamProtocol(model ModelConfig, provider ProviderConfig) string {
+	switch provider.Protocol {
+	case "responses", "chat_completions":
+		return provider.Protocol
+	case "auto":
+		if isOpenAINativeModel(model.UpstreamModel) {
+			return "responses"
+		}
+	}
+	if provider.Protocol == "" && provider.Type == "openai_compatible" && isOpenAINativeModel(model.UpstreamModel) {
+		return "responses"
+	}
+	return "chat_completions"
+}
+
+func isOpenAINativeModel(model string) bool {
+	value := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(value, "gpt-") || strings.HasPrefix(value, "o3") || strings.HasPrefix(value, "o4")
+}
+
 func (cfg *Config) BridgeBaseURL() string {
 	return BridgeBaseURL(cfg.Server.Listen)
 }
@@ -395,15 +423,11 @@ func (cfg *Config) Catalog() ModelsResponse {
 		inputModalities = adapters.NormalizeInputModalities(inputModalities)
 		contextWindow := model.ContextWindow
 		models = append(models, ModelInfo{
-			Slug:                  slug,
-			DisplayName:           model.DisplayName,
-			Description:           model.DisplayName + " through Codex Bridge",
-			DefaultReasoningLevel: "medium",
-			SupportedReasoningLevels: []ReasoningEffortPreset{
-				{Effort: "low", Description: "Fast responses with lighter reasoning"},
-				{Effort: "medium", Description: "Balanced reasoning for coding tasks"},
-				{Effort: "high", Description: "Deeper reasoning for complex changes"},
-			},
+			Slug:                       slug,
+			DisplayName:                model.DisplayName,
+			Description:                model.DisplayName + " through Codex Bridge",
+			DefaultReasoningLevel:      "medium",
+			SupportedReasoningLevels:   reasoningLevelsForModel(model),
 			ShellType:                  "shell_command",
 			Visibility:                 "list",
 			SupportedInAPI:             true,
@@ -436,6 +460,18 @@ func (cfg *Config) Catalog() ModelsResponse {
 		})
 	}
 	return ModelsResponse{Models: models}
+}
+
+func reasoningLevelsForModel(model ModelConfig) []ReasoningEffortPreset {
+	levels := []ReasoningEffortPreset{
+		{Effort: "low", Description: "Fast responses with lighter reasoning"},
+		{Effort: "medium", Description: "Balanced reasoning for coding tasks"},
+		{Effort: "high", Description: "Deeper reasoning for complex changes"},
+	}
+	if isOpenAINativeModel(model.UpstreamModel) {
+		levels = append(levels, ReasoningEffortPreset{Effort: "xhigh", Description: "Maximum reasoning for the hardest coding tasks"})
+	}
+	return levels
 }
 
 func (cfg *Config) WriteCatalog() error {

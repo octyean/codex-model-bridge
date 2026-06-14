@@ -18,9 +18,21 @@ type ChatProvider interface {
 	ListModels(ctx context.Context) (*ModelsResponse, error)
 }
 
+type ResponsesProvider interface {
+	CreateResponse(ctx context.Context, req map[string]any) (map[string]any, error)
+	StreamResponse(ctx context.Context, req map[string]any) (<-chan ResponseStreamEvent, error)
+}
+
+type ResponseStreamEvent struct {
+	Data map[string]any
+	Done bool
+	Err  error
+}
+
 type OpenAIChatClient struct {
 	baseURL   string
 	chatURL   string
+	respURL   string
 	modelsURL string
 	apiKey    string
 	client    *http.Client
@@ -31,6 +43,7 @@ func NewOpenAIChatClient(baseURL string, apiKey string) *OpenAIChatClient {
 	return &OpenAIChatClient{
 		baseURL:   baseURL,
 		chatURL:   chatCompletionsURL(baseURL),
+		respURL:   responsesURL(baseURL),
 		modelsURL: modelsURL(baseURL),
 		apiKey:    apiKey,
 		client: &http.Client{
@@ -157,6 +170,16 @@ func (c *OpenAIChatClient) Create(ctx context.Context, req ChatCompletionRequest
 	return &resp, nil
 }
 
+func (c *OpenAIChatClient) CreateResponse(ctx context.Context, req map[string]any) (map[string]any, error) {
+	req = cloneMap(req)
+	req["stream"] = false
+	var resp map[string]any
+	if err := c.doResponseJSON(ctx, req, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 func (c *OpenAIChatClient) ListModels(ctx context.Context) (*ModelsResponse, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.modelsURL, nil)
 	if err != nil {
@@ -176,6 +199,60 @@ func (c *OpenAIChatClient) ListModels(ctx context.Context) (*ModelsResponse, err
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *OpenAIChatClient) StreamResponse(ctx context.Context, req map[string]any) (<-chan ResponseStreamEvent, error) {
+	req = cloneMap(req)
+	req["stream"] = true
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.respURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.applyHeaders(httpReq)
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		return nil, readHTTPError(resp)
+	}
+
+	out := make(chan ResponseStreamEvent, 32)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "[DONE]" {
+				out <- ResponseStreamEvent{Done: true}
+				return
+			}
+			var event map[string]any
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				out <- ResponseStreamEvent{Err: err}
+				return
+			}
+			out <- ResponseStreamEvent{Data: event}
+		}
+		if err := scanner.Err(); err != nil {
+			out <- ResponseStreamEvent{Err: err}
+		}
+	}()
+	return out, nil
 }
 
 func (c *OpenAIChatClient) Stream(ctx context.Context, req ChatCompletionRequest) (<-chan StreamEvent, error) {
@@ -252,6 +329,27 @@ func (c *OpenAIChatClient) doJSON(ctx context.Context, req ChatCompletionRequest
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func (c *OpenAIChatClient) doResponseJSON(ctx context.Context, req map[string]any, out any) error {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.respURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.applyHeaders(httpReq)
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return readHTTPError(resp)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 func (c *OpenAIChatClient) applyHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -268,13 +366,30 @@ func chatCompletionsURL(baseURL string) string {
 	if strings.HasSuffix(base, "/chat/completions") {
 		return base
 	}
+	if strings.HasSuffix(base, "/responses") {
+		base = strings.TrimSuffix(base, "/responses")
+	}
 	return base + "/chat/completions"
+}
+
+func responsesURL(baseURL string) string {
+	base := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(base, "/responses") {
+		return base
+	}
+	if strings.HasSuffix(base, "/chat/completions") {
+		base = strings.TrimSuffix(base, "/chat/completions")
+	}
+	return base + "/responses"
 }
 
 func modelsURL(baseURL string) string {
 	base := strings.TrimRight(baseURL, "/")
 	if strings.HasSuffix(base, "/chat/completions") {
 		base = strings.TrimSuffix(base, "/chat/completions")
+	}
+	if strings.HasSuffix(base, "/responses") {
+		base = strings.TrimSuffix(base, "/responses")
 	}
 	if strings.HasSuffix(base, "/models") {
 		return base
@@ -397,4 +512,12 @@ func intValue(obj map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	out := make(map[string]any, len(value))
+	for key, item := range value {
+		out[key] = item
+	}
+	return out
 }

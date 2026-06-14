@@ -41,6 +41,28 @@ func TestCatalogIncludesCodexModelFields(t *testing.T) {
 	}
 }
 
+func TestCatalogIncludesXHighForOpenAINativeModels(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}
+	cfg.Models["m"] = ModelConfig{
+		DisplayName: "GPT", Provider: "p", UpstreamModel: "gpt-5.4",
+		ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+	}
+	catalog := cfg.Catalog()
+	if !hasReasoningEffort(catalog.Models[0].SupportedReasoningLevels, "xhigh") {
+		t.Fatalf("reasoning levels = %#v", catalog.Models[0].SupportedReasoningLevels)
+	}
+}
+
+func hasReasoningEffort(levels []ReasoningEffortPreset, effort string) bool {
+	for _, level := range levels {
+		if level.Effort == effort {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProfileNameUsesModelThenProvider(t *testing.T) {
 	cfg := &Config{}
 	provider := ProviderConfig{Profile: "deepseek"}
@@ -51,6 +73,25 @@ func TestProfileNameUsesModelThenProvider(t *testing.T) {
 	model.Profile = "default"
 	if got := cfg.ProfileName(model, provider); got != "default" {
 		t.Fatalf("model profile = %q", got)
+	}
+}
+
+func TestUpstreamProtocol(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.UpstreamProtocol(ModelConfig{UpstreamModel: "gpt-5.4"}, ProviderConfig{Type: "openai_compatible"}); got != "responses" {
+		t.Fatalf("openai compatible gpt protocol = %q", got)
+	}
+	if got := cfg.UpstreamProtocol(ModelConfig{UpstreamModel: "gpt-5.4"}, ProviderConfig{Type: "openai_chat_compatible"}); got != "chat_completions" {
+		t.Fatalf("legacy gpt protocol = %q", got)
+	}
+	if got := cfg.UpstreamProtocol(ModelConfig{UpstreamModel: "gpt-5.4"}, ProviderConfig{Protocol: "auto"}); got != "responses" {
+		t.Fatalf("gpt auto protocol = %q", got)
+	}
+	if got := cfg.UpstreamProtocol(ModelConfig{UpstreamModel: "deepseek-v4-flash"}, ProviderConfig{Protocol: "auto"}); got != "chat_completions" {
+		t.Fatalf("deepseek auto protocol = %q", got)
+	}
+	if got := cfg.UpstreamProtocol(ModelConfig{UpstreamModel: "deepseek-v4-flash"}, ProviderConfig{Protocol: "responses"}); got != "responses" {
+		t.Fatalf("explicit responses protocol = %q", got)
 	}
 }
 
@@ -86,6 +127,16 @@ func TestValidateRejectsUnknownProfile(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatalf("expected unknown profile validation error")
+	}
+}
+
+func TestValidateRejectsUnknownProviderProtocol(t *testing.T) {
+	cfg := validTestConfig()
+	provider := cfg.Providers["p"]
+	provider.Protocol = "unknown"
+	cfg.Providers["p"] = provider
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected unknown protocol validation error")
 	}
 }
 

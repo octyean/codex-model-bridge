@@ -25,6 +25,38 @@ type fakeProvider struct {
 	responses    []providers.ChatCompletionResponse
 }
 
+type fakeResponsesProvider struct {
+	fakeProvider
+	responseReq       map[string]any
+	streamResponseReq map[string]any
+	streamEvents      []providers.ResponseStreamEvent
+}
+
+func (p *fakeResponsesProvider) CreateResponse(_ context.Context, req map[string]any) (map[string]any, error) {
+	p.responseReq = req
+	return map[string]any{
+		"id":         "resp_test",
+		"object":     "response",
+		"created_at": float64(123),
+		"model":      req["model"],
+		"status":     "completed",
+		"output":     []any{},
+	}, nil
+}
+
+func (p *fakeResponsesProvider) StreamResponse(_ context.Context, req map[string]any) (<-chan providers.ResponseStreamEvent, error) {
+	p.streamResponseReq = req
+	out := make(chan providers.ResponseStreamEvent, len(p.streamEvents)+1)
+	go func() {
+		defer close(out)
+		for _, event := range p.streamEvents {
+			out <- event
+		}
+		out <- providers.ResponseStreamEvent{Done: true}
+	}()
+	return out, nil
+}
+
 func (p *fakeProvider) Create(_ context.Context, req providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
 	p.req = req
 	p.reqs = append(p.reqs, req)
@@ -53,6 +85,50 @@ func (p *fakeProvider) Create(_ context.Context, req providers.ChatCompletionReq
 			FinishReason: "tool_calls",
 		}},
 	}, nil
+}
+
+func TestResponsesEndpointForwardsNativeResponsesForAutoGPTModel(t *testing.T) {
+	provider := &fakeResponsesProvider{}
+	cfg := testConfig()
+	cfg.Providers["fake"] = config.ProviderConfig{Profile: adapters.DefaultName, Protocol: "auto"}
+	cfg.Models["deepseek-v4-flash"] = config.ModelConfig{
+		Provider:           "fake",
+		UpstreamModel:      "gpt-5.4",
+		ApplyPatchToolType: "freeform",
+	}
+	handler := New(cfg, map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"think",
+		"reasoning":{"effort":"high","summary":"auto"},
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if provider.responseReq == nil {
+		t.Fatalf("native responses request was not sent")
+	}
+	if provider.responseReq["model"] != "gpt-5.4" {
+		t.Fatalf("upstream model = %#v", provider.responseReq["model"])
+	}
+	reasoning, ok := provider.responseReq["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "high" {
+		t.Fatalf("reasoning = %#v", provider.responseReq["reasoning"])
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["model"] != "deepseek-v4-flash" {
+		t.Fatalf("response model = %#v", resp["model"])
+	}
 }
 
 func (p *fakeProvider) Stream(_ context.Context, req providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
@@ -174,6 +250,54 @@ func TestResponsesEndpointKeepsToolChoice(t *testing.T) {
 	}
 	if provider.req.ToolChoice != "none" {
 		t.Fatalf("tool_choice = %#v", provider.req.ToolChoice)
+	}
+}
+
+func TestResponsesEndpointDisablesParallelToolCallsForFileWrites(t *testing.T) {
+	provider := &fakeProvider{}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"edit file",
+		"tools":[{"type":"custom","name":"apply_patch"}],
+		"parallel_tool_calls":true,
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if provider.req.ParallelToolCalls == nil || *provider.req.ParallelToolCalls {
+		t.Fatalf("parallel tool calls = %#v", provider.req.ParallelToolCalls)
+	}
+}
+
+func TestResponsesEndpointKeepsParallelToolCallsForReadOnlyTools(t *testing.T) {
+	provider := &fakeProvider{}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"search tools",
+		"tools":[{"type":"tool_search"}],
+		"parallel_tool_calls":true,
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if provider.req.ParallelToolCalls == nil || !*provider.req.ParallelToolCalls {
+		t.Fatalf("parallel tool calls = %#v", provider.req.ParallelToolCalls)
 	}
 }
 
