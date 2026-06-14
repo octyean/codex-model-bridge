@@ -110,3 +110,55 @@ experimental_bearer_token = "old-token"
 		}
 	}
 }
+
+func TestConfigureUsesExistingModelProviderWhenProviderNameIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	before := `model_provider = "mcodex"
+model = "gpt-5.5"
+
+[model_providers.mcodex]
+name = "mcodex"
+base_url = "http://upstream.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+`
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := Configure(Settings{
+		CodexHome:           dir,
+		ProviderDisplayName: "mcodex",
+		BaseURL:             "http://127.0.0.1:8787/v1",
+		ModelCatalogPath:    filepath.Join(dir, "models.codex-bridge.json"),
+		DefaultModel:        "deepseek-v4-flash",
+		BearerToken:         "new-token",
+	})
+	if err != nil {
+		t.Fatalf("configure codex: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`model_provider = "mcodex"`,
+		`model = "gpt-5.5"`,
+		`[model_providers.mcodex]`,
+		`base_url = "http://127.0.0.1:8787/v1"`,
+		`experimental_bearer_token = "new-token"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{
+		`[model_providers.codex_bridge]`,
+		`requires_openai_auth`,
+	} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("config should not contain %q:\n%s", unwanted, text)
+		}
+	}
+}

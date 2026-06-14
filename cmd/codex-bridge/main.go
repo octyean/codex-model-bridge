@@ -51,7 +51,7 @@ func main() {
 	flags := flag.NewFlagSet(command, flag.ExitOnError)
 	configPath := flags.String("config", defaultConfigPath, "Path to codex-bridge config")
 	codexHome := flags.String("codex-home", "", "Path to Codex home, defaults to CODEX_HOME or ~/.codex")
-	providerName := flags.String("provider-name", "codex_bridge", "Codex model provider name to write")
+	providerName := flags.String("provider-name", "", "Codex model provider name to write")
 	providerDisplayName := flags.String("provider-display-name", "Codex Bridge", "Codex model provider display name")
 	baseURL := flags.String("base-url", "", "Bridge base URL to write into Codex config, defaults to server.listen + /v1")
 	if err := flags.Parse(args); err != nil {

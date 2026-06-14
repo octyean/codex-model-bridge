@@ -12,6 +12,7 @@ import (
 const (
 	DefaultName  = "default"
 	DeepSeekName = "deepseek"
+	MimoName     = "mimo"
 )
 
 type Capabilities struct {
@@ -147,4 +148,5 @@ func canonicalValue(value any) any {
 var registry = map[string]Adapter{
 	DefaultName:  defaultAdapter{},
 	DeepSeekName: deepSeekAdapter{},
+	MimoName:     mimoAdapter{},
 }

@@ -57,9 +57,6 @@ func withDefaults(settings Settings) Settings {
 			settings.CodexHome = filepath.Join(home, ".codex")
 		}
 	}
-	if strings.TrimSpace(settings.ProviderName) == "" {
-		settings.ProviderName = "codex_bridge"
-	}
 	if strings.TrimSpace(settings.ProviderDisplayName) == "" {
 		settings.ProviderDisplayName = "Codex Bridge"
 	}
@@ -68,6 +65,7 @@ func withDefaults(settings Settings) Settings {
 
 func updateConfigText(input string, settings Settings) string {
 	lines := splitLines(input)
+	settings.ProviderName = effectiveProviderName(lines, settings.ProviderName)
 	if !hasTopLevelValue(lines, "model_provider") && !hasTopLevelValue(lines, "model") {
 		lines = setTopLevelValue(lines, "model_provider", settings.ProviderName)
 		lines = setTopLevelValue(lines, "model", settings.DefaultModel)
@@ -75,6 +73,16 @@ func updateConfigText(input string, settings Settings) string {
 	lines = setTopLevelValue(lines, "model_catalog_json", settings.ModelCatalogPath)
 	lines = setProviderTable(lines, settings)
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n"
+}
+
+func effectiveProviderName(lines []string, configured string) string {
+	if name := strings.TrimSpace(configured); name != "" {
+		return name
+	}
+	if name := topLevelStringValue(lines, "model_provider"); name != "" {
+		return name
+	}
+	return "codex_bridge"
 }
 
 func splitLines(input string) []string {
@@ -117,6 +125,29 @@ func hasTopLevelValue(lines []string, key string) bool {
 	return false
 }
 
+func topLevelStringValue(lines []string, key string) string {
+	for _, current := range lines {
+		trimmed := strings.TrimSpace(current)
+		if isTableHeader(trimmed) {
+			return ""
+		}
+		if keyOf(trimmed) != key {
+			continue
+		}
+		index := strings.Index(trimmed, "=")
+		if index < 0 {
+			return ""
+		}
+		value := strings.TrimSpace(trimmed[index+1:])
+		unquoted, err := strconv.Unquote(value)
+		if err == nil {
+			return strings.TrimSpace(unquoted)
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
 func setProviderTable(lines []string, settings Settings) []string {
 	header := "[model_providers." + settings.ProviderName + "]"
 	values := map[string]string{
@@ -145,6 +176,14 @@ func setProviderTable(lines []string, settings Settings) []string {
 		lines = append(lines, header)
 		start = len(lines) - 1
 		end = len(lines)
+	}
+	for i := start + 1; i < end; {
+		if keyOf(strings.TrimSpace(lines[i])) == "requires_openai_auth" {
+			lines = append(lines[:i], lines[i+1:]...)
+			end--
+			continue
+		}
+		i++
 	}
 	order := []string{"name", "base_url", "wire_api", "experimental_bearer_token"}
 	for _, key := range order {

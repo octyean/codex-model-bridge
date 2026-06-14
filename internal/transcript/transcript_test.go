@@ -79,6 +79,23 @@ func TestVisionInputKeepsImageParts(t *testing.T) {
 	}
 }
 
+func TestMimoInputKeepsImageParts(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_image","image_url":"https://x/y.png","detail":"original"}]}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	parts, ok := result.Messages[0].Content.([]map[string]any)
+	if !ok {
+		t.Fatalf("content = %#v", result.Messages[0].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts = %#v", parts)
+	}
+}
+
 type visionAdapter struct {
 	adapters.Adapter
 }
