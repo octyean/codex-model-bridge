@@ -424,6 +424,7 @@ func (cfg *Config) Catalog() ModelsResponse {
 		provider := cfg.Providers[model.Provider]
 		adapter := adapters.Get(cfg.ProfileName(model, provider))
 		caps := adapter.Capabilities()
+		isOpenAIModel := isOpenAINativeModel(model.UpstreamModel)
 		inputModalities := model.InputModalities
 		if len(inputModalities) == 0 {
 			inputModalities = caps.InputModalities
@@ -446,9 +447,9 @@ func (cfg *Config) Catalog() ModelsResponse {
 			Upgrade:                    nil,
 			BaseInstructions:           "",
 			ModelMessages:              nil,
-			SupportsReasoningSummaries: false,
-			SupportVerbosity:           false,
-			DefaultVerbosity:           nil,
+			SupportsReasoningSummaries: isOpenAIModel,
+			SupportVerbosity:           isOpenAIModel,
+			DefaultVerbosity:           defaultVerbosityForModel(model),
 			ApplyPatchToolType:         model.ApplyPatchToolType,
 			WebSearchToolType:          "text",
 			TruncationPolicy: TruncationPolicy{
@@ -480,6 +481,13 @@ func reasoningLevelsForModel(model ModelConfig) []ReasoningEffortPreset {
 		levels = append(levels, ReasoningEffortPreset{Effort: "xhigh", Description: "Maximum reasoning for the hardest coding tasks"})
 	}
 	return levels
+}
+
+func defaultVerbosityForModel(model ModelConfig) any {
+	if isOpenAINativeModel(model.UpstreamModel) {
+		return "medium"
+	}
+	return nil
 }
 
 func (cfg *Config) WriteCatalog() error {

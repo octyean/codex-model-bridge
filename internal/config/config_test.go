@@ -71,6 +71,15 @@ func TestOpenAINativeModelDefaultsToImageInput(t *testing.T) {
 	if !catalog.Models[0].SupportsImageDetailOriginal {
 		t.Fatalf("expected original image detail support")
 	}
+	if !catalog.Models[0].SupportsReasoningSummaries {
+		t.Fatalf("expected reasoning summaries support")
+	}
+	if !catalog.Models[0].SupportVerbosity {
+		t.Fatalf("expected verbosity support")
+	}
+	if catalog.Models[0].DefaultVerbosity != "medium" {
+		t.Fatalf("default verbosity = %#v", catalog.Models[0].DefaultVerbosity)
+	}
 }
 
 func TestOpenAINativeModelProfileCanBeOverriddenAtModelLevel(t *testing.T) {
@@ -111,6 +120,15 @@ func TestDeepSeekModelStaysTextOnly(t *testing.T) {
 	catalog := cfg.Catalog()
 	if containsString(catalog.Models[0].InputModalities, "image") {
 		t.Fatalf("deepseek should stay text-only: %#v", catalog.Models[0].InputModalities)
+	}
+	if catalog.Models[0].SupportsReasoningSummaries {
+		t.Fatalf("deepseek should not advertise reasoning summaries")
+	}
+	if catalog.Models[0].SupportVerbosity {
+		t.Fatalf("deepseek should not advertise verbosity")
+	}
+	if catalog.Models[0].DefaultVerbosity != nil {
+		t.Fatalf("deepseek default verbosity = %#v", catalog.Models[0].DefaultVerbosity)
 	}
 }
 
