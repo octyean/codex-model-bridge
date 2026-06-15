@@ -12,6 +12,7 @@ const (
 	DefaultName  = "default"
 	DeepSeekName = "deepseek"
 	MimoName     = "mimo"
+	OpenAIName   = "openai"
 )
 
 type Capabilities struct {
@@ -24,10 +25,16 @@ type Capabilities struct {
 type Adapter interface {
 	Name() string
 	Capabilities() Capabilities
+	ToolPolicy() ToolPolicy
 	PrepareChatRequest(providers.ChatCompletionRequest) providers.ChatCompletionRequest
 	CustomToolDescription(tool ToolDescriptor) string
 	NormalizeCustomInput(name string, input string) string
+	NormalizePatchInput(input string) string
 	FormatToolOutput(tool ToolDescriptor, output string) string
+}
+
+type ToolPolicy struct {
+	BlockShellFileWrites bool
 }
 
 type ToolDescriptor struct {
@@ -111,22 +118,7 @@ func NormalizeInputModalities(values []string) []string {
 }
 
 func normalizeApplyPatchInput(input string) string {
-	text := strings.ReplaceAll(input, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	text = strings.TrimSpace(text)
-	if strings.HasPrefix(text, "```") {
-		lines := strings.Split(text, "\n")
-		if len(lines) >= 2 {
-			if strings.HasPrefix(strings.TrimSpace(lines[0]), "```") {
-				lines = lines[1:]
-			}
-			if strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "```") {
-				lines = lines[:len(lines)-1]
-			}
-			text = strings.TrimSpace(strings.Join(lines, "\n"))
-		}
-	}
-	return text
+	return NormalizePatchInput(input)
 }
 
 func canonicalJSON(value any) string {
@@ -165,4 +157,5 @@ var registry = map[string]Adapter{
 	DefaultName:  defaultAdapter{},
 	DeepSeekName: deepSeekAdapter{},
 	MimoName:     mimoAdapter{},
+	OpenAIName:   openAIAdapter{},
 }

@@ -209,7 +209,25 @@ func TestDeepSeekApplyPatchContextFailureCarriesRecoverySemantics(t *testing.T) 
 		t.Fatalf("messages = %#v", result.Messages)
 	}
 	content, _ := result.Messages[0].Content.(string)
-	if !strings.Contains(content, "inspect the current target lines") || !strings.Contains(content, "smaller patch") {
+	if !strings.Contains(content, "APPLY_PATCH_CONTEXT_MISMATCH") ||
+		!strings.Contains(content, "required_next_action: inspect_current_file") ||
+		!strings.Contains(content, "forbidden_next_action: retry_same_patch") {
+		t.Fatalf("tool output = %q", content)
+	}
+}
+
+func TestDeepSeekApplyPatchExpectedLinesFailureCarriesRecoveryProtocol(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"apply_patch_call_output","call_id":"call_1","output":"apply_patch verification failed: Failed to find expected lines in /tmp/file:\n   <view"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	content, _ := result.Messages[0].Content.(string)
+	if !strings.Contains(content, "APPLY_PATCH_CONTEXT_MISMATCH") ||
+		!strings.Contains(content, "required_next_action: inspect_current_file") ||
+		!strings.Contains(content, "forbidden_next_action: retry_same_patch") {
 		t.Fatalf("tool output = %q", content)
 	}
 }
@@ -217,7 +235,7 @@ func TestDeepSeekApplyPatchContextFailureCarriesRecoverySemantics(t *testing.T) 
 func TestDeepSeekCustomApplyPatchOutputCarriesRecoverySemantics(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
-		{"type":"custom_tool_call_output","call_id":"call_1","output":"Failed to find context"}
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"apply_patch verification failed: Failed to find expected lines in /tmp/file:\n   <view"}
 	]`)
 	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
 	if err != nil {
@@ -227,7 +245,24 @@ func TestDeepSeekCustomApplyPatchOutputCarriesRecoverySemantics(t *testing.T) {
 		t.Fatalf("messages = %#v", result.Messages)
 	}
 	content, _ := result.Messages[1].Content.(string)
-	if !strings.Contains(content, "inspect the current target lines") || !strings.Contains(content, "smaller patch") {
+	if !strings.Contains(content, "APPLY_PATCH_CONTEXT_MISMATCH") ||
+		!strings.Contains(content, "required_next_action: inspect_current_file") ||
+		!strings.Contains(content, "forbidden_next_action: retry_same_patch") {
 		t.Fatalf("tool output = %q", content)
+	}
+}
+
+func TestDeepSeekPlainCustomOutputDoesNotUsePatchRecoveryProtocol(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"custom_tool_call","call_id":"call_1","name":"custom_tool","input":"x"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"Failed to find expected lines"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	content, _ := result.Messages[1].Content.(string)
+	if strings.Contains(content, "APPLY_PATCH_CONTEXT_MISMATCH") {
+		t.Fatalf("plain custom output should not be treated as patch: %q", content)
 	}
 }

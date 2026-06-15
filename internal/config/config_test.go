@@ -54,9 +54,62 @@ func TestCatalogIncludesXHighForOpenAINativeModels(t *testing.T) {
 	}
 }
 
+func TestOpenAINativeModelDefaultsToImageInput(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}
+	cfg.Models["m"] = ModelConfig{
+		DisplayName: "GPT", Provider: "p", UpstreamModel: "gpt-5.4",
+		ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+	}
+	catalog := cfg.Catalog()
+	if got := cfg.ProfileName(cfg.Models["m"], cfg.Providers["p"]); got != "openai" {
+		t.Fatalf("profile = %q", got)
+	}
+	if !containsString(catalog.Models[0].InputModalities, "image") {
+		t.Fatalf("input modalities = %#v", catalog.Models[0].InputModalities)
+	}
+	if !catalog.Models[0].SupportsImageDetailOriginal {
+		t.Fatalf("expected original image detail support")
+	}
+}
+
+func TestOpenAINativeModelProfileCanBeOverriddenAtModelLevel(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}
+	cfg.Models["m"] = ModelConfig{
+		DisplayName: "GPT", Provider: "p", UpstreamModel: "gpt-5.4", Profile: "mimo",
+		ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+	}
+	if got := cfg.ProfileName(cfg.Models["m"], cfg.Providers["p"]); got != "mimo" {
+		t.Fatalf("profile = %q", got)
+	}
+}
+
+func TestDeepSeekModelStaysTextOnly(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "deepseek"}
+	cfg.Models["m"] = ModelConfig{
+		DisplayName: "DeepSeek", Provider: "p", UpstreamModel: "deepseek-v4-flash",
+		ContextWindow: 64000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+	}
+	catalog := cfg.Catalog()
+	if containsString(catalog.Models[0].InputModalities, "image") {
+		t.Fatalf("deepseek should stay text-only: %#v", catalog.Models[0].InputModalities)
+	}
+}
+
 func hasReasoningEffort(levels []ReasoningEffortPreset, effort string) bool {
 	for _, level := range levels {
 		if level.Effort == effort {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}

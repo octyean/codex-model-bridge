@@ -33,7 +33,10 @@ func TestExtractCustomInput(t *testing.T) {
 func TestDeepSeekApplyPatchDescription(t *testing.T) {
 	chatTools, _ := FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.DeepSeekName))
 	description := chatTools[0].Function.Description
-	if !strings.Contains(description, "*** Begin Patch") || !strings.Contains(description, "*** End Patch") || !strings.Contains(description, "read the current target lines again") {
+	if !strings.Contains(description, "*** Begin Patch") ||
+		!strings.Contains(description, "*** End Patch") ||
+		!strings.Contains(description, "APPLY_PATCH_CONTEXT_MISMATCH") ||
+		!strings.Contains(description, "Whitespace inside hunks is significant") {
 		t.Fatalf("description should include patch boundaries: %q", description)
 	}
 }
@@ -43,6 +46,35 @@ func TestNormalizeCustomInputRemovesMarkdownFence(t *testing.T) {
 	want := "*** Begin Patch\n*** End Patch"
 	if got != want {
 		t.Fatalf("normalized input = %q, want %q", got, want)
+	}
+}
+
+func TestExtractPatchCustomToolInputFromJSONEnvelope(t *testing.T) {
+	_, ctx := FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.DeepSeekName))
+	entry := ctx.Entry("apply_patch")
+	got := ExtractCustomToolInput(entry, `{"patch":"*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"}`, adapters.Get(adapters.DeepSeekName))
+	want := "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch"
+	if got != want {
+		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestExtractPatchCustomToolInputFromNestedArguments(t *testing.T) {
+	_, ctx := FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.DeepSeekName))
+	entry := ctx.Entry("apply_patch")
+	got := ExtractCustomToolInput(entry, "{\"arguments\":{\"content\":\"```patch\\n*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\\n```\"}}", adapters.Get(adapters.DeepSeekName))
+	want := "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch"
+	if got != want {
+		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestPlainCustomToolDoesNotUsePatchEnvelopeKeys(t *testing.T) {
+	_, ctx := FromCodex([]codex.ResponseTool{{Type: "custom", Name: "custom_tool"}}, adapters.Get(adapters.DeepSeekName))
+	entry := ctx.Entry("custom_tool")
+	got := ExtractCustomToolInput(entry, `{"patch":"not input","input":"real input"}`, adapters.Get(adapters.DeepSeekName))
+	if got != "real input" {
+		t.Fatalf("input = %q", got)
 	}
 }
 

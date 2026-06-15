@@ -7,6 +7,7 @@ import (
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/providers"
+	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/tools"
 )
 
@@ -18,6 +19,7 @@ func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Conte
 			item := responseItemFromToolCall(call.ID, entry, call.Function.Arguments, adapter)
 			items = append(items, item)
 			logToolTranslation(logger, requestID, entry, item["type"].(string))
+			toollog.PatchToolCall(requestID, call.ID, entry, call.Function.Arguments, item)
 		}
 		return items
 	}
@@ -120,6 +122,7 @@ func (s *streamState) Done() []codex.ResponseItem {
 			item["id"] = call.id
 			items = append(items, item)
 			logToolTranslation(s.logger, s.requestID, entry, item["type"].(string))
+			toollog.PatchToolCall(s.requestID, call.id, entry, call.arguments, item)
 		}
 		return items
 	}
@@ -136,6 +139,10 @@ func (s *streamState) ToolCallCount() int {
 }
 
 func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, adapter adapters.Adapter) codex.ResponseItem {
+	if rewritten, ok := adapter.ToolPolicy().RewriteBlockedToolCall(entry.Name(), arguments); ok {
+		toollog.BlockedToolRewrite(callID, entry, arguments, rewritten)
+		arguments = rewritten
+	}
 	switch entry.Kind() {
 	case tools.KindCustom, tools.KindPatch:
 		return codex.ResponseItem{

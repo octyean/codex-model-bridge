@@ -498,6 +498,41 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointStreamsBlockedDeepSeekExecCommand(t *testing.T) {
+	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"cat > README.md << 'EOF'\\n"}}]}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"hello\\nEOF\",\"workdir\":\"/tmp/test\"}"}}]}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}`)},
+	}}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"create README.md",
+		"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	events := sseEvents(t, rec.Body.String())
+	completed := events[len(events)-1]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	item := output[0].(map[string]any)
+	if item["type"] != "function_call" {
+		t.Fatalf("item = %#v", item)
+	}
+	arguments, _ := item["arguments"].(string)
+	if !strings.Contains(arguments, "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(arguments, "cat > README.md") {
+		t.Fatalf("item = %#v", item)
+	}
+}
+
 func testConfig() *config.Config {
 	return &config.Config{
 		Codex: config.CodexConfig{LocalToken: "local-token"},

@@ -21,6 +21,10 @@ func (deepSeekAdapter) Capabilities() Capabilities {
 	}
 }
 
+func (deepSeekAdapter) ToolPolicy() ToolPolicy {
+	return ToolPolicy{BlockShellFileWrites: true}
+}
+
 func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
 	if name := ForcedToolName(req.ToolChoice); name != "" {
 		req.Messages = append([]providers.ChatMessage{{
@@ -31,6 +35,7 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 	}
 	req.Messages = repairToolPairing(req.Messages)
 	req.Tools = stableTools(req.Tools)
+	req = prepareChatPatchRequest(req)
 	if req.Stream && req.StreamOptions == nil {
 		req.StreamOptions = &providers.StreamOptions{IncludeUsage: true}
 	}
@@ -43,37 +48,37 @@ func (deepSeekAdapter) CustomToolDescription(tool ToolDescriptor) string {
 		return defaultAdapter{}.CustomToolDescription(tool)
 	}
 	parts := []string{
-		"This is Codex's file-editing patch tool encoded through Chat Completions. Treat it as a freeform patch, not as a normal JSON function payload.",
-		"The input string must start with *** Begin Patch and end with *** End Patch.",
-		"Use small, exact context from the current file. If a patch fails to find context, read the current target lines again before retrying.",
-		"Blank context lines are significant and must keep the patch line prefix. Do not use stale context from a previous failed edit.",
-		"Do not wrap the patch in Markdown fences, JSON text, or explanatory prose.",
-		"Example: *** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n",
-	}
-	if len(tool.Raw) > 0 {
-		if meta := canonicalJSON(tool.Raw); meta != "" {
-			parts = append(parts, "Original tool metadata: "+meta)
-		}
+		chatPatchToolDescription(tool),
+		"If the user gives exact replacement or insertion text, copy that text verbatim. Do not paraphrase, invent examples, rename commands, or change quoted content.",
+		"For style, markup, config, and template files, new lines inside an existing block must preserve the surrounding indentation style exactly.",
+		"If the tool reports APPLY_PATCH_CONTEXT_MISMATCH, the next action must be reading the current target file lines before any new apply_patch call.",
+		"Never retry the same patch after a context mismatch. Generate a smaller patch from freshly inspected file content.",
 	}
 	return strings.Join(parts, "\n")
 }
 
 func (deepSeekAdapter) NormalizeCustomInput(name string, input string) string {
 	if name == "apply_patch" {
-		return normalizeApplyPatchInput(input)
+		return deepSeekAdapter{}.NormalizePatchInput(input)
 	}
 	return input
 }
 
-func (deepSeekAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
-	if tool.Kind == "patch" && isPatchContextMismatch(output) {
-		return output + "\n\nTool result semantics: the patch was not applied because its context did not match the current file. This is recoverable. Before retrying, inspect the current target lines and generate a smaller patch with exact current context."
-	}
-	return DefaultToolOutput(tool, output)
+func (deepSeekAdapter) NormalizePatchInput(input string) string {
+	return RepairDeepSeekPatchInput(NormalizePatchInput(input))
 }
 
-func isPatchContextMismatch(output string) bool {
-	return strings.Contains(output, "Failed to find context")
+func (deepSeekAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
+	if tool.Kind == "patch" {
+		kind := ClassifyPatchFailure(output)
+		if recovery := PatchRecoveryText(kind); recovery != "" {
+			return output + "\n\n" + recovery
+		}
+		if PatchSucceeded(output) {
+			return output + "\n\n" + "APPLY_PATCH_SUCCEEDED\nfile_edit_state: completed\nnext_action: stop_or_summarize\nforbidden_next_action: patch_same_file_again_without_user_request"
+		}
+	}
+	return DefaultToolOutput(tool, output)
 }
 
 func stableTools(tools []providers.ChatTool) []providers.ChatTool {

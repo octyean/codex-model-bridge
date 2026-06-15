@@ -139,21 +139,43 @@ func (ctx Context) HasFileWriteTool() bool {
 }
 
 func ExtractCustomInput(arguments string) string {
-	var obj map[string]any
-	if err := json.Unmarshal([]byte(arguments), &obj); err == nil {
-		if input, ok := obj["input"].(string); ok {
+	return extractCustomInputValue(arguments, []string{"input"})
+}
+
+func ExtractCustomToolInput(entry Entry, arguments string, adapter adapters.Adapter) string {
+	if entry.Kind() == KindPatch {
+		return adapter.NormalizePatchInput(extractCustomInputValue(arguments, []string{"input", "patch", "content"}))
+	}
+	return adapter.NormalizeCustomInput(entry.OriginalName(), ExtractCustomInput(arguments))
+}
+
+func extractCustomInputValue(arguments string, keys []string) string {
+	var value any
+	if err := json.Unmarshal([]byte(arguments), &value); err == nil {
+		if input, ok := customInputFromValue(value, keys); ok {
 			return input
 		}
-	}
-	var text string
-	if err := json.Unmarshal([]byte(arguments), &text); err == nil {
-		return text
 	}
 	return arguments
 }
 
-func ExtractCustomToolInput(entry Entry, arguments string, adapter adapters.Adapter) string {
-	return adapter.NormalizeCustomInput(entry.OriginalName(), ExtractCustomInput(arguments))
+func customInputFromValue(value any, keys []string) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		return v, true
+	case map[string]any:
+		for _, key := range keys {
+			if text, ok := customInputFromValue(v[key], keys); ok {
+				return text, true
+			}
+		}
+		if nested, ok := v["arguments"]; ok {
+			if text, ok := customInputFromValue(nested, keys); ok {
+				return text, true
+			}
+		}
+	}
+	return "", false
 }
 
 func ToolChoice(value any, ctx Context) any {

@@ -2,13 +2,13 @@ package adapters
 
 import "codex-bridge/internal/providers"
 
-type mimoAdapter struct{}
+type openAIAdapter struct{}
 
-func (mimoAdapter) Name() string {
-	return MimoName
+func (openAIAdapter) Name() string {
+	return OpenAIName
 }
 
-func (mimoAdapter) Capabilities() Capabilities {
+func (openAIAdapter) Capabilities() Capabilities {
 	return Capabilities{
 		InputModalities:             []string{"text", "image"},
 		SupportsImageDetailOriginal: true,
@@ -17,26 +17,26 @@ func (mimoAdapter) Capabilities() Capabilities {
 	}
 }
 
-func (mimoAdapter) ToolPolicy() ToolPolicy {
+func (openAIAdapter) ToolPolicy() ToolPolicy {
 	return defaultAdapter{}.ToolPolicy()
 }
 
-func (mimoAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
+func (openAIAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
 	return defaultAdapter{}.PrepareChatRequest(req)
 }
 
-func (mimoAdapter) CustomToolDescription(tool ToolDescriptor) string {
+func (openAIAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	return defaultAdapter{}.CustomToolDescription(tool)
 }
 
-func (mimoAdapter) NormalizeCustomInput(name string, input string) string {
+func (openAIAdapter) NormalizeCustomInput(name string, input string) string {
 	return defaultAdapter{}.NormalizeCustomInput(name, input)
 }
 
-func (mimoAdapter) NormalizePatchInput(input string) string {
+func (openAIAdapter) NormalizePatchInput(input string) string {
 	return defaultAdapter{}.NormalizePatchInput(input)
 }
 
-func (mimoAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
+func (openAIAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
 	return defaultAdapter{}.FormatToolOutput(tool, output)
 }

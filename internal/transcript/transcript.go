@@ -10,6 +10,7 @@ import (
 	"codex-bridge/internal/capabilities"
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/providers"
+	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/tools"
 )
 
@@ -86,10 +87,13 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			if call, ok := toolCallsByID[callID]; ok {
 				descriptor = outputToolDescriptorForCall(item, call)
 			}
+			rawOutput := outputText(item)
+			formattedOutput := adapter.FormatToolOutput(descriptor, rawOutput)
+			toollog.PatchToolOutput(callID, descriptor, rawOutput, formattedOutput)
 			messages = append(messages, providers.ChatMessage{
 				Role:       "tool",
 				ToolCallID: callID,
-				Content:    adapter.FormatToolOutput(descriptor, outputText(item)),
+				Content:    formattedOutput,
 			})
 		case "additional_tools", "reasoning":
 			continue
