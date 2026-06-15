@@ -85,6 +85,22 @@ func TestOpenAINativeModelProfileCanBeOverriddenAtModelLevel(t *testing.T) {
 	}
 }
 
+func TestOpenAINativeModelExplicitDefaultProfileUsesOpenAI(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}
+	cfg.Models["m"] = ModelConfig{
+		DisplayName: "GPT", Provider: "p", UpstreamModel: "gpt-5.4", Profile: "default",
+		ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+	}
+	if got := cfg.ProfileName(cfg.Models["m"], cfg.Providers["p"]); got != "openai" {
+		t.Fatalf("profile = %q", got)
+	}
+	catalog := cfg.Catalog()
+	if !containsString(catalog.Models[0].InputModalities, "image") {
+		t.Fatalf("input modalities = %#v", catalog.Models[0].InputModalities)
+	}
+}
+
 func TestDeepSeekModelStaysTextOnly(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "deepseek"}

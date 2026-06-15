@@ -346,10 +346,14 @@ func (cfg *Config) Provider(name string) (ProviderConfig, bool) {
 }
 
 func (cfg *Config) ProfileName(model ModelConfig, provider ProviderConfig) string {
-	if strings.TrimSpace(model.Profile) != "" {
-		return adapters.Normalize(model.Profile)
-	}
+	modelProfile := adapters.Normalize(model.Profile)
 	providerProfile := adapters.Normalize(provider.Profile)
+	if isOpenAINativeModel(model.UpstreamModel) && modelProfile == adapters.DefaultName && providerProfile == adapters.DefaultName {
+		return adapters.OpenAIName
+	}
+	if strings.TrimSpace(model.Profile) != "" {
+		return modelProfile
+	}
 	if isOpenAINativeModel(model.UpstreamModel) && providerProfile == adapters.DefaultName {
 		return adapters.OpenAIName
 	}
