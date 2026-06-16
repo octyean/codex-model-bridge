@@ -10,7 +10,7 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter) {
+func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, conversionOptions responseConversionOptions) {
 	chatReq.Stream = false
 	chatReq.StreamOptions = nil
 	resp, err := provider.Create(r.Context(), chatReq)
@@ -30,7 +30,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, s.logger)
+	items := responseItemsFromMessageWithOptions(resp.Choices[0].Message, toolCtx, adapter, requestID, s.logger, conversionOptions)
 	usage := providers.NormalizeUsage(resp.Usage)
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID

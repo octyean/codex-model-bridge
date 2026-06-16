@@ -45,13 +45,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.1.0"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.0"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.1.0",
+		"version": "0.2.0",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -134,6 +134,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		chatReq.ParallelToolCalls = &enabled
 	}
 	chatReq = adapter.PrepareChatRequest(chatReq)
+	conversionOptions := responseConversionOptions{patchCooldownFiles: adapters.TextEditorCooldownFiles(chatReq.Messages)}
 
 	s.logger.Info("request_started",
 		slog.String("request_id", requestID),
@@ -144,10 +145,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		if s.hasInternalTools(req) {
-			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter)
+			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter, conversionOptions)
 			return
 		}
-		s.streamResponses(w, r, requestID, req, chatReq, provider, toolCtx, adapter)
+		s.streamResponses(w, r, requestID, req, chatReq, provider, toolCtx, adapter, conversionOptions)
 		return
 	}
 	resp, err := provider.Create(r.Context(), chatReq)
@@ -167,7 +168,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, s.logger)
+	items := responseItemsFromMessageWithOptions(resp.Choices[0].Message, toolCtx, adapter, requestID, s.logger, conversionOptions)
 	usage := providers.NormalizeUsage(resp.Usage)
 	logUsage(s.logger, requestID, usage)
 	writeJSON(w, http.StatusOK, codex.ResponseObject{
@@ -220,7 +221,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter) {
+func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, conversionOptions responseConversionOptions) {
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
 		s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
@@ -242,7 +243,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 		},
 	})
 
-	state := newStreamState(toolCtx, adapter, requestID, s.logger)
+	state := newStreamStateWithOptions(toolCtx, adapter, requestID, s.logger, conversionOptions)
 	var usage providers.NormalizedUsage
 	for event := range stream {
 		if event.Err != nil {
@@ -267,6 +268,14 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 	}
 	items := state.Done()
 	for _, item := range items {
+		if deferred, _ := item["_deferred_added"].(bool); deferred {
+			delete(item, "_deferred_added")
+			_ = writer.Event(map[string]any{
+				"type":         "response.output_item.added",
+				"item":         item,
+				"output_index": 0,
+			})
+		}
 		for _, event := range toolDoneEvents(item) {
 			_ = writer.Event(event)
 		}

@@ -17,7 +17,7 @@ func TestToolOutputFollowsAssistantToolCall(t *testing.T) {
 		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
 		{"type":"custom_tool_call_output","call_id":"call_1","output":"ok"}
 	]`)
-	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DefaultName))
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.OpenAIName))
 	if err != nil {
 		t.Fatalf("to chat messages: %v", err)
 	}
@@ -29,6 +29,69 @@ func TestToolOutputFollowsAssistantToolCall(t *testing.T) {
 	}
 	if result.Messages[2].Role != "tool" || result.Messages[2].ToolCallID != "call_1" {
 		t.Fatalf("tool output message = %#v", result.Messages[2])
+	}
+}
+
+func TestNonGPTTranscriptHidesApplyPatchAsTextEditor(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"edit"}]},
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM a.java"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if len(result.Messages) != 3 {
+		t.Fatalf("messages len = %d", len(result.Messages))
+	}
+	if result.Messages[1].Role != "system" || result.Messages[2].Role != "system" {
+		t.Fatalf("history should be hidden as system summaries: %#v", result.Messages)
+	}
+	callSummary, _ := result.Messages[1].Content.(string)
+	if !strings.Contains(callSummary, "TEXT_EDITOR_HISTORY_HIDDEN") || strings.Contains(callSummary, "old_str") || strings.Contains(callSummary, "new_str") {
+		t.Fatalf("call summary leaked editable arguments: %s", callSummary)
+	}
+	output, _ := result.Messages[2].Content.(string)
+	if !strings.Contains(output, "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN") || !strings.Contains(output, "TEXT_EDITOR_EDIT_SUCCEEDED") || strings.Contains(output, "APPLY_PATCH_SUCCEEDED") {
+		t.Fatalf("output = %s", output)
+	}
+}
+
+func TestDeepSeekReasoningItemAttachesToFollowingToolCall(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"edit"}]},
+		{"type":"reasoning","reasoning_content":"think before tool"},
+		{"type":"function_call","call_id":"call_1","name":"record_result","arguments":"{\"ok\":true}"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"ok"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if len(result.Messages) != 3 {
+		t.Fatalf("messages len = %d", len(result.Messages))
+	}
+	if result.Messages[1].ReasoningContent != "think before tool" {
+		t.Fatalf("reasoning_content = %q", result.Messages[1].ReasoningContent)
+	}
+	if len(result.Messages[1].ToolCalls) != 1 {
+		t.Fatalf("assistant tool calls len = %d", len(result.Messages[1].ToolCalls))
+	}
+}
+
+func TestDefaultAdapterIgnoresReasoningItemForChatCompletions(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"edit"}]},
+		{"type":"reasoning","reasoning_content":"think before tool"},
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DefaultName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if result.Messages[1].ReasoningContent != "" {
+		t.Fatalf("default adapter should not forward reasoning_content: %#v", result.Messages[1])
 	}
 }
 
@@ -197,11 +260,11 @@ func TestApplyPatchCallOutputRoundsTrip(t *testing.T) {
 	}
 }
 
-func TestDeepSeekApplyPatchContextFailureCarriesRecoverySemantics(t *testing.T) {
+func TestNonGPTApplyPatchOutputUsesTextEditorRecoverySemantics(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"apply_patch_call_output","call_id":"call_1","output":"Failed to find context"}
 	]`)
-	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
 	if err != nil {
 		t.Fatalf("to chat messages: %v", err)
 	}
@@ -209,55 +272,58 @@ func TestDeepSeekApplyPatchContextFailureCarriesRecoverySemantics(t *testing.T) 
 		t.Fatalf("messages = %#v", result.Messages)
 	}
 	content, _ := result.Messages[0].Content.(string)
-	if !strings.Contains(content, "APPLY_PATCH_CONTEXT_MISMATCH") ||
+	if !strings.Contains(content, "TEXT_EDITOR_CONTEXT_MISMATCH") ||
 		!strings.Contains(content, "required_next_action: inspect_current_file") ||
-		!strings.Contains(content, "forbidden_next_action: retry_same_patch") {
+		!strings.Contains(content, "forbidden_next_action: retry_same_edit") {
 		t.Fatalf("tool output = %q", content)
 	}
 }
 
-func TestDeepSeekApplyPatchExpectedLinesFailureCarriesRecoveryProtocol(t *testing.T) {
+func TestNonGPTApplyPatchExpectedLinesFailureUsesTextEditorRecoveryProtocol(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"apply_patch_call_output","call_id":"call_1","output":"apply_patch verification failed: Failed to find expected lines in /tmp/file:\n   <view"}
 	]`)
-	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
 	if err != nil {
 		t.Fatalf("to chat messages: %v", err)
 	}
 	content, _ := result.Messages[0].Content.(string)
-	if !strings.Contains(content, "APPLY_PATCH_CONTEXT_MISMATCH") ||
+	if !strings.Contains(content, "TEXT_EDITOR_CONTEXT_MISMATCH") ||
 		!strings.Contains(content, "required_next_action: inspect_current_file") ||
-		!strings.Contains(content, "forbidden_next_action: retry_same_patch") {
+		!strings.Contains(content, "forbidden_next_action: retry_same_edit") {
 		t.Fatalf("tool output = %q", content)
 	}
 }
 
-func TestDeepSeekCustomApplyPatchOutputCarriesRecoverySemantics(t *testing.T) {
+func TestNonGPTCustomApplyPatchOutputUsesTextEditorRecoverySemantics(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
 		{"type":"custom_tool_call_output","call_id":"call_1","output":"apply_patch verification failed: Failed to find expected lines in /tmp/file:\n   <view"}
 	]`)
-	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
 	if err != nil {
 		t.Fatalf("to chat messages: %v", err)
 	}
 	if len(result.Messages) != 2 || result.Messages[1].Role != "tool" {
-		t.Fatalf("messages = %#v", result.Messages)
+		if len(result.Messages) != 2 || result.Messages[1].Role != "system" {
+			t.Fatalf("messages = %#v", result.Messages)
+		}
 	}
 	content, _ := result.Messages[1].Content.(string)
-	if !strings.Contains(content, "APPLY_PATCH_CONTEXT_MISMATCH") ||
+	if !strings.Contains(content, "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN") ||
+		!strings.Contains(content, "TEXT_EDITOR_CONTEXT_MISMATCH") ||
 		!strings.Contains(content, "required_next_action: inspect_current_file") ||
-		!strings.Contains(content, "forbidden_next_action: retry_same_patch") {
+		!strings.Contains(content, "forbidden_next_action: retry_same_edit") {
 		t.Fatalf("tool output = %q", content)
 	}
 }
 
-func TestDeepSeekPlainCustomOutputDoesNotUsePatchRecoveryProtocol(t *testing.T) {
+func TestNonGPTPlainCustomOutputDoesNotUsePatchRecoveryProtocol(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"custom_tool_call","call_id":"call_1","name":"custom_tool","input":"x"},
 		{"type":"custom_tool_call_output","call_id":"call_1","output":"Failed to find expected lines"}
 	]`)
-	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
 	if err != nil {
 		t.Fatalf("to chat messages: %v", err)
 	}

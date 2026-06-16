@@ -26,6 +26,13 @@ func (deepSeekAdapter) ToolPolicy() ToolPolicy {
 }
 
 func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
+	if hasOpenVikingReadTool(req.Tools) && !hasDeepSeekToolBoundaryNote(req.Messages) {
+		req.Messages = append([]providers.ChatMessage{{
+			Role:    "system",
+			Content: deepSeekOpenVikingToolBoundaryNote,
+		}}, req.Messages...)
+	}
+	req = prepareTextEditorRequest(req)
 	if name := ForcedToolName(req.ToolChoice); name != "" {
 		req.Messages = append([]providers.ChatMessage{{
 			Role:    "system",
@@ -43,18 +50,10 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 	return req
 }
 
+const deepSeekOpenVikingToolBoundaryNote = "OPENVIKING_READ_TOOL_BOUNDARY: OpenViking memory read tools only read viking:// URIs. Do not pass file:// URLs or local filesystem paths to OpenViking read. Read local files, skills, and repository sources with the available local file or shell tools instead."
+
 func (deepSeekAdapter) CustomToolDescription(tool ToolDescriptor) string {
-	if tool.Kind != "patch" {
-		return defaultAdapter{}.CustomToolDescription(tool)
-	}
-	parts := []string{
-		chatPatchToolDescription(tool),
-		"If the user gives exact replacement or insertion text, copy that text verbatim. Do not paraphrase, invent examples, rename commands, or change quoted content.",
-		"For style, markup, config, and template files, new lines inside an existing block must preserve the surrounding indentation style exactly.",
-		"If the tool reports APPLY_PATCH_CONTEXT_MISMATCH, the next action must be reading the current target file lines before any new apply_patch call.",
-		"Never retry the same patch after a context mismatch. Generate a smaller patch from freshly inspected file content.",
-	}
-	return strings.Join(parts, "\n")
+	return defaultAdapter{}.CustomToolDescription(tool)
 }
 
 func (deepSeekAdapter) NormalizeCustomInput(name string, input string) string {
@@ -65,20 +64,11 @@ func (deepSeekAdapter) NormalizeCustomInput(name string, input string) string {
 }
 
 func (deepSeekAdapter) NormalizePatchInput(input string) string {
-	return RepairDeepSeekPatchInput(NormalizePatchInput(input))
+	return defaultAdapter{}.NormalizePatchInput(input)
 }
 
 func (deepSeekAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
-	if tool.Kind == "patch" {
-		kind := ClassifyPatchFailure(output)
-		if recovery := PatchRecoveryText(kind); recovery != "" {
-			return output + "\n\n" + recovery
-		}
-		if PatchSucceeded(output) {
-			return output + "\n\n" + "APPLY_PATCH_SUCCEEDED\nfile_edit_state: completed\nnext_action: stop_or_summarize\nforbidden_next_action: patch_same_file_again_without_user_request"
-		}
-	}
-	return DefaultToolOutput(tool, output)
+	return defaultAdapter{}.FormatToolOutput(tool, output)
 }
 
 func stableTools(tools []providers.ChatTool) []providers.ChatTool {
@@ -87,6 +77,38 @@ func stableTools(tools []providers.ChatTool) []providers.ChatTool {
 		return out[i].Function.Name < out[j].Function.Name
 	})
 	return out
+}
+
+func hasOpenVikingReadTool(tools []providers.ChatTool) bool {
+	for _, tool := range tools {
+		name := strings.ToLower(tool.Function.Name)
+		description := strings.ToLower(tool.Function.Description)
+		if strings.Contains(name, "openviking") && name == "read" {
+			return true
+		}
+		if strings.Contains(name, "openviking") && strings.Contains(name, "read") {
+			return true
+		}
+		if strings.Contains(description, "openviking") && strings.Contains(name, "read") {
+			return true
+		}
+		if strings.Contains(description, "viking://") && strings.Contains(name, "read") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDeepSeekToolBoundaryNote(messages []providers.ChatMessage) bool {
+	for _, message := range messages {
+		if message.Role != "system" {
+			continue
+		}
+		if text, ok := message.Content.(string); ok && strings.Contains(text, "OPENVIKING_READ_TOOL_BOUNDARY") {
+			return true
+		}
+	}
+	return false
 }
 
 func repairToolPairing(messages []providers.ChatMessage) []providers.ChatMessage {

@@ -7,17 +7,17 @@ import (
 )
 
 const ShellFileWriteBlockedOutput = `SHELL_FILE_WRITE_BLOCKED
-This model must create, edit, and delete source, document, and config files with apply_patch.
+This model must create, edit, and delete source, document, and config files with the text editor tool.
 Shell is still available for reading files, searching, building, testing, formatting, and running real generators.
-Read the target file if needed, then call apply_patch with a small patch.`
+Read the target file if needed, then call the text editor tool with a small exact edit.`
 
 var shellFileWritePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?s)(^|[;&|]\s*)cat\s+(?:<<\S+\s*)?>\s*\S+`),
-	regexp.MustCompile(`(?s)(^|[;&|]\s*)printf\s+.+>\s*\S+`),
-	regexp.MustCompile(`(?s)(^|[;&|]\s*)echo\s+.+>{1,2}\s*\S+`),
 	regexp.MustCompile(`(?s)(^|[;&|]\s*)tee\s+(?:-[a-zA-Z]+\s+)*\S+`),
 	regexp.MustCompile(`(?s)\bopen\s*\([^)]*,\s*["'](?:w|a|x|w\+|a\+)["']`),
+	regexp.MustCompile(`(?s)\.(?:write_text|write_bytes)\s*\(`),
 	regexp.MustCompile(`(?s)(?:\.|\b)writeFile(?:Sync|sync)?\s*\(`),
+	regexp.MustCompile(`(?s)(^|[;&|]\s*)sed\s+-i(?:\s|$)`),
+	regexp.MustCompile(`(?s)(^|[;&|]\s*)perl\s+-pi(?:\s|$)`),
 	regexp.MustCompile(`(?s)(^|[;&|]\s*)rm\s+(?:-[a-zA-Z]+\s+)*\S+`),
 	regexp.MustCompile(`(?s)(^|[;&|]\s*)mv\s+(?:-[a-zA-Z]+\s+)*\S+\s+\S+`),
 	regexp.MustCompile(`(?s)(^|[;&|]\s*)cp\s+(?:-[a-zA-Z]+\s+)*\S+\s+\S+`),
@@ -175,12 +175,108 @@ func isManualShellFileWrite(command string) bool {
 	if text == "" {
 		return false
 	}
+	if hasUnquotedRedirection(text) {
+		return true
+	}
 	for _, pattern := range shellFileWritePatterns {
 		if pattern.MatchString(text) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasUnquotedRedirection(command string) bool {
+	command = stripHereDocBodies(command)
+	inSingleQuote := false
+	inDoubleQuote := false
+	escaped := false
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch ch {
+		case '\\':
+			if !inSingleQuote {
+				escaped = true
+			}
+		case '\'':
+			if !inDoubleQuote {
+				inSingleQuote = !inSingleQuote
+			}
+		case '"':
+			if !inSingleQuote {
+				inDoubleQuote = !inDoubleQuote
+			}
+		case '>':
+			if !inSingleQuote && !inDoubleQuote {
+				if isSafeFdRedirection(command, i) {
+					continue
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSafeFdRedirection(command string, index int) bool {
+	start := index - 1
+	for start >= 0 && command[start] >= '0' && command[start] <= '9' {
+		start--
+	}
+	fd := command[start+1 : index]
+	if fd != "2" {
+		return false
+	}
+	rest := strings.TrimLeft(command[index+1:], " \t")
+	return strings.HasPrefix(rest, "&1") || strings.HasPrefix(rest, "/dev/null")
+}
+
+func stripHereDocBodies(command string) string {
+	lines := strings.Split(command, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		out = append(out, line)
+		delimiter, ok := hereDocDelimiter(line)
+		if !ok {
+			continue
+		}
+		for i+1 < len(lines) {
+			i++
+			if strings.TrimSpace(lines[i]) == delimiter {
+				out = append(out, lines[i])
+				break
+			}
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func hereDocDelimiter(line string) (string, bool) {
+	idx := strings.Index(line, "<<")
+	if idx < 0 {
+		return "", false
+	}
+	rest := strings.TrimSpace(line[idx+2:])
+	if strings.HasPrefix(rest, "-") {
+		rest = strings.TrimSpace(rest[1:])
+	}
+	if rest == "" || strings.HasPrefix(rest, "<") {
+		return "", false
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return "", false
+	}
+	delimiter := strings.Trim(fields[0], `"'`)
+	if delimiter == "" {
+		return "", false
+	}
+	return delimiter, true
 }
 
 func isAllowedShellWriteTool(command string) bool {

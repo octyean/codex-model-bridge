@@ -14,6 +14,7 @@ const (
 	KindFunction   = "function"
 	KindCustom     = "custom"
 	KindPatch      = "patch"
+	KindTextEditor = "text_editor_patch"
 	KindToolSearch = "tool_search"
 	KindShell      = "shell"
 
@@ -29,6 +30,7 @@ const (
 
 var (
 	applyPatchParameters  = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
+	textEditorParameters  = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"One of create, str_replace, insert_after, or delete_file."},"path":{"type":"string"},"old_str":{"type":"string","description":"Exact existing text for str_replace, or exact anchor text for insert_after."},"new_str":{"type":"string","description":"Replacement text for str_replace, or inserted text for insert_after."},"insert_after":{"type":"string","description":"Exact existing anchor text after which new_str/text should be inserted."},"text":{"type":"string","description":"Inserted text, or file content for create."},"file_text":{"type":"string","description":"Full file content for create."}},"required":["command","path"],"additionalProperties":false}`)
 	customParameters      = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
 	toolSearchParameters  = json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}}},"additionalProperties":true}`)
 	shellParameters       = json.RawMessage(`{"type":"object","properties":{"command":{"type":["string","array"],"items":{"type":"string"}},"workdir":{"type":"string"},"timeout_ms":{"type":"integer"},"max_output_length":{"type":"integer"}},"required":["command"],"additionalProperties":true}`)
@@ -40,11 +42,15 @@ type Context struct {
 }
 
 type Entry struct {
-	Descriptor adapters.ToolDescriptor
-	Namespace  string
+	Descriptor   adapters.ToolDescriptor
+	Namespace    string
+	UpstreamName string
 }
 
 func (e Entry) Name() string {
+	if e.UpstreamName != "" {
+		return e.UpstreamName
+	}
 	return e.Descriptor.Name
 }
 
@@ -122,7 +128,7 @@ func (ctx Context) Entry(name string) Entry {
 
 func (ctx Context) IsCustom(name string) bool {
 	entry := ctx.Entry(name)
-	return entry.Kind() == KindCustom || entry.Kind() == KindPatch
+	return entry.Kind() == KindCustom || entry.Kind() == KindPatch || entry.Kind() == KindTextEditor
 }
 
 func (ctx Context) IsEmpty() bool {
@@ -145,6 +151,13 @@ func ExtractCustomInput(arguments string) string {
 func ExtractCustomToolInput(entry Entry, arguments string, adapter adapters.Adapter) string {
 	if entry.Kind() == KindPatch {
 		return adapter.NormalizePatchInput(extractCustomInputValue(arguments, []string{"input", "patch", "content"}))
+	}
+	if entry.Kind() == KindTextEditor {
+		input, err := TextEditorPatchInput(arguments)
+		if err != nil {
+			return ""
+		}
+		return adapter.NormalizePatchInput(input)
 	}
 	return adapter.NormalizeCustomInput(entry.OriginalName(), ExtractCustomInput(arguments))
 }
@@ -206,10 +219,11 @@ func ToolChoice(value any, ctx Context) any {
 		}
 	}
 	if toolType == "function" && name != "" {
-		if _, ok := ctx.Tools[name]; !ok {
+		upstreamName, ok := ctx.upstreamName(name)
+		if !ok {
 			return nil
 		}
-		return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+		return map[string]any{"type": "function", "function": map[string]any{"name": upstreamName}}
 	}
 	return value
 }
@@ -230,8 +244,8 @@ func allowedToolsChoice(obj map[string]any, ctx Context) any {
 		if toolType != "function" || name == "" {
 			continue
 		}
-		if _, exists := ctx.Tools[name]; exists {
-			allowed = append(allowed, map[string]any{"type": "function", "function": map[string]any{"name": name}})
+		if upstreamName, exists := ctx.upstreamName(name); exists {
+			allowed = append(allowed, map[string]any{"type": "function", "function": map[string]any{"name": upstreamName}})
 		}
 	}
 	if len(allowed) == 0 {
@@ -242,6 +256,18 @@ func allowedToolsChoice(obj map[string]any, ctx Context) any {
 		mode = "auto"
 	}
 	return map[string]any{"type": "allowed_tools", "mode": mode, "tools": allowed}
+}
+
+func (ctx Context) upstreamName(name string) (string, bool) {
+	if _, ok := ctx.Tools[name]; ok {
+		return name, true
+	}
+	for upstreamName, entry := range ctx.Tools {
+		if entry.OriginalName() == name {
+			return upstreamName, true
+		}
+	}
+	return "", false
 }
 
 type convertedTool struct {
@@ -297,6 +323,8 @@ func convertNamespace(tool codex.ResponseTool, adapter adapters.Adapter) []conve
 		}
 		for _, converted := range convertTool(child, adapter) {
 			converted.entry.Namespace = namespace
+			converted.entry.UpstreamName = namespacedToolName(namespace, converted.entry.OriginalName())
+			converted.tool.Function.Name = converted.entry.Name()
 			out = append(out, converted)
 		}
 	}
@@ -335,7 +363,16 @@ func convertCustom(tool codex.ResponseTool, adapter adapters.Adapter) []converte
 		params = applyPatchParameters
 		sideEffect = SideEffectWriteFiles
 	}
+	if name == "apply_patch" && adapters.UseTextEditorForApplyPatch(adapter) {
+		kind = KindTextEditor
+		params = textEditorParameters
+		inputMode = InputModeJSON
+		sideEffect = SideEffectWriteFiles
+	}
 	entry := newEntry(name, kind, inputMode, sideEffect, rawString(tool.Raw, "type", tool.Type), tool.Description, tool.Raw)
+	if kind == KindTextEditor {
+		entry.UpstreamName = "codex_text_editor"
+	}
 	entry.Descriptor.Description = adapter.CustomToolDescription(entry.Descriptor)
 	return []convertedTool{chatFunction(entry, params)}
 }
@@ -385,6 +422,35 @@ func rawString(raw map[string]any, key string, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+func namespacedToolName(namespace string, name string) string {
+	if namespace == "" {
+		return name
+	}
+	return sanitizeToolName(namespace) + "__" + sanitizeToolName(name)
+}
+
+func sanitizeToolName(value string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if ok {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "tool"
+	}
+	return out
 }
 
 func descriptionOrDefault(value string, fallback string) string {

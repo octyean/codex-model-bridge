@@ -3,107 +3,13 @@ package adapters
 import (
 	"strings"
 	"testing"
+
+	"codex-bridge/internal/providers"
 )
 
 func TestNormalizePatchInputExtractsJSONEnvelope(t *testing.T) {
 	got := NormalizePatchInput(`{"input":"*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"}`)
 	want := "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputPrefixesBareUpdateContextLines(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: README.md\n@@\n# Demo\n\n+## Usage\n+\n+npm run dev\n+\n## Install\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: README.md\n@@\n # Demo\n \n+## Usage\n+\n+npm run dev\n+\n ## Install\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputPrefixesBareReplacementContextLines(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: service.go\n@@\npackage demo\n\n+// status returns the current readiness state of the service.\n func status() string {\n-  return \"pending\"\n+  return \"ready\"\n }\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: service.go\n@@\n package demo\n \n+// status returns the current readiness state of the service.\n func status() string {\n-  return \"pending\"\n+  return \"ready\"\n }\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputDoesNotTouchAddFileContent(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Add File: src/utils/format.ts\n+export const formatName = (name: string) => name.trim();\n*** End Patch"))
-	want := "*** Begin Patch\n*** Add File: src/utils/format.ts\n+export const formatName = (name: string) => name.trim();\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputRepairsEndPatchAsAddedLine(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Add File: deep/path/notes.md\n+# Notes\n+\n+## Purpose\n+\n+轻量级的项目随记入口。\n+ +*** End Patch"))
-	want := "*** Begin Patch\n*** Add File: deep/path/notes.md\n+# Notes\n+\n+## Purpose\n+\n+轻量级的项目随记入口。\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputMergesRepeatedPatchEnvelopes(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: guide.md\n@@\n ## Troubleshooting\n+## Configuration\n*** End Patch\n*** Begin Patch\n*** Update File: guide.md\n@@\n-4. Verify health checks and tool routing.\n+4. 验证健康检查、模型路由和 apply_patch 工具调用。\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: guide.md\n@@\n ## Troubleshooting\n+## Configuration\n*** Update File: guide.md\n@@\n-4. Verify health checks and tool routing.\n+4. 验证健康检查、模型路由和 apply_patch 工具调用。\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestNormalizePatchBoundaryLines(t *testing.T) {
-	got := normalizePatchBoundaryLines(" +*** Begin Patch\n  +*** End Patch\n")
-	want := "*** Begin Patch\n*** End Patch\n"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputDropsTrailingTextAfterEndOfFile(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: README.md\n@@\n# Demo\n+## Usage\n+\n+npm run dev\n+\n+Open http://localhost:5173 in your browser.\n+\n*** End of File\n## Usage\n\nnpm run dev\n\nOpen http://localhost:5173 in your browser.\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: README.md\n@@\n # Demo\n+## Usage\n+\n+npm run dev\n+\n+Open http://localhost:5173 in your browser.\n+\n*** End of File\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputDropsNoOpTrailingUpdateHunk(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: README.md\n@@\n# Demo\n+ \n+ ## Usage\n+ \n+ npm run dev\n \n ## Install\n@@\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: README.md\n@@\n # Demo\n+ \n+ ## Usage\n+ \n+ npm run dev\n \n ## Install\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputDropsContextOnlyTrailingUpdateHunk(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: README.md\n@@\n# Demo\n\n+## Usage\n+\n+npm run dev\n+\n## Install\n@@\n## Install\n\nnpm install\n## Install\n\nnpm install\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: README.md\n@@\n # Demo\n \n+## Usage\n+\n+npm run dev\n+\n ## Install\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputKeepsMutatingHunkWithBadContext(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: service.go\n@@\nfunc status() string {\n}\n+// status returns the current service readiness.\n+func status() string {\n+  return \"ready\"\n+}\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: service.go\n@@\n func status() string {\n }\n+// status returns the current service readiness.\n+func status() string {\n+  return \"ready\"\n+}\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputRepairsMarkdownListContext(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: guide.md\n@@\n## Prerequisites\n\n- Node.js 20+\n- A valid API key\n- Network access to the upstream provider\n+## Configuration\n+\n+- `CODEX_BRIDGE_LOG_LEVEL` — Log level\n+\n@@\n-4. Verify health checks and tool routing.\n+4. 验证健康检查、模型路由和 apply_patch 工具调用。\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: guide.md\n@@\n ## Prerequisites\n \n - Node.js 20+\n - A valid API key\n - Network access to the upstream provider\n+## Configuration\n+\n+- `CODEX_BRIDGE_LOG_LEVEL` — Log level\n+\n@@\n-4. Verify health checks and tool routing.\n+4. 验证健康检查、模型路由和 apply_patch 工具调用。\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputKeepsExplicitMarkdownListDeletion(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: guide.md\n@@\n-- old item\n+- new item\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: guide.md\n@@\n-- old item\n+- new item\n*** End Patch"
 	if got != want {
 		t.Fatalf("normalized = %q, want %q", got, want)
 	}
@@ -150,22 +56,6 @@ func TestNormalizePatchInputCompletesMissingEnd(t *testing.T) {
 	}
 }
 
-func TestRepairDeepSeekPatchInputRepairsDuplicatedReplacementHunk(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: a.vue\n@@\n    <text>{{ value }}</text>\n+    <text>{{ value }} ok</text>\n-    <text>{{ value }}</text>\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: a.vue\n@@\n-    <text>{{ value }}</text>\n+    <text>{{ value }} ok</text>\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
-func TestRepairDeepSeekPatchInputRepairsInsertionLikeReplacementHunk(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: a.vue\n@@\n    <text>{{ comboOptionMeta(item) }}</text>\n+    <text>{{ comboOptionMeta(item) }} · 已优化</text>\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: a.vue\n@@\n-   <text>{{ comboOptionMeta(item) }}</text>\n+    <text>{{ comboOptionMeta(item) }} · 已优化</text>\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
-	}
-}
-
 func TestNormalizePatchInputKeepsAppendInsertion(t *testing.T) {
 	got := NormalizePatchInput("*** Begin Patch\n*** Update File: .env.example\n@@\n API_URL=http://localhost\n+ENABLE_LOG=true\n*** End Patch")
 	want := "*** Begin Patch\n*** Update File: .env.example\n@@\n API_URL=http://localhost\n+ENABLE_LOG=true\n*** End Patch"
@@ -174,41 +64,83 @@ func TestNormalizePatchInputKeepsAppendInsertion(t *testing.T) {
 	}
 }
 
-func TestRepairDeepSeekPatchInputKeepsAppendInsertion(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: .env.example\n@@\n API_URL=http://localhost\n+ENABLE_LOG=true\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: .env.example\n@@\n API_URL=http://localhost\n+ENABLE_LOG=true\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
+func TestPatchSucceededFilesExtractsChangedFiles(t *testing.T) {
+	got := PatchSucceededFiles("Success. Updated the following files:\nM internal/adapters/deepseek.go\nA ./web/src/App.vue\nD old/request.js\n\nAPPLY_PATCH_SUCCEEDED")
+	want := []string{"internal/adapters/deepseek.go", "web/src/App.vue", "old/request.js"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("files = %#v, want %#v", got, want)
 	}
 }
 
-func TestRepairDeepSeekPatchInputRemovesInvalidAddFileHunkHeader(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Add File: src/utils/format.ts\n@@\n+export const formatName = (name: string) => name.trim();\n*** End Patch"))
-	want := "*** Begin Patch\n*** Add File: src/utils/format.ts\n+export const formatName = (name: string) => name.trim();\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
+func TestPatchSucceededFilesExtractsFormattedChangedFiles(t *testing.T) {
+	got := PatchSucceededFiles("TEXT_EDITOR_EDIT_SUCCEEDED\nfile_edit_state: completed\nchanged_files: ./a.java, src/App.vue")
+	want := []string{"a.java", "src/App.vue"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("files = %#v, want %#v", got, want)
 	}
 }
 
-func TestRepairDeepSeekPatchInputDropsHallucinatedContextForSingleReplacement(t *testing.T) {
-	got := RepairDeepSeekPatchInput(NormalizePatchInput("*** Begin Patch\n*** Update File: a.vue\n@@\n    <text class=\"combo-option__name\">{{ item.itemProductName || '暂无名称' }}</text>\n-    <text class=\"combo-option__meta\">{{ comboOptionMeta(item) }}</text>\n+    <text class=\"combo-option__meta\">{{ comboOptionMeta(item) }} · 已优化</text>\n  </view>\n*** End Patch"))
-	want := "*** Begin Patch\n*** Update File: a.vue\n@@\n-    <text class=\"combo-option__meta\">{{ comboOptionMeta(item) }}</text>\n+    <text class=\"combo-option__meta\">{{ comboOptionMeta(item) }} · 已优化</text>\n*** End Patch"
-	if got != want {
-		t.Fatalf("normalized = %q, want %q", got, want)
+func TestTextEditorCooldownFilesCollectsContinuousSuccessfulEdits(t *testing.T) {
+	messages := []providers.ChatMessage{
+		{Role: "user", Content: "edit two files"},
+		{Role: "system", Content: "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN\nTEXT_EDITOR_EDIT_SUCCEEDED\nchanged_files: a.java"},
+		{Role: "assistant", ToolCalls: []providers.ChatToolCall{{
+			ID: "call_2", Type: "function",
+			Function: providers.ChatCallFunction{Name: "codex_text_editor", Arguments: `{"command":"str_replace","path":"b.vue","old_str":"old","new_str":"new"}`},
+		}}},
+		{Role: "tool", Content: "TEXT_EDITOR_EDIT_SUCCEEDED\nchanged_files: b.vue"},
+	}
+	got := TextEditorCooldownFiles(messages)
+	want := []string{"a.java", "b.vue"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("files = %#v, want %#v", got, want)
+	}
+}
+
+func TestTextEditorCooldownFilesClearsAfterReadOnlyVerification(t *testing.T) {
+	messages := []providers.ChatMessage{
+		{Role: "user", Content: "edit then verify"},
+		{Role: "tool", Content: "TEXT_EDITOR_EDIT_SUCCEEDED\nchanged_files: a.java"},
+		{Role: "assistant", ToolCalls: []providers.ChatToolCall{{
+			ID: "call_2", Type: "function",
+			Function: providers.ChatCallFunction{Name: "exec_command", Arguments: `{"cmd":"rg foo a.java"}`},
+		}}},
+		{Role: "tool", ToolCallID: "call_2", Content: "foo"},
+	}
+	if got := TextEditorCooldownFiles(messages); len(got) != 0 {
+		t.Fatalf("cooldown files = %#v", got)
+	}
+}
+
+func TestPatchTouchedFilesExtractsMultiFilePatch(t *testing.T) {
+	got := PatchTouchedFiles("*** Begin Patch\n*** Update File: ./a.java\n@@\n-old\n+new\n*** Add File: web/src/App.vue\n+<template />\n*** Delete File: old/request.js\n*** End Patch")
+	want := []string{"a.java", "web/src/App.vue", "old/request.js"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("files = %#v, want %#v", got, want)
+	}
+}
+
+func TestPatchFilesOverlap(t *testing.T) {
+	if !PatchFilesOverlap([]string{"./a.java"}, []string{"a.java"}) {
+		t.Fatalf("expected overlap")
+	}
+	if PatchFilesOverlap([]string{"a.java"}, []string{"b.java"}) {
+		t.Fatalf("unexpected overlap")
 	}
 }
 
 func TestClassifyPatchFailure(t *testing.T) {
 	cases := map[string]PatchFailureKind{
 		"apply_patch verification failed: Failed to find expected lines": PatchFailureContextMismatch,
-		"Failed to find context":                 PatchFailureContextMismatch,
-		"permission denied":                      PatchFailurePermissionOrSandbox,
-		"sandbox denied":                         PatchFailurePermissionOrSandbox,
-		"open foo: no such file":                 PatchFailurePathError,
-		"invalid hunk at line 3":                 PatchFailureInvalidHunk,
-		"invalid patch: missing *** Begin Patch": PatchFailureMalformedPatch,
-		"apply_patch failed unexpectedly":        PatchFailureUnknown,
-		"ok":                                     PatchFailureNone,
+		"Failed to find context": PatchFailureContextMismatch,
+		"permission denied":      PatchFailurePermissionOrSandbox,
+		"sandbox denied":         PatchFailurePermissionOrSandbox,
+		"open foo: no such file": PatchFailurePathError,
+		"invalid hunk at line 3": PatchFailureInvalidHunk,
+		"invalid hunk at line 2, '*** Read File: README.md' is not a valid hunk header": PatchFailureReadFileOperation,
+		"invalid patch: missing *** Begin Patch":                                        PatchFailureMalformedPatch,
+		"apply_patch failed unexpectedly":                                               PatchFailureUnknown,
+		"ok":                                                                            PatchFailureNone,
 	}
 	for output, want := range cases {
 		if got := ClassifyPatchFailure(output); got != want {

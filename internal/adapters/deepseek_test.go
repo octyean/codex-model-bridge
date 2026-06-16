@@ -68,38 +68,154 @@ func TestDeepSeekPrepareRequestDowngradesForcedToolChoice(t *testing.T) {
 	}
 }
 
-func TestDeepSeekApplyPatchDescriptionCarriesRecoveryProtocol(t *testing.T) {
+func TestDeepSeekPrepareRequestAddsOpenVikingReadBoundaryNote(t *testing.T) {
+	adapter := Get(DeepSeekName)
+	prepared := adapter.PrepareChatRequest(providers.ChatCompletionRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []providers.ChatMessage{
+			{Role: "user", Content: "read local skill"},
+		},
+		Tools: []providers.ChatTool{{
+			Type: "function",
+			Function: providers.ChatFunction{
+				Name:        "read",
+				Description: "Read full content from one or more viking:// file URIs. OpenViking Memory.",
+			},
+		}},
+	})
+	if prepared.Messages[0].Role != "system" {
+		t.Fatalf("messages = %#v", prepared.Messages)
+	}
+	text, _ := prepared.Messages[0].Content.(string)
+	for _, want := range []string{"OPENVIKING_READ_TOOL_BOUNDARY", "viking://", "file://", "local file"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("boundary note missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestDeepSeekPrepareRequestAddsTextEditorSuccessCooldownNote(t *testing.T) {
+	adapter := Get(DeepSeekName)
+	prepared := adapter.PrepareChatRequest(providers.ChatCompletionRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []providers.ChatMessage{
+			{Role: "user", Content: "edit"},
+			{Role: "assistant", ToolCalls: []providers.ChatToolCall{{
+				ID: "call_1", Type: "function",
+				Function: providers.ChatCallFunction{Name: "codex_text_editor", Arguments: `{"command":"str_replace","path":"a.java","old_str":"old","new_str":"new"}`},
+			}}},
+			{Role: "tool", ToolCallID: "call_1", Content: "Success. Updated the following files:\nM a.java\n\nTEXT_EDITOR_EDIT_SUCCEEDED"},
+		},
+		Tools: []providers.ChatTool{{
+			Type:     "function",
+			Function: providers.ChatFunction{Name: "codex_text_editor"},
+		}},
+	})
+	found := false
+	for _, message := range prepared.Messages {
+		text, _ := message.Content.(string)
+		if message.Role == "system" &&
+			strings.Contains(text, "TEXT_EDITOR_SUCCESS_STOP") &&
+			strings.Contains(text, "a.java") &&
+			strings.Contains(text, "stop editing now") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing stop note: %#v", prepared.Messages)
+	}
+	if len(prepared.Tools) != 1 || prepared.Tools[0].Function.Name != "codex_text_editor" {
+		t.Fatalf("text editor should remain available for different files: %#v", prepared.Tools)
+	}
+}
+
+func TestDeepSeekPrepareRequestDoesNotAddTextEditorSuccessStopNoteAfterNewUserRequest(t *testing.T) {
+	adapter := Get(DeepSeekName)
+	prepared := adapter.PrepareChatRequest(providers.ChatCompletionRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []providers.ChatMessage{
+			{Role: "user", Content: "edit"},
+			{Role: "tool", ToolCallID: "call_1", Content: "TEXT_EDITOR_EDIT_SUCCEEDED"},
+			{Role: "user", Content: "new task"},
+		},
+		Tools: []providers.ChatTool{{
+			Type:     "function",
+			Function: providers.ChatFunction{Name: "codex_text_editor"},
+		}},
+	})
+	for _, message := range prepared.Messages {
+		if text, ok := message.Content.(string); ok && strings.Contains(text, "TEXT_EDITOR_SUCCESS_STOP") {
+			t.Fatalf("unexpected stop note after new user request: %#v", prepared.Messages)
+		}
+	}
+	if len(prepared.Tools) != 1 || prepared.Tools[0].Function.Name != "codex_text_editor" {
+		t.Fatalf("text editor should remain available for new user request: %#v", prepared.Tools)
+	}
+}
+
+func TestDeepSeekApplyPatchDescriptionIsTextEditorOnly(t *testing.T) {
 	adapter := Get(DeepSeekName)
 	description := adapter.CustomToolDescription(ToolDescriptor{
 		Name: "apply_patch",
-		Kind: "patch",
+		Kind: "text_editor_patch",
 	})
-	for _, want := range []string{
-		"APPLY_PATCH_CONTEXT_MISMATCH",
-		"next action must be reading the current target file lines",
-		"one - old line immediately followed by one + new line",
-		"Do not use an insertion-only hunk",
-		"copy that text verbatim",
-		"preserve the surrounding indentation style exactly",
-		"Never retry the same patch",
-		"Whitespace inside hunks is significant",
-	} {
+	for _, forbidden := range []string{"APPLY_PATCH_CONTEXT_MISMATCH", "APPLY_PATCH_SUCCEEDED", "*** Begin Patch", "*** End Patch"} {
+		if strings.Contains(description, forbidden) {
+			t.Fatalf("description leaked old apply_patch protocol %q: %s", forbidden, description)
+		}
+	}
+	for _, want := range []string{"Codex's text editor bridge", "str_replace", "old_str", "insert_after", "delete_file"} {
 		if !strings.Contains(description, want) {
 			t.Fatalf("description missing %q: %s", want, description)
 		}
 	}
 }
 
-func TestDeepSeekFormatsExpectedLinesPatchFailure(t *testing.T) {
+func TestDeepSeekTextEditorDescriptionHidesPatchProtocol(t *testing.T) {
+	adapter := Get(DeepSeekName)
+	description := adapter.CustomToolDescription(ToolDescriptor{
+		Name: "apply_patch",
+		Kind: "text_editor_patch",
+	})
+	for _, forbidden := range []string{"apply_patch", "*** Begin Patch", "*** End Patch"} {
+		if strings.Contains(description, forbidden) {
+			t.Fatalf("description leaked %q: %s", forbidden, description)
+		}
+	}
+	for _, want := range []string{"str_replace", "old_str", "insert_after", "delete_file"} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("description missing %q: %s", want, description)
+		}
+	}
+}
+
+func TestDeepSeekPatchSystemInstructionCoversGeneralEditDiscipline(t *testing.T) {
+	instruction := chatPatchSystemInstruction
+	for _, want := range []string{
+		"source, document, and config file creation, edits, deletes, and moves",
+		"inspect the current target lines",
+		"Prefer small, surgical hunks",
+		"do not retry the same patch",
+		"After apply_patch succeeds for a file, do not call apply_patch on that same file again",
+	} {
+		if !strings.Contains(instruction, want) {
+			t.Fatalf("instruction missing %q: %s", want, instruction)
+		}
+	}
+}
+
+func TestDeepSeekFormatsTextEditorContextMismatch(t *testing.T) {
 	adapter := Get(DeepSeekName)
 	output := adapter.FormatToolOutput(ToolDescriptor{
-		Name: "apply_patch",
-		Kind: "patch",
+		Name: "codex_text_editor",
+		Kind: "text_editor_patch",
 	}, "apply_patch verification failed: Failed to find expected lines in /tmp/file:\n   <view")
 	for _, want := range []string{
-		"APPLY_PATCH_CONTEXT_MISMATCH",
+		"TEXT_EDITOR_CONTEXT_MISMATCH",
 		"required_next_action: inspect_current_file",
-		"forbidden_next_action: retry_same_patch",
+		"forbidden_next_action: retry_same_edit",
+		"edit_discipline: do not broaden the edit",
+		"do not use shell as a file editor",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q: %s", want, output)
@@ -107,16 +223,16 @@ func TestDeepSeekFormatsExpectedLinesPatchFailure(t *testing.T) {
 	}
 }
 
-func TestDeepSeekFormatsMalformedPatchFailure(t *testing.T) {
+func TestDeepSeekFormatsInvalidTextEditorEdit(t *testing.T) {
 	adapter := Get(DeepSeekName)
 	output := adapter.FormatToolOutput(ToolDescriptor{
-		Name: "apply_patch",
-		Kind: "patch",
+		Name: "codex_text_editor",
+		Kind: "text_editor_patch",
 	}, "invalid patch: missing *** Begin Patch")
 	for _, want := range []string{
-		"APPLY_PATCH_MALFORMED",
-		"required_next_action: regenerate_complete_freeform_patch",
-		"forbidden_next_action: send_json_or_markdown_as_patch",
+		"TEXT_EDITOR_INVALID_EDIT",
+		"required_next_action: regenerate_text_editor_arguments",
+		"forbidden_next_action: send_diff_or_patch_syntax",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q: %s", want, output)
@@ -127,13 +243,15 @@ func TestDeepSeekFormatsMalformedPatchFailure(t *testing.T) {
 func TestDeepSeekFormatsSuccessfulPatchWithStopProtocol(t *testing.T) {
 	adapter := Get(DeepSeekName)
 	output := adapter.FormatToolOutput(ToolDescriptor{
-		Name: "apply_patch",
-		Kind: "patch",
+		Name: "codex_text_editor",
+		Kind: "text_editor_patch",
 	}, "Exit code: 0\nOutput:\nSuccess. Updated the following files:\nM README.md")
 	for _, want := range []string{
-		"APPLY_PATCH_SUCCEEDED",
+		"TEXT_EDITOR_EDIT_SUCCEEDED",
 		"file_edit_state: completed",
-		"forbidden_next_action: patch_same_file_again_without_user_request",
+		"changed_files: README.md",
+		"allowed_next_action: grep_sed_diff_tests_or_text_editor_different_file",
+		"forbidden_next_action: text_editor_same_file_again_without_verified_missing_edit",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q: %s", want, output)
@@ -149,7 +267,10 @@ func TestDeepSeekToolPolicyBlocksManualShellWrites(t *testing.T) {
 		"echo hello >> README.md",
 		"tee README.md",
 		"python3 - <<'PY'\nopen('README.md', 'w').write('hello')\nPY",
+		"python3 - <<'PY'\nfrom pathlib import Path\nPath('README.md').write_text('hello')\nPY",
 		"node -e \"require('fs').writeFileSync('README.md','hello')\"",
+		"sed -i 's/old/new/' README.md",
+		"perl -pi -e 's/old/new/' README.md",
 		"rm README.md",
 		"mv old.md new.md",
 		"cp template.md README.md",
@@ -165,6 +286,12 @@ func TestDeepSeekToolPolicyAllowsReadAndGeneratorCommands(t *testing.T) {
 	for _, command := range []string{
 		"cat README.md",
 		"sed -n '1,120p' README.md",
+		"head -c 100 StoreOrderServiceImpl.java 2>&1 | head -c 4000",
+		"wc -l StoreOrderServiceImpl.java 2>/dev/null || echo \"file not found\"",
+		"find /tmp/work -name 'StoreOrderServiceImpl.java' -type f 2>/dev/null",
+		"grep -n 'Map<Long, BigDecimal> stockUseMap' StoreOrderServiceImpl.java",
+		"echo \"=== Private method ===\" && grep -n 'private Map<Long, BigDecimal> buildTakeoutStockUseMap' StoreOrderServiceImpl.java",
+		"python3 - <<'PY'\n# Map<Long, StoreProduct> appears in the source being inspected.\nwith open('StoreOrderServiceImpl.java', 'r') as f:\n    print(repr(f.readline()))\nPY",
 		"rg apply_patch",
 		"go test ./...",
 		"gofmt -w internal/adapters/deepseek.go",

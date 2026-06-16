@@ -76,10 +76,11 @@ type ChatCompletionRequest struct {
 }
 
 type ChatMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content,omitempty"`
-	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          any            `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
 
 type ChatTool struct {
@@ -144,9 +145,10 @@ type ChatCompletionChunk struct {
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Role      string `json:"role"`
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Role             string `json:"role"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`
@@ -408,10 +410,11 @@ type chatCompletionWireRequest struct {
 }
 
 type chatWireMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content"`
-	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          any            `json:"content"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
 
 func prepareRequest(req ChatCompletionRequest) chatCompletionWireRequest {
@@ -437,10 +440,11 @@ func wireMessages(messages []ChatMessage, assistantToolContentNull bool) []chatW
 			content = nil
 		}
 		out = append(out, chatWireMessage{
-			Role:       message.Role,
-			Content:    content,
-			ToolCalls:  message.ToolCalls,
-			ToolCallID: message.ToolCallID,
+			Role:             message.Role,
+			Content:          content,
+			ReasoningContent: message.ReasoningContent,
+			ToolCalls:        message.ToolCalls,
+			ToolCallID:       message.ToolCallID,
 		})
 	}
 	return out

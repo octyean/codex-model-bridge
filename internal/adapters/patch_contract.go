@@ -2,19 +2,27 @@ package adapters
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 )
 
 const chatPatchSystemInstruction = `CHAT_COMPLETIONS_APPLY_PATCH_CONTRACT
 apply_patch is a Codex freeform patch transported through Chat Completions function arguments.
 The function arguments must decode to a complete patch string in input.
+Use apply_patch for source, document, and config file creation, edits, deletes, and moves. Do not use shell commands as a file editor.
+Before editing an existing file, inspect the current target lines unless this turn already contains the exact current text.
+apply_patch cannot read files. There is no *** Read File operation; use read-only shell commands for file inspection.
+Prefer small, surgical hunks. For large files or multi-area edits, make separate minimal hunks instead of rewriting broad surrounding blocks.
 For replacements, write the removed line with - immediately followed by the added line with +.
+Only mark lines with - or + when their content must actually change. Do not remove and re-add unchanged surrounding lines.
 Never write the old line as unchanged context and then also remove the same old line.
 Never use an insertion-only hunk when the requested task is to replace existing text.
 For Add File operations, do not use @@ hunks; every content line must start with +.
 For appending to an existing file, use Update File, not Add File.
 Unchanged context lines are byte-significant: copy indentation, tabs, spaces, and text exactly from the current file.
-For whitespace-sensitive files, use the smallest valid hunk and avoid nearby context unless needed for uniqueness.`
+For whitespace-sensitive files, use the smallest valid hunk and avoid nearby context unless needed for uniqueness.
+If apply_patch reports a context mismatch, do not retry the same patch. Read the current file and generate a smaller patch from exact current lines.
+After apply_patch succeeds for a file, do not call apply_patch on that same file again. Use read-only commands to verify, then summarize unless verification proves a real missing edit.`
 
 type PatchFailureKind string
 
@@ -23,6 +31,7 @@ const (
 	PatchFailureContextMismatch     PatchFailureKind = "context_mismatch"
 	PatchFailureMalformedPatch      PatchFailureKind = "malformed_patch"
 	PatchFailureInvalidHunk         PatchFailureKind = "invalid_hunk"
+	PatchFailureReadFileOperation   PatchFailureKind = "read_file_operation"
 	PatchFailurePathError           PatchFailureKind = "path_error"
 	PatchFailurePermissionOrSandbox PatchFailureKind = "permission_or_sandbox"
 	PatchFailureUnknown             PatchFailureKind = "unknown"
@@ -44,6 +53,8 @@ func NormalizePatchInput(input string) string {
 func ClassifyPatchFailure(output string) PatchFailureKind {
 	text := strings.ToLower(output)
 	switch {
+	case strings.Contains(text, "*** read file:"):
+		return PatchFailureReadFileOperation
 	case strings.Contains(text, "invalid hunk"),
 		strings.Contains(text, "expected hunk"),
 		strings.Contains(text, "expected line prefix"),
@@ -81,14 +92,102 @@ func PatchSucceeded(output string) bool {
 		strings.Contains(text, "successfully applied patch")
 }
 
+func PatchSucceededFiles(output string) []string {
+	files := make([]string, 0)
+	seen := map[string]bool{}
+	add := func(file string) {
+		file = normalizePatchFilePath(file)
+		if file == "" || seen[file] {
+			return
+		}
+		seen[file] = true
+		files = append(files, file)
+	}
+
+	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	collecting := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if collecting {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "changed_files:") {
+			for _, file := range strings.Split(strings.TrimPrefix(trimmed, "changed_files:"), ",") {
+				add(file)
+			}
+			continue
+		}
+		if strings.Contains(strings.ToLower(trimmed), "success. updated the following files") {
+			collecting = true
+			continue
+		}
+		if !collecting {
+			continue
+		}
+		parts := strings.Fields(trimmed)
+		if len(parts) < 2 || !isPatchFileStatus(parts[0]) {
+			break
+		}
+		add(strings.TrimPrefix(trimmed, parts[0]))
+	}
+	return files
+}
+
+func PatchTouchedFiles(input string) []string {
+	lines := strings.Split(NormalizePatchInput(input), "\n")
+	files := make([]string, 0)
+	seen := map[string]bool{}
+	add := func(file string) {
+		file = normalizePatchFilePath(file)
+		if file == "" || seen[file] {
+			return
+		}
+		seen[file] = true
+		files = append(files, file)
+	}
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "*** Add File: "):
+			add(strings.TrimPrefix(line, "*** Add File: "))
+		case strings.HasPrefix(line, "*** Update File: "):
+			add(strings.TrimPrefix(line, "*** Update File: "))
+		case strings.HasPrefix(line, "*** Delete File: "):
+			add(strings.TrimPrefix(line, "*** Delete File: "))
+		case strings.HasPrefix(line, "*** Move to: "):
+			add(strings.TrimPrefix(line, "*** Move to: "))
+		}
+	}
+	return files
+}
+
+func PatchFilesOverlap(left []string, right []string) bool {
+	seen := map[string]bool{}
+	for _, file := range left {
+		if normalized := normalizePatchFilePath(file); normalized != "" {
+			seen[normalized] = true
+		}
+	}
+	for _, file := range right {
+		if seen[normalizePatchFilePath(file)] {
+			return true
+		}
+	}
+	return false
+}
+
 func PatchRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "APPLY_PATCH_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_patch\nrecovery: read the current target file lines, then generate a smaller patch using exact current context."
+		return "APPLY_PATCH_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_patch\nrecovery: read the current target file lines, then generate a smaller patch using exact current context.\npatch_discipline: do not broaden the hunk, do not rewrite whole blocks, and do not use shell as a file editor."
 	case PatchFailureMalformedPatch:
 		return "APPLY_PATCH_MALFORMED\nrequired_next_action: regenerate_complete_freeform_patch\nforbidden_next_action: send_json_or_markdown_as_patch\nrecovery: send a complete patch starting with *** Begin Patch and ending with *** End Patch."
 	case PatchFailureInvalidHunk:
-		return "APPLY_PATCH_INVALID_HUNK\nrequired_next_action: fix_patch_syntax\nforbidden_next_action: change_target_code_to_fit_bad_patch\nrecovery: preserve exact hunk line prefixes: space for context, + for additions, - for removals."
+		return "APPLY_PATCH_INVALID_HUNK\nrequired_next_action: fix_patch_syntax\nforbidden_next_action: change_target_code_to_fit_bad_patch\nrecovery: preserve exact hunk line prefixes: space for context, + for additions, - for removals.\npatch_discipline: keep the intended edit small; do not switch to shell file writes."
+	case PatchFailureReadFileOperation:
+		return "APPLY_PATCH_WRONG_TOOL_FOR_READ\nrequired_next_action: inspect_file_with_read_only_shell\nforbidden_next_action: use_apply_patch_to_read_files\nrecovery: apply_patch only supports Add File, Update File, Delete File, and Move. Use read-only shell commands such as sed, grep, rg, head, tail, or cat to inspect files, then call apply_patch only for the actual edit."
 	case PatchFailurePathError:
 		return "APPLY_PATCH_PATH_ERROR\nrequired_next_action: verify_target_path\nforbidden_next_action: retry_same_path_blindly\nrecovery: inspect the directory or target file path, then generate a patch for the correct path."
 	case PatchFailurePermissionOrSandbox:
@@ -98,6 +197,45 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 	default:
 		return ""
 	}
+}
+
+func TextEditorRecoveryText(kind PatchFailureKind) string {
+	switch kind {
+	case PatchFailureContextMismatch:
+		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines, then send a smaller text editor edit using exact old_str or insert_after text.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
+	case PatchFailureMalformedPatch, PatchFailureInvalidHunk, PatchFailureReadFileOperation:
+		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: use command=create, str_replace, insert_after, or delete_file with exact JSON arguments."
+	case PatchFailurePathError:
+		return "TEXT_EDITOR_PATH_ERROR\nrequired_next_action: verify_target_path\nforbidden_next_action: retry_same_path_blindly\nrecovery: inspect the directory or target file path, then send a text editor edit for the correct path."
+	case PatchFailurePermissionOrSandbox:
+		return "TEXT_EDITOR_BLOCKED_BY_ENVIRONMENT\nrequired_next_action: report_blocker\nforbidden_next_action: retry_edit\nrecovery: explain the permission or sandbox blocker instead of retrying the edit."
+	case PatchFailureUnknown:
+		return "TEXT_EDITOR_EDIT_FAILED\nrequired_next_action: inspect_error_and_current_state\nforbidden_next_action: retry_same_edit_blindly\nrecovery: keep the original error, inspect current file state if needed, then choose the smallest safe next action."
+	default:
+		return ""
+	}
+}
+
+func isPatchFileStatus(status string) bool {
+	switch status {
+	case "A", "D", "M", "R", "C":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizePatchFilePath(file string) string {
+	file = strings.TrimSpace(file)
+	if file == "" {
+		return ""
+	}
+	file = filepath.ToSlash(filepath.Clean(file))
+	file = strings.TrimPrefix(file, "./")
+	if file == "." {
+		return ""
+	}
+	return file
 }
 
 func extractPatchFromJSONEnvelope(text string) (string, bool) {
@@ -183,13 +321,20 @@ func chatPatchToolDescription(tool ToolDescriptor) string {
 	parts := []string{
 		"This is Codex's file-editing patch tool encoded through Chat Completions. Treat it as a freeform patch transported inside JSON function arguments.",
 		"The decoded input string must start with *** Begin Patch and end with *** End Patch.",
+		"Use this tool for source, document, and config file creation, edits, deletes, and moves. Shell is for reading, searching, building, testing, formatting, and real generators, not manual file edits.",
+		"apply_patch cannot read files. Do not invent *** Read File; inspect files with read-only shell commands such as sed, grep, rg, head, tail, or cat.",
+		"Before editing an existing file, inspect the current target lines unless the current turn already includes the exact current text.",
+		"Prefer small, surgical hunks. For large files or multi-area edits, make separate minimal hunks instead of rewriting broad surrounding blocks.",
 		"For single-line replacements, use a minimal hunk with one - old line immediately followed by one + new line.",
+		"Only mark lines with - or + when their content must actually change. Do not remove and re-add unchanged surrounding lines.",
 		"Do not duplicate the old line as both unchanged context and a removed line.",
 		"Do not use an insertion-only hunk when replacing existing text.",
 		"For Add File operations, do not include @@ hunk headers; every content line must start with +.",
 		"For appending to an existing file, use Update File, not Add File.",
 		"Every unchanged context line is byte-significant and must be copied exactly from the current file.",
 		"Whitespace inside hunks is significant: preserve tabs, spaces, blank lines, and line prefixes exactly.",
+		"If a patch fails because context does not match, read the current file and generate a smaller patch from exact current lines; never retry the same patch.",
+		"After a patch succeeds for a file, do not call apply_patch on that same file again. Use read-only commands to verify, then summarize unless verification proves a real missing edit.",
 		"Do not wrap the patch in Markdown fences, JSON text, or explanatory prose.",
 		"Example: *** Begin Patch\n*** Update File: hello.txt\n@@\n-old\n+new\n*** End Patch\n",
 	}
@@ -199,330 +344,4 @@ func chatPatchToolDescription(tool ToolDescriptor) string {
 		}
 	}
 	return strings.Join(parts, "\n")
-}
-
-func RepairDeepSeekPatchInput(text string) string {
-	text = normalizePatchBoundaryLines(text)
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines))
-	inAddFile := false
-	for i := 0; i < len(lines); i++ {
-		if strings.HasPrefix(lines[i], "*** Add File: ") {
-			inAddFile = true
-			out = append(out, lines[i])
-			continue
-		}
-		if strings.HasPrefix(lines[i], "*** Update File: ") || strings.HasPrefix(lines[i], "*** Delete File: ") || strings.HasPrefix(lines[i], "*** End Patch") {
-			inAddFile = false
-		}
-		if inAddFile && strings.TrimSpace(lines[i]) == "@@" {
-			continue
-		}
-		if i+2 < len(lines) && isPatchContextLine(lines[i]) && strings.HasPrefix(lines[i+1], "+") && strings.HasPrefix(lines[i+2], "-") {
-			context := strings.TrimPrefix(lines[i], " ")
-			removed := strings.TrimPrefix(lines[i+2], "-")
-			if context == removed || strings.TrimSpace(context) == strings.TrimSpace(removed) {
-				out = append(out, lines[i+2], lines[i+1])
-				i += 2
-				continue
-			}
-		}
-		if i+1 < len(lines) && isPatchContextLine(lines[i]) && strings.HasPrefix(lines[i+1], "+") {
-			context := strings.TrimPrefix(lines[i], " ")
-			added := strings.TrimPrefix(lines[i+1], "+")
-			if looksLikeReplacementLine(context, added) && len(lineIndent(added)) >= len(lineIndent(context)) {
-				out = append(out, "-"+context, lines[i+1])
-				i++
-				continue
-			}
-		}
-		out = append(out, lines[i])
-	}
-	return minimizeSingleReplacementHunks(repairDeepSeekMarkdownListContext(repairDeepSeekUpdateHunkPrefixes(mergeRepeatedPatchEnvelopes(strings.Join(out, "\n")))))
-}
-
-func normalizePatchBoundaryLines(text string) string {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if normalized, ok := normalizedPatchBoundaryLine(line); ok {
-			lines[i] = normalized
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func normalizedPatchBoundaryLine(line string) (string, bool) {
-	trimmed := strings.TrimSpace(line)
-	for {
-		next := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(trimmed), "+-"))
-		if next == trimmed {
-			break
-		}
-		trimmed = next
-	}
-	switch trimmed {
-	case "*** Begin Patch", "*** End Patch":
-		return trimmed, true
-	default:
-		return "", false
-	}
-}
-
-func mergeRepeatedPatchEnvelopes(text string) string {
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines))
-	seenBegin := false
-	for _, line := range lines {
-		switch line {
-		case "*** Begin Patch":
-			if seenBegin {
-				continue
-			}
-			seenBegin = true
-			out = append(out, line)
-		case "*** End Patch":
-			continue
-		default:
-			out = append(out, line)
-		}
-	}
-	if seenBegin {
-		out = append(out, "*** End Patch")
-	}
-	return strings.Join(out, "\n")
-}
-
-func repairDeepSeekMarkdownListContext(text string) string {
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines))
-	inUpdateFile := false
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		switch {
-		case strings.HasPrefix(line, "*** Update File: "):
-			inUpdateFile = true
-			out = append(out, line)
-		case strings.HasPrefix(line, "*** "):
-			inUpdateFile = false
-			out = append(out, line)
-		case inUpdateFile && line == "@@":
-			hunkEnd := nextDeepSeekHunkBoundary(lines, i+1)
-			out = append(out, line)
-			out = append(out, repairMarkdownListContextHunk(lines[i+1:hunkEnd])...)
-			i = hunkEnd - 1
-		default:
-			out = append(out, line)
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-func repairMarkdownListContextHunk(lines []string) []string {
-	if !hunkHasMutation(lines) {
-		return lines
-	}
-	out := append([]string(nil), lines...)
-	for i, line := range out {
-		if looksLikeMarkdownListDeletion(line) {
-			out[i] = " " + line
-		}
-	}
-	return out
-}
-
-func looksLikeMarkdownListDeletion(line string) bool {
-	if strings.HasPrefix(line, "-- ") || strings.HasPrefix(line, "-* ") || strings.HasPrefix(line, "-+ ") {
-		return false
-	}
-	if !strings.HasPrefix(line, "- ") || len(line) < 3 || line[2] == ' ' || line[2] == '\t' {
-		return false
-	}
-	item := strings.TrimSpace(strings.TrimPrefix(line, "- "))
-	return item != "" && !strings.HasPrefix(item, "-")
-}
-
-func repairDeepSeekUpdateHunkPrefixes(text string) string {
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines))
-	inUpdateFile := false
-	inHunk := false
-	droppingAfterEndOfFile := false
-	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "*** Update File: "):
-			inUpdateFile = true
-			inHunk = false
-			droppingAfterEndOfFile = false
-			out = append(out, line)
-			continue
-		case inUpdateFile && inHunk && line == "*** End of File":
-			droppingAfterEndOfFile = true
-			out = append(out, line)
-			continue
-		case strings.HasPrefix(line, "*** "):
-			inUpdateFile = false
-			inHunk = false
-			droppingAfterEndOfFile = false
-			out = append(out, line)
-			continue
-		case inUpdateFile && strings.HasPrefix(line, "@@"):
-			inHunk = true
-			droppingAfterEndOfFile = false
-			out = append(out, line)
-			continue
-		case droppingAfterEndOfFile:
-			continue
-		case inUpdateFile && inHunk && needsDeepSeekContextPrefix(line):
-			out = append(out, " "+line)
-			continue
-		}
-		out = append(out, line)
-	}
-	return removeNoOpDeepSeekUpdateHunks(strings.Join(out, "\n"))
-}
-
-func removeNoOpDeepSeekUpdateHunks(text string) string {
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines))
-	inUpdateFile := false
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		switch {
-		case strings.HasPrefix(line, "*** Update File: "):
-			inUpdateFile = true
-			out = append(out, line)
-		case strings.HasPrefix(line, "*** "):
-			inUpdateFile = false
-			out = append(out, line)
-		case inUpdateFile && line == "@@":
-			hunkEnd := nextDeepSeekHunkBoundary(lines, i+1)
-			if !hunkHasMutation(lines[i+1 : hunkEnd]) {
-				i = hunkEnd - 1
-				continue
-			}
-			out = append(out, line)
-		default:
-			out = append(out, line)
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-func nextDeepSeekHunkBoundary(lines []string, start int) int {
-	for i := start; i < len(lines); i++ {
-		if strings.HasPrefix(lines[i], "*** ") || strings.HasPrefix(lines[i], "@@") {
-			return i
-		}
-	}
-	return len(lines)
-}
-
-func hunkHasMutation(lines []string) bool {
-	for _, line := range lines {
-		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
-			return true
-		}
-	}
-	return false
-}
-
-func needsDeepSeekContextPrefix(line string) bool {
-	if line == "" {
-		return true
-	}
-	return !strings.HasPrefix(line, " ") &&
-		!strings.HasPrefix(line, "+") &&
-		!strings.HasPrefix(line, "-") &&
-		!strings.HasPrefix(line, `\`)
-}
-
-func isPatchContextLine(line string) bool {
-	return strings.HasPrefix(line, " ") && !strings.HasPrefix(line, " ***")
-}
-
-func looksLikeReplacementLine(oldLine string, newLine string) bool {
-	oldTrimmed := strings.TrimSpace(oldLine)
-	newTrimmed := strings.TrimSpace(newLine)
-	if oldTrimmed == "" || newTrimmed == "" || oldTrimmed == newTrimmed {
-		return false
-	}
-	commonPrefix := 0
-	for commonPrefix < len(oldTrimmed) && commonPrefix < len(newTrimmed) && oldTrimmed[commonPrefix] == newTrimmed[commonPrefix] {
-		commonPrefix++
-	}
-	commonSuffix := 0
-	for commonSuffix < len(oldTrimmed)-commonPrefix && commonSuffix < len(newTrimmed)-commonPrefix &&
-		oldTrimmed[len(oldTrimmed)-1-commonSuffix] == newTrimmed[len(newTrimmed)-1-commonSuffix] {
-		commonSuffix++
-	}
-	shorter := len(oldTrimmed)
-	if len(newTrimmed) < shorter {
-		shorter = len(newTrimmed)
-	}
-	return shorter >= 12 && (commonPrefix+commonSuffix)*100/shorter >= 70
-}
-
-func lineIndent(line string) string {
-	var b strings.Builder
-	for _, r := range line {
-		if r != ' ' && r != '\t' {
-			break
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-func minimizeSingleReplacementHunks(text string) string {
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines))
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		if !strings.HasPrefix(line, "@@") {
-			out = append(out, line)
-			continue
-		}
-		hunk := []string{line}
-		j := i + 1
-		for ; j < len(lines); j++ {
-			if strings.HasPrefix(lines[j], "@@") || strings.HasPrefix(lines[j], "*** ") {
-				break
-			}
-			hunk = append(hunk, lines[j])
-		}
-		if minimized, ok := singleReplacementHunk(hunk); ok {
-			out = append(out, minimized...)
-		} else {
-			out = append(out, hunk...)
-		}
-		i = j - 1
-	}
-	return strings.Join(out, "\n")
-}
-
-func singleReplacementHunk(hunk []string) ([]string, bool) {
-	if len(hunk) < 3 {
-		return nil, false
-	}
-	var removed string
-	var added string
-	removedCount := 0
-	addedCount := 0
-	for _, line := range hunk[1:] {
-		switch {
-		case strings.HasPrefix(line, "-"):
-			removed = line
-			removedCount++
-		case strings.HasPrefix(line, "+"):
-			added = line
-			addedCount++
-		}
-	}
-	if removedCount != 1 || addedCount != 1 {
-		return nil, false
-	}
-	if !looksLikeReplacementLine(strings.TrimPrefix(removed, "-"), strings.TrimPrefix(added, "+")) {
-		return nil, false
-	}
-	return []string{hunk[0], removed, added}, true
 }

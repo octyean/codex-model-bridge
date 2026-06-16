@@ -91,6 +91,10 @@ func Get(name string) Adapter {
 	return registry[DefaultName]
 }
 
+func UseTextEditorForApplyPatch(adapter Adapter) bool {
+	return adapter.Name() != OpenAIName
+}
+
 func HasImageInput(caps Capabilities) bool {
 	for _, modality := range caps.InputModalities {
 		if strings.EqualFold(strings.TrimSpace(modality), "image") {

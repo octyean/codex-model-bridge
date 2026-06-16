@@ -18,7 +18,7 @@ func (openAIAdapter) Capabilities() Capabilities {
 }
 
 func (openAIAdapter) ToolPolicy() ToolPolicy {
-	return defaultAdapter{}.ToolPolicy()
+	return ToolPolicy{}
 }
 
 func (openAIAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {

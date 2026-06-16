@@ -1,9 +1,12 @@
 package toollog
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"codex-bridge/internal/adapters"
@@ -13,8 +16,10 @@ import (
 
 const envToolLogPath = "CODEX_BRIDGE_TOOL_LOG"
 
+var seenPatchToolOutputs sync.Map
+
 func PatchToolCall(requestID string, callID string, entry tools.Entry, rawArguments string, item codex.ResponseItem) {
-	if entry.Kind() != tools.KindPatch {
+	if !isPatchWriteKind(entry.Kind()) {
 		return
 	}
 	appendRecord(map[string]any{
@@ -44,7 +49,10 @@ func BlockedToolRewrite(callID string, entry tools.Entry, rawArguments string, r
 }
 
 func PatchToolOutput(callID string, descriptor adapters.ToolDescriptor, rawOutput string, formattedOutput string) {
-	if descriptor.Kind != tools.KindPatch {
+	if !isPatchWriteKind(descriptor.Kind) {
+		return
+	}
+	if seenToolOutput(callID, rawOutput) {
 		return
 	}
 	appendRecord(map[string]any{
@@ -58,6 +66,23 @@ func PatchToolOutput(callID string, descriptor adapters.ToolDescriptor, rawOutpu
 		"raw_output":       rawOutput,
 		"formatted_output": formattedOutput,
 	})
+}
+
+func isPatchWriteKind(kind string) bool {
+	return kind == tools.KindPatch || kind == tools.KindTextEditor
+}
+
+func seenToolOutput(callID string, rawOutput string) bool {
+	key := callID + ":" + outputHash(rawOutput)
+	if _, loaded := seenPatchToolOutputs.LoadOrStore(key, true); loaded {
+		return true
+	}
+	return false
+}
+
+func outputHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 func appendRecord(record map[string]any) {

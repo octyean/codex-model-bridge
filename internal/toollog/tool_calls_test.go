@@ -45,3 +45,43 @@ func TestToolLogWritesWhenEnvIsSet(t *testing.T) {
 		}
 	}
 }
+
+func TestToolLogWritesTextEditorPatchCalls(t *testing.T) {
+	logPath := t.TempDir() + "/tool-calls.jsonl"
+	t.Setenv(envToolLogPath, logPath)
+	entry := tools.Entry{
+		Descriptor:   adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindTextEditor, OriginalType: "custom"},
+		UpstreamName: "codex_text_editor",
+	}
+
+	PatchToolCall("req_test", "call_1", entry, `{"command":"str_replace"}`, codex.ResponseItem{"type": "custom_tool_call", "name": "apply_patch"})
+	PatchToolOutput("call_1", adapters.ToolDescriptor{Name: "codex_text_editor", Kind: tools.KindTextEditor}, "Success. Updated the following files:\nM a.java", "TEXT_EDITOR_EDIT_SUCCEEDED")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{"codex_text_editor", "text_editor_patch", "tool_output"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("log missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestPatchToolOutputDeduplicatesReplayedOutputs(t *testing.T) {
+	logPath := t.TempDir() + "/tool-calls.jsonl"
+	t.Setenv(envToolLogPath, logPath)
+	descriptor := adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindPatch}
+
+	PatchToolOutput("call_1", descriptor, "Failed to find context", "Failed to find context\n\nAPPLY_PATCH_CONTEXT_MISMATCH")
+	PatchToolOutput("call_1", descriptor, "Failed to find context", "Failed to find context\n\nAPPLY_PATCH_CONTEXT_MISMATCH")
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if got := strings.Count(string(data), `"event":"tool_output"`); got != 1 {
+		t.Fatalf("tool output log count = %d, log = %s", got, data)
+	}
+}

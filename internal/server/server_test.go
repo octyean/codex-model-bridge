@@ -65,6 +65,15 @@ func (p *fakeProvider) Create(_ context.Context, req providers.ChatCompletionReq
 		p.responses = p.responses[1:]
 		return &resp, nil
 	}
+	toolName := "apply_patch"
+	toolArguments := `{"input":"*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"}`
+	for _, tool := range req.Tools {
+		if tool.Function.Name == "codex_text_editor" {
+			toolName = "codex_text_editor"
+			toolArguments = `{"command":"create","path":"hello.txt","file_text":"hello"}`
+			break
+		}
+	}
 	return &providers.ChatCompletionResponse{
 		ID:    "chatcmpl_test",
 		Model: req.Model,
@@ -78,8 +87,8 @@ func (p *fakeProvider) Create(_ context.Context, req providers.ChatCompletionReq
 				ID:   "call_1",
 				Type: "function",
 				Function: providers.ChatCallFunction{
-					Name:      "apply_patch",
-					Arguments: `{"input":"*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"}`,
+					Name:      toolName,
+					Arguments: toolArguments,
 				},
 			}}},
 			FinishReason: "tool_calls",
@@ -212,7 +221,7 @@ func TestResponsesEndpointReturnsApplyPatchCustomToolCall(t *testing.T) {
 	if !provider.req.AssistantToolContentNull {
 		t.Fatalf("deepseek adapter should request null assistant tool content")
 	}
-	if len(provider.req.Tools) != 1 || provider.req.Tools[0].Function.Name != "apply_patch" {
+	if len(provider.req.Tools) != 1 || provider.req.Tools[0].Function.Name != "codex_text_editor" {
 		t.Fatalf("chat tools = %#v", provider.req.Tools)
 	}
 	var resp map[string]any
@@ -226,6 +235,123 @@ func TestResponsesEndpointReturnsApplyPatchCustomToolCall(t *testing.T) {
 	}
 	if item["input"] != "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch" {
 		t.Fatalf("input = %q", item["input"])
+	}
+}
+
+func TestResponsesEndpointAllowsDifferentFilePatchAfterPatchSuccess(t *testing.T) {
+	provider := &fakeProvider{responses: []providers.ChatCompletionResponse{{
+		ID: "chatcmpl_test",
+		Choices: []struct {
+			Index        int                   `json:"index"`
+			Message      providers.ChatMessage `json:"message"`
+			FinishReason string                `json:"finish_reason"`
+		}{{
+			Message: providers.ChatMessage{ToolCalls: []providers.ChatToolCall{{
+				ID:   "call_2",
+				Type: "function",
+				Function: providers.ChatCallFunction{
+					Name:      "codex_text_editor",
+					Arguments: `{"command":"str_replace","path":"b.vue","old_str":"old","new_str":"new"}`,
+				},
+			}}},
+			FinishReason: "tool_calls",
+		}},
+	}}}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"edit two files"}]},
+			{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n@@\n-old\n+new\n*** End Patch"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM a.java\n\nAPPLY_PATCH_SUCCEEDED\nfile_edit_state: completed\nchanged_files: a.java"}
+		],
+		"tools":[{"type":"custom","name":"apply_patch"}],
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(provider.req.Tools) != 1 || provider.req.Tools[0].Function.Name != "codex_text_editor" {
+		t.Fatalf("text editor should stay available: %#v", provider.req.Tools)
+	}
+	foundCooldownNote := false
+	for _, message := range provider.req.Messages {
+		text, _ := message.Content.(string)
+		if message.Role == "system" && strings.Contains(text, "TEXT_EDITOR_SUCCESS_STOP") && strings.Contains(text, "a.java") {
+			foundCooldownNote = true
+		}
+	}
+	if !foundCooldownNote {
+		t.Fatalf("missing cooldown note: %#v", provider.req.Messages)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	output := resp["output"].([]any)
+	item := output[0].(map[string]any)
+	if item["type"] != "custom_tool_call" || !strings.Contains(item["input"].(string), "b.vue") {
+		t.Fatalf("output item = %#v", item)
+	}
+}
+
+func TestResponsesEndpointBlocksSameFilePatchAfterPatchSuccess(t *testing.T) {
+	provider := &fakeProvider{responses: []providers.ChatCompletionResponse{{
+		ID: "chatcmpl_test",
+		Choices: []struct {
+			Index        int                   `json:"index"`
+			Message      providers.ChatMessage `json:"message"`
+			FinishReason string                `json:"finish_reason"`
+		}{{
+			Message: providers.ChatMessage{ToolCalls: []providers.ChatToolCall{{
+				ID:   "call_2",
+				Type: "function",
+				Function: providers.ChatCallFunction{
+					Name:      "codex_text_editor",
+					Arguments: `{"command":"str_replace","path":"./a.java","old_str":"old","new_str":"new"}`,
+				},
+			}}},
+			FinishReason: "tool_calls",
+		}},
+	}}}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"edit two files"}]},
+			{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n@@\n-old\n+new\n*** End Patch"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM a.java\n\nAPPLY_PATCH_SUCCEEDED\nfile_edit_state: completed\nchanged_files: a.java"}
+		],
+		"tools":[{"type":"custom","name":"apply_patch"}],
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	output := resp["output"].([]any)
+	item := output[0].(map[string]any)
+	if item["type"] != "message" {
+		t.Fatalf("output item = %#v", item)
+	}
+	content := item["content"].([]any)[0].(map[string]any)
+	if !strings.Contains(content["text"].(string), "已跳过重复的同文件编辑") {
+		t.Fatalf("content = %#v", content)
 	}
 }
 
@@ -440,8 +566,9 @@ func TestResponsesEndpointStreamsInternalWebSearchAsFinalMessage(t *testing.T) {
 
 func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
-		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n"}}]}}]}`)},
-		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"*** Add File: hello.txt\\n+hello\\n*** End Patch\\n\"}"}}]}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"reasoning_content":"think "}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"reasoning_content":"more","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"codex_text_editor","arguments":"{\"command\":\"create\","}}]}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\"hello.txt\",\"file_text\":\"hello\"}"}}]}}]}`)},
 		{Chunk: chatChunk(t, `{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20,"completion_tokens_details":{"reasoning_tokens":5}}}`)},
 	}}
 	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -472,6 +599,7 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 		"response.created",
 		"response.in_progress",
 		"response.output_item.added",
+		"response.output_item.done",
 		"response.custom_tool_call_input.delta",
 		"response.custom_tool_call_input.done",
 		"response.output_item.done",
@@ -480,14 +608,23 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	if strings.Join(eventTypes, ",") != strings.Join(wantTypes, ",") {
 		t.Fatalf("event types = %v", eventTypes)
 	}
-	doneItem := events[5]["item"].(map[string]any)
+	doneItem := events[6]["item"].(map[string]any)
 	if doneItem["type"] != "custom_tool_call" || doneItem["name"] != "apply_patch" {
 		t.Fatalf("done item = %#v", doneItem)
 	}
 	if doneItem["input"] != "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch" {
 		t.Fatalf("input = %q", doneItem["input"])
 	}
-	completed := events[6]["response"].(map[string]any)
+	completed := events[7]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	reasoningItem := output[0].(map[string]any)
+	if reasoningItem["type"] != "reasoning" || reasoningItem["reasoning_content"] != "think more" {
+		t.Fatalf("reasoning item = %#v", reasoningItem)
+	}
+	toolItem := output[1].(map[string]any)
+	if toolItem["type"] != "custom_tool_call" {
+		t.Fatalf("tool item = %#v", toolItem)
+	}
 	usage := completed["usage"].(map[string]any)
 	if usage["input_tokens"] != float64(100) || usage["total_tokens"] != float64(120) {
 		t.Fatalf("usage = %#v", usage)
@@ -495,6 +632,78 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	outputDetails := usage["output_tokens_details"].(map[string]any)
 	if outputDetails["reasoning_tokens"] != float64(5) {
 		t.Fatalf("output details = %#v", outputDetails)
+	}
+}
+
+func TestResponsesEndpointStreamsDifferentFilePatchDuringCooldown(t *testing.T) {
+	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"codex_text_editor","arguments":"{\"command\":\"str_replace\",\"path\":\"b.vue\","}}]}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"old_str\":\"old\",\"new_str\":\"new\"}"}}]}}]}`)},
+	}}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"edit two files"}]},
+			{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n@@\n-old\n+new\n*** End Patch"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM a.java\n\nAPPLY_PATCH_SUCCEEDED\nfile_edit_state: completed\nchanged_files: a.java"}
+		],
+		"tools":[{"type":"custom","name":"apply_patch"}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	events := sseEvents(t, rec.Body.String())
+	completed := events[len(events)-1]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	item := output[0].(map[string]any)
+	if item["type"] != "custom_tool_call" || !strings.Contains(item["input"].(string), "b.vue") {
+		t.Fatalf("output item = %#v", item)
+	}
+}
+
+func TestResponsesEndpointStreamsBlocksSameFilePatchDuringCooldown(t *testing.T) {
+	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"codex_text_editor","arguments":"{\"command\":\"str_replace\",\"path\":\"a.java\","}}]}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"old_str\":\"old\",\"new_str\":\"new\"}"}}]}}]}`)},
+	}}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"edit two files"}]},
+			{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n@@\n-old\n+new\n*** End Patch"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM a.java\n\nAPPLY_PATCH_SUCCEEDED\nfile_edit_state: completed\nchanged_files: a.java"}
+		],
+		"tools":[{"type":"custom","name":"apply_patch"}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	events := sseEvents(t, rec.Body.String())
+	completed := events[len(events)-1]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	item := output[0].(map[string]any)
+	if item["type"] != "message" {
+		t.Fatalf("output item = %#v", item)
+	}
+	content := item["content"].([]any)[0].(map[string]any)
+	if !strings.Contains(content["text"].(string), "已跳过重复的同文件编辑") {
+		t.Fatalf("content = %#v", content)
 	}
 }
 

@@ -83,6 +83,31 @@ func TestDefaultProfileKeepsAssistantToolContentString(t *testing.T) {
 	}
 }
 
+func TestPrepareRequestSerializesReasoningContent(t *testing.T) {
+	wire := prepareRequest(ChatCompletionRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []ChatMessage{
+			{Role: "assistant", ReasoningContent: "think", ToolCalls: []ChatToolCall{{
+				ID: "call_1", Type: "function",
+				Function: ChatCallFunction{Name: "tool", Arguments: `{}`},
+			}}},
+		},
+	})
+	data, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("unmarshal wire: %v", err)
+	}
+	messages := body["messages"].([]any)
+	message := messages[0].(map[string]any)
+	if message["reasoning_content"] != "think" {
+		t.Fatalf("message = %#v", message)
+	}
+}
+
 func TestNormalizeUsageDeepSeekAndNestedShapes(t *testing.T) {
 	deepseek := NormalizeUsage(map[string]any{
 		"prompt_tokens":            float64(1000),

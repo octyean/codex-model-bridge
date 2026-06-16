@@ -15,13 +15,14 @@ import (
 
 func TestResponseItemsFromApplyPatchToolCall(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.DeepSeekName))
+	adapter := adapters.Get(adapters.OpenAIName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
 	items := responseItemsFromMessage(providers.ChatMessage{
 		ToolCalls: []providers.ChatToolCall{{
 			ID: "call_1", Type: "function",
 			Function: providers.ChatCallFunction{Name: "apply_patch", Arguments: `{"input":"*** Begin Patch\n*** End Patch\n"}`},
 		}},
-	}, toolCtx, adapters.Get(adapters.DeepSeekName), "req_test", logger)
+	}, toolCtx, adapter, "req_test", logger)
 	if len(items) != 1 {
 		t.Fatalf("items len = %d", len(items))
 	}
@@ -30,6 +31,132 @@ func TestResponseItemsFromApplyPatchToolCall(t *testing.T) {
 	}
 	if items[0]["input"] != "*** Begin Patch\n*** End Patch" {
 		t.Fatalf("input = %q", items[0]["input"])
+	}
+}
+
+func TestResponseItemsConvertsDeepSeekTextEditorToApplyPatchCall(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adapter := adapters.Get(adapters.DeepSeekName)
+	chatTools, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	if len(chatTools) != 1 || chatTools[0].Function.Name != "codex_text_editor" {
+		t.Fatalf("chat tools = %#v", chatTools)
+	}
+	items := responseItemsFromMessage(providers.ChatMessage{
+		ToolCalls: []providers.ChatToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: providers.ChatCallFunction{
+				Name:      "codex_text_editor",
+				Arguments: `{"command":"str_replace","path":"a.java","old_str":"old","new_str":"new"}`,
+			},
+		}},
+	}, toolCtx, adapter, "req_test", logger)
+	if len(items) != 1 {
+		t.Fatalf("items len = %d", len(items))
+	}
+	if items[0]["type"] != "custom_tool_call" || items[0]["name"] != "apply_patch" {
+		t.Fatalf("item = %#v", items[0])
+	}
+	input, _ := items[0]["input"].(string)
+	for _, want := range []string{"*** Begin Patch", "*** Update File: a.java", "-old", "+new", "*** End Patch"} {
+		if !strings.Contains(input, want) {
+			t.Fatalf("input missing %q: %s", want, input)
+		}
+	}
+}
+
+func TestResponseItemsAllowsDifferentFilePatchDuringCooldown(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adapter := adapters.Get(adapters.DeepSeekName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	items := responseItemsFromMessageWithOptions(providers.ChatMessage{
+		ToolCalls: []providers.ChatToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: providers.ChatCallFunction{
+				Name:      "codex_text_editor",
+				Arguments: `{"command":"str_replace","path":"b.vue","old_str":"old","new_str":"new"}`,
+			},
+		}},
+	}, toolCtx, adapter, "req_test", logger, responseConversionOptions{patchCooldownFiles: []string{"a.java"}})
+	if len(items) != 1 || items[0]["type"] != "custom_tool_call" {
+		t.Fatalf("items = %#v", items)
+	}
+	if !strings.Contains(items[0]["input"].(string), "b.vue") {
+		t.Fatalf("input = %#v", items[0]["input"])
+	}
+}
+
+func TestResponseItemsBlocksSameFilePatchDuringCooldown(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adapter := adapters.Get(adapters.DeepSeekName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	items := responseItemsFromMessageWithOptions(providers.ChatMessage{
+		ToolCalls: []providers.ChatToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: providers.ChatCallFunction{
+				Name:      "codex_text_editor",
+				Arguments: `{"command":"str_replace","path":"./a.java","old_str":"old","new_str":"new"}`,
+			},
+		}},
+	}, toolCtx, adapter, "req_test", logger, responseConversionOptions{patchCooldownFiles: []string{"a.java"}})
+	if len(items) != 1 || items[0]["type"] != "message" {
+		t.Fatalf("items = %#v", items)
+	}
+	content := items[0]["content"].([]map[string]string)[0]["text"]
+	if !strings.Contains(content, "已跳过重复的同文件编辑") || !strings.Contains(content, "a.java") {
+		t.Fatalf("content = %s", content)
+	}
+}
+
+func TestResponseItemsCollapsesRepeatedSameFileCooldownMessages(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adapter := adapters.Get(adapters.DeepSeekName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	items := responseItemsFromMessageWithOptions(providers.ChatMessage{
+		ToolCalls: []providers.ChatToolCall{
+			{
+				ID:   "call_1",
+				Type: "function",
+				Function: providers.ChatCallFunction{
+					Name:      "codex_text_editor",
+					Arguments: `{"command":"str_replace","path":"a.java","old_str":"old","new_str":"new"}`,
+				},
+			},
+			{
+				ID:   "call_2",
+				Type: "function",
+				Function: providers.ChatCallFunction{
+					Name:      "codex_text_editor",
+					Arguments: `{"command":"str_replace","path":"./a.java","old_str":"old2","new_str":"new2"}`,
+				},
+			},
+		},
+	}, toolCtx, adapter, "req_test", logger, responseConversionOptions{patchCooldownFiles: []string{"a.java"}})
+	if len(items) != 1 || items[0]["type"] != "message" {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestResponseItemsKeepsDeepSeekReasoningBeforeToolCall(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.DeepSeekName))
+	items := responseItemsFromMessage(providers.ChatMessage{
+		ReasoningContent: "think before patch",
+		ToolCalls: []providers.ChatToolCall{{
+			ID: "call_1", Type: "function",
+			Function: providers.ChatCallFunction{Name: "codex_text_editor", Arguments: `{"command":"str_replace","path":"a.java","old_str":"old","new_str":"new"}`},
+		}},
+	}, toolCtx, adapters.Get(adapters.DeepSeekName), "req_test", logger)
+	if len(items) != 2 {
+		t.Fatalf("items len = %d", len(items))
+	}
+	if items[0]["type"] != "reasoning" || items[0]["reasoning_content"] != "think before patch" {
+		t.Fatalf("reasoning item = %#v", items[0])
+	}
+	if items[1]["type"] != "custom_tool_call" {
+		t.Fatalf("tool item = %#v", items[1])
 	}
 }
 

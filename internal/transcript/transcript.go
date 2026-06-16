@@ -40,14 +40,17 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 		return Result{}, err
 	}
 	var pendingToolCalls []providers.ChatToolCall
+	pendingReasoning := ""
 	toolCallsByID := map[string]providers.ChatToolCall{}
+	hiddenFileEditCalls := map[string][]string{}
 	for _, item := range items {
 		itemType, _ := item["type"].(string)
 		switch itemType {
 		case "message":
 			if len(pendingToolCalls) > 0 {
-				messages = append(messages, providers.ChatMessage{Role: "assistant", ToolCalls: pendingToolCalls})
+				messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
 				pendingToolCalls = nil
+				pendingReasoning = ""
 			}
 			role, _ := item["role"].(string)
 			if role == "" {
@@ -62,10 +65,34 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "custom_tool_call":
+			if shouldHideApplyPatchHistory(item, adapter) {
+				if len(pendingToolCalls) > 0 {
+					messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
+					pendingToolCalls = nil
+					pendingReasoning = ""
+				}
+				callID, _ := item["call_id"].(string)
+				files := adapters.PatchTouchedFiles(valueText(item["input"]))
+				hiddenFileEditCalls[callID] = files
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryCallSummary(files)})
+				continue
+			}
 			call := customToolCall(item, adapter)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "apply_patch_call":
+			if adapters.UseTextEditorForApplyPatch(adapter) {
+				if len(pendingToolCalls) > 0 {
+					messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
+					pendingToolCalls = nil
+					pendingReasoning = ""
+				}
+				callID, input := applyPatchHistoryInput(item)
+				files := adapters.PatchTouchedFiles(input)
+				hiddenFileEditCalls[callID] = files
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryCallSummary(files)})
+				continue
+			}
 			call := applyPatchToolCall(item, adapter)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
@@ -79,14 +106,21 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			toolCallsByID[call.ID] = call
 		case "function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output", "shell_call_output", "local_shell_call_output":
 			if len(pendingToolCalls) > 0 {
-				messages = append(messages, providers.ChatMessage{Role: "assistant", ToolCalls: pendingToolCalls})
+				messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
 				pendingToolCalls = nil
+				pendingReasoning = ""
 			}
 			callID, _ := item["call_id"].(string)
+			if files, ok := hiddenFileEditCalls[callID]; ok {
+				rawOutput := outputText(item)
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryOutputSummary(rawOutput, files)})
+				continue
+			}
 			descriptor := outputToolDescriptor(item)
 			if call, ok := toolCallsByID[callID]; ok {
 				descriptor = outputToolDescriptorForCall(item, call)
 			}
+			descriptor = adapterOutputToolDescriptor(adapter, descriptor)
 			rawOutput := outputText(item)
 			formattedOutput := adapter.FormatToolOutput(descriptor, rawOutput)
 			toollog.PatchToolOutput(callID, descriptor, rawOutput, formattedOutput)
@@ -95,17 +129,30 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				ToolCallID: callID,
 				Content:    formattedOutput,
 			})
-		case "additional_tools", "reasoning":
+		case "reasoning":
+			if adapter.Name() == adapters.DeepSeekName {
+				pendingReasoning = reasoningContent(item)
+			}
+		case "additional_tools":
 			continue
 		}
 	}
 	if len(pendingToolCalls) > 0 {
-		messages = append(messages, providers.ChatMessage{Role: "assistant", ToolCalls: pendingToolCalls})
+		messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
 	}
 	if len(messages) == 0 {
 		return Result{}, fmt.Errorf("responses input did not contain messages")
 	}
 	return Result{Messages: messages, Items: items}, nil
+}
+
+func adapterOutputToolDescriptor(adapter adapters.Adapter, descriptor adapters.ToolDescriptor) adapters.ToolDescriptor {
+	if adapters.UseTextEditorForApplyPatch(adapter) && descriptor.Name == "apply_patch" && descriptor.Kind == tools.KindPatch {
+		descriptor.Name = "codex_text_editor"
+		descriptor.Kind = tools.KindTextEditor
+		descriptor.InputMode = tools.InputModeJSON
+	}
+	return descriptor
 }
 
 func parseInputItems(input json.RawMessage) ([]map[string]any, error) {
@@ -271,26 +318,21 @@ func customToolCall(item map[string]any, adapter adapters.Adapter) providers.Cha
 	callID, _ := item["call_id"].(string)
 	input, _ := item["input"].(string)
 	input = adapter.NormalizeCustomInput(name, input)
-	arguments, _ := json.Marshal(map[string]string{"input": input})
+	argumentsData, _ := json.Marshal(map[string]string{"input": input})
+	arguments := string(argumentsData)
 	return providers.ChatToolCall{
 		ID:   callID,
 		Type: "function",
 		Function: providers.ChatCallFunction{
 			Name:      name,
-			Arguments: string(arguments),
+			Arguments: arguments,
 		},
 	}
 }
 
 func applyPatchToolCall(item map[string]any, adapter adapters.Adapter) providers.ChatToolCall {
 	callID, _ := item["call_id"].(string)
-	input := ""
-	if text, ok := item["input"].(string); ok {
-		input = text
-	} else if operation, ok := item["operation"].(map[string]any); ok {
-		data, _ := json.Marshal(operation)
-		input = string(data)
-	}
+	_, input := applyPatchHistoryInput(item)
 	input = adapter.NormalizeCustomInput("apply_patch", input)
 	arguments, _ := json.Marshal(map[string]string{"input": input})
 	return providers.ChatToolCall{
@@ -301,6 +343,52 @@ func applyPatchToolCall(item map[string]any, adapter adapters.Adapter) providers
 			Arguments: string(arguments),
 		},
 	}
+}
+
+func shouldHideApplyPatchHistory(item map[string]any, adapter adapters.Adapter) bool {
+	if !adapters.UseTextEditorForApplyPatch(adapter) {
+		return false
+	}
+	name, _ := item["name"].(string)
+	return name == "apply_patch"
+}
+
+func applyPatchHistoryInput(item map[string]any) (string, string) {
+	callID, _ := item["call_id"].(string)
+	if text, ok := item["input"].(string); ok {
+		return callID, text
+	}
+	if operation, ok := item["operation"].(map[string]any); ok {
+		data, _ := json.Marshal(operation)
+		return callID, string(data)
+	}
+	return callID, ""
+}
+
+func hiddenTextEditorHistoryCallSummary(files []string) string {
+	if len(files) == 0 {
+		return "TEXT_EDITOR_HISTORY_HIDDEN: A previous file edit tool call was hidden from the upstream model. Do not reconstruct or repeat that historical edit. Use the current user request and read-only inspection if more work is needed."
+	}
+	return "TEXT_EDITOR_HISTORY_HIDDEN: A previous file edit tool call already targeted these files: " + strings.Join(files, ", ") + ". The exact edit arguments are hidden to prevent stale or duplicate edits. Do not reconstruct or repeat that historical edit. Use read-only inspection if more work is needed."
+}
+
+func hiddenTextEditorHistoryOutputSummary(output string, files []string) string {
+	formattedOutput := strings.ReplaceAll(output, "APPLY_PATCH_SUCCEEDED", "TEXT_EDITOR_EDIT_SUCCEEDED")
+	formattedOutput = strings.ReplaceAll(formattedOutput, "apply_patch verification failed", "text editor verification failed")
+	if (strings.Contains(formattedOutput, "TEXT_EDITOR_EDIT_SUCCEEDED") || adapters.PatchSucceeded(formattedOutput)) && !strings.Contains(formattedOutput, "TEXT_EDITOR_EDIT_SUCCEEDED") {
+		formattedOutput += "\nTEXT_EDITOR_EDIT_SUCCEEDED"
+	}
+	if len(files) > 0 && patchOutputLacksFiles(output) {
+		formattedOutput += "\nchanged_files: " + strings.Join(files, ", ")
+	}
+	if recovery := adapters.TextEditorRecoveryText(adapters.ClassifyPatchFailure(formattedOutput)); recovery != "" {
+		formattedOutput += "\n\n" + recovery
+	}
+	return "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN\n" + formattedOutput
+}
+
+func patchOutputLacksFiles(output string) bool {
+	return len(adapters.PatchSucceededFiles(output)) == 0
 }
 
 func toolSearchCall(item map[string]any) providers.ChatToolCall {
@@ -327,6 +415,28 @@ func shellToolCall(item map[string]any) providers.ChatToolCall {
 			Arguments: string(action),
 		},
 	}
+}
+
+func reasoningContent(item map[string]any) string {
+	for _, key := range []string{"reasoning_content", "encrypted_content", "content"} {
+		if text, ok := item[key].(string); ok {
+			return text
+		}
+	}
+	if summary, ok := item["summary"].([]any); ok {
+		var parts []string
+		for _, raw := range summary {
+			obj, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := obj["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
 }
 
 func outputText(item map[string]any) string {
@@ -365,6 +475,11 @@ func outputToolDescriptorForCall(item map[string]any, call providers.ChatToolCal
 		descriptor.Name = "apply_patch"
 		descriptor.Kind = tools.KindPatch
 		descriptor.InputMode = tools.InputModeFreeform
+		descriptor.SideEffect = tools.SideEffectWriteFiles
+	case "codex_text_editor":
+		descriptor.Name = "codex_text_editor"
+		descriptor.Kind = tools.KindTextEditor
+		descriptor.InputMode = tools.InputModeJSON
 		descriptor.SideEffect = tools.SideEffectWriteFiles
 	case "tool_search":
 		descriptor.Name = "tool_search"
