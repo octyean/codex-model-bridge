@@ -44,6 +44,27 @@ func TestDeepSeekPrepareRequestStabilizesToolsAndRepairsToolResults(t *testing.T
 	}
 }
 
+func TestDeepSeekPrepareRequestCanonicalizesToolParameters(t *testing.T) {
+	adapter := Get(DeepSeekName)
+	prepared := adapter.PrepareChatRequest(providers.ChatCompletionRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []providers.ChatMessage{
+			{Role: "user", Content: "call tool"},
+		},
+		Tools: []providers.ChatTool{{
+			Type: "function",
+			Function: providers.ChatFunction{
+				Name:       "record_result",
+				Parameters: json.RawMessage(`{"properties":{"b":{"type":"string"},"a":{"type":"string"}},"type":"object"}`),
+			},
+		}},
+	})
+	want := `{"properties":{"a":{"type":"string"},"b":{"type":"string"}},"type":"object"}`
+	if string(prepared.Tools[0].Function.Parameters) != want {
+		t.Fatalf("parameters = %s", prepared.Tools[0].Function.Parameters)
+	}
+}
+
 func TestDeepSeekPrepareRequestDowngradesForcedToolChoice(t *testing.T) {
 	adapter := Get(DeepSeekName)
 	prepared := adapter.PrepareChatRequest(providers.ChatCompletionRequest{

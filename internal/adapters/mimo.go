@@ -1,6 +1,9 @@
 package adapters
 
-import "codex-bridge/internal/providers"
+import (
+	"codex-bridge/internal/optimization"
+	"codex-bridge/internal/providers"
+)
 
 type mimoAdapter struct{}
 
@@ -19,6 +22,10 @@ func (mimoAdapter) Capabilities() Capabilities {
 
 func (mimoAdapter) ToolPolicy() ToolPolicy {
 	return defaultAdapter{}.ToolPolicy()
+}
+
+func (mimoAdapter) Optimization() optimization.Options {
+	return defaultAdapter{}.Optimization()
 }
 
 func (mimoAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {

@@ -6,11 +6,12 @@ import (
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
+	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/tools"
 )
 
-func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter) {
+func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape) {
 	chatReq.Stream = false
 	chatReq.StreamOptions = nil
 	resp, err := provider.Create(r.Context(), chatReq)
@@ -23,8 +24,9 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadGateway, "upstream returned no choices")
 		return
 	}
-	if followUp, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message); ok {
+	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message); ok {
 		resp = followUp
+		shape = optimization.CaptureShape(followUpReq)
 		if len(resp.Choices) == 0 {
 			writeError(w, http.StatusBadGateway, "upstream returned no choices")
 			return
@@ -70,5 +72,5 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 			"usage": codexUsage(usage),
 		},
 	})
-	logUsage(s.logger, requestID, usage)
+	s.logUsage(requestID, req.Model, profile, adapter, shape, usage)
 }

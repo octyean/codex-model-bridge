@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/config"
 	extcap "codex-bridge/internal/extensions/capabilities"
+	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/tools"
 	"codex-bridge/internal/transcript"
@@ -23,6 +25,7 @@ type Server struct {
 	providers map[string]providers.ChatProvider
 	runtime   capabilities.Runtime
 	logger    *slog.Logger
+	optimizer *optimization.Tracker
 }
 
 func New(cfg *config.Config, providerClients map[string]providers.ChatProvider, logger *slog.Logger) http.Handler {
@@ -35,6 +38,7 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 		providers: providerClients,
 		runtime:   runtime,
 		logger:    logger,
+		optimizer: optimization.NewTracker(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.health)
@@ -45,13 +49,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.1"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.2"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.1",
+		"version": "0.2.2",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -134,6 +138,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		chatReq.ParallelToolCalls = &enabled
 	}
 	chatReq = adapter.PrepareChatRequest(chatReq)
+	shape := optimization.CaptureShape(chatReq)
 
 	s.logger.Info("request_started",
 		slog.String("request_id", requestID),
@@ -144,10 +149,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		if s.hasInternalTools(req) {
-			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter)
+			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape)
 			return
 		}
-		s.streamResponses(w, r, requestID, req, chatReq, provider, toolCtx, adapter)
+		s.streamResponses(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape)
 		return
 	}
 	resp, err := provider.Create(r.Context(), chatReq)
@@ -160,8 +165,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "upstream returned no choices")
 		return
 	}
-	if followUp, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message); ok {
+	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message); ok {
 		resp = followUp
+		shape = optimization.CaptureShape(followUpReq)
 		if len(resp.Choices) == 0 {
 			writeError(w, http.StatusBadGateway, "upstream returned no choices")
 			return
@@ -169,7 +175,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, s.logger)
 	usage := providers.NormalizeUsage(resp.Usage)
-	logUsage(s.logger, requestID, usage)
+	s.logUsage(requestID, req.Model, profileName, adapter, shape, usage)
 	writeJSON(w, http.StatusOK, codex.ResponseObject{
 		ID:        responseID(resp.ID),
 		Object:    "response",
@@ -220,7 +226,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter) {
+func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape) {
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
 		s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
@@ -278,7 +284,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 			"usage": codexUsage(usage),
 		},
 	})
-	logUsage(s.logger, requestID, usage)
+	s.logUsage(requestID, req.Model, profile, adapter, shape, usage)
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", state.ToolCallCount()))
 }
 
@@ -343,17 +349,24 @@ func codexUsage(usage providers.NormalizedUsage) map[string]any {
 	}
 }
 
-func logUsage(logger *slog.Logger, requestID string, usage providers.NormalizedUsage) {
+func (s *Server) logUsage(requestID string, model string, profile string, adapter adapters.Adapter, shape optimization.Shape, usage providers.NormalizedUsage) {
 	if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.TotalTokens == 0 {
 		return
 	}
-	logger.Info("upstream_usage",
+	attrs := []slog.Attr{
 		slog.String("request_id", requestID),
+		slog.String("model", model),
+		slog.String("profile", profile),
 		slog.Int("input_tokens", usage.InputTokens),
 		slog.Int("cached_input_tokens", usage.CachedInputTokens),
 		slog.Int("fresh_input_tokens", usage.FreshInputTokens),
 		slog.Int("output_tokens", usage.OutputTokens),
 		slog.Int("reasoning_tokens", usage.ReasoningTokens),
 		slog.Int("total_tokens", usage.TotalTokens),
-	)
+	}
+	if adapters.OptimizationOptions(adapter).CacheDiagnostics {
+		diagnostics := s.optimizer.Observe(model+"|"+profile, shape, usage)
+		attrs = append(attrs, optimization.LogAttrs(diagnostics)...)
+	}
+	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "upstream_usage", attrs...)
 }

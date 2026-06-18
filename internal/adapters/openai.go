@@ -1,6 +1,9 @@
 package adapters
 
-import "codex-bridge/internal/providers"
+import (
+	"codex-bridge/internal/optimization"
+	"codex-bridge/internal/providers"
+)
 
 type openAIAdapter struct{}
 
@@ -19,6 +22,10 @@ func (openAIAdapter) Capabilities() Capabilities {
 
 func (openAIAdapter) ToolPolicy() ToolPolicy {
 	return ToolPolicy{}
+}
+
+func (openAIAdapter) Optimization() optimization.Options {
+	return defaultAdapter{}.Optimization()
 }
 
 func (openAIAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {

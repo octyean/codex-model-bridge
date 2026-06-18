@@ -1,9 +1,9 @@
 package adapters
 
 import (
-	"sort"
 	"strings"
 
+	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 )
 
@@ -25,6 +25,13 @@ func (deepSeekAdapter) ToolPolicy() ToolPolicy {
 	return ToolPolicy{BlockShellFileWrites: true}
 }
 
+func (deepSeekAdapter) Optimization() optimization.Options {
+	return optimization.Options{
+		StabilizeTools:   true,
+		CacheDiagnostics: true,
+	}
+}
+
 func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
 	if hasOpenVikingReadTool(req.Tools) && !hasDeepSeekToolBoundaryNote(req.Messages) {
 		req.Messages = append([]providers.ChatMessage{{
@@ -40,7 +47,7 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 		req.ToolChoice = "auto"
 	}
 	req.Messages = repairToolPairing(req.Messages)
-	req.Tools = stableTools(req.Tools)
+	req = optimization.PrepareRequest(req, deepSeekAdapter{}.Optimization())
 	req = prepareChatPatchRequest(req)
 	if req.Stream && req.StreamOptions == nil {
 		req.StreamOptions = &providers.StreamOptions{IncludeUsage: true}
@@ -68,14 +75,6 @@ func (deepSeekAdapter) NormalizePatchInput(input string) string {
 
 func (deepSeekAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
 	return defaultAdapter{}.FormatToolOutput(tool, output)
-}
-
-func stableTools(tools []providers.ChatTool) []providers.ChatTool {
-	out := append([]providers.ChatTool(nil), tools...)
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].Function.Name < out[j].Function.Name
-	})
-	return out
 }
 
 func hasOpenVikingReadTool(tools []providers.ChatTool) bool {

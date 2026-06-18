@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 )
 
@@ -25,6 +26,7 @@ type Capabilities struct {
 type Adapter interface {
 	Name() string
 	Capabilities() Capabilities
+	Optimization() optimization.Options
 	ToolPolicy() ToolPolicy
 	PrepareChatRequest(providers.ChatCompletionRequest) providers.ChatCompletionRequest
 	CustomToolDescription(tool ToolDescriptor) string
@@ -102,6 +104,13 @@ func HasImageInput(caps Capabilities) bool {
 		}
 	}
 	return false
+}
+
+func OptimizationOptions(adapter Adapter) optimization.Options {
+	if adapter == nil {
+		return optimization.Options{}
+	}
+	return adapter.Optimization()
 }
 
 func NormalizeInputModalities(values []string) []string {

@@ -47,14 +47,14 @@ func requestHasWebSearch(tools []codex.ResponseTool) bool {
 	return false
 }
 
-func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage) (*providers.ChatCompletionResponse, bool) {
+func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
 	if len(message.ToolCalls) == 0 {
-		return nil, false
+		return nil, providers.ChatCompletionRequest{}, false
 	}
 	var outputs []providers.ChatMessage
 	for _, call := range message.ToolCalls {
 		if call.Function.Name != bridgeWebSearchTool {
-			return nil, false
+			return nil, providers.ChatCompletionRequest{}, false
 		}
 		outputs = append(outputs, providers.ChatMessage{
 			Role:       "tool",
@@ -70,9 +70,9 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 	resp, err := provider.Create(ctx, followUp)
 	if err != nil {
 		s.logger.Error("internal_tool_followup_failed", "error", err.Error())
-		return nil, false
+		return nil, providers.ChatCompletionRequest{}, false
 	}
-	return resp, true
+	return resp, followUp, true
 }
 
 func (s *Server) searchToolOutput(ctx context.Context, arguments string) string {

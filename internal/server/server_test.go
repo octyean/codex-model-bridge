@@ -703,6 +703,42 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	}
 }
 
+func TestDeepSeekUsageLogIncludesCacheDiagnostics(t *testing.T) {
+	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20}}`)},
+	}}
+	var logs bytes.Buffer
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"hello",
+		"tools":[{"type":"function","name":"z_tool","parameters":{"type":"object","properties":{"b":{"type":"string"},"a":{"type":"string"}}}}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	text := logs.String()
+	for _, want := range []string{
+		`"msg":"upstream_usage"`,
+		`"cached_input_tokens":80`,
+		`"fresh_input_tokens":20`,
+		`"prefix_hash"`,
+		`"tools_hash"`,
+		`"cache_hit_rate_permille":800`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("logs missing %s: %s", want, text)
+		}
+	}
+}
+
 func TestResponsesEndpointStreamsDifferentFilePatchAfterSuccess(t *testing.T) {
 	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
 		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"codex_text_editor","arguments":"{\"command\":\"str_replace\",\"path\":\"b.vue\","}}]}}]}`)},

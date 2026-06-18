@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 )
 
@@ -19,6 +20,10 @@ func (defaultAdapter) Capabilities() Capabilities {
 		SupportsSearchTool:         true,
 		ExperimentalSupportedTools: []string{"function", "custom", "apply_patch", "tool_search", "local_shell"},
 	}
+}
+
+func (defaultAdapter) Optimization() optimization.Options {
+	return optimization.Options{}
 }
 
 func (defaultAdapter) ToolPolicy() ToolPolicy {

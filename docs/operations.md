@@ -49,6 +49,24 @@ curl -sS \
   http://127.0.0.1:8787/v1/responses
 ```
 
+## DeepSeek 缓存诊断
+
+`profile = "deepseek"` 的请求会在 `upstream_usage` 日志里输出缓存诊断字段：
+
+- `cached_input_tokens` / `fresh_input_tokens`：上游返回的缓存命中和未命中输入 token。
+- `cache_hit_rate_permille`：本次请求命中率，`800` 表示 80.0%。
+- `prefix_hash`、`system_hash`、`tools_hash`：请求前缀形状指纹，用来判断 system prompt 或工具 schema 是否变化。
+- `prefix_changed`、`prefix_change_reasons`：和同一模型、同一 profile 的上一条请求相比，前缀是否变化，以及变化来自 `system` 还是 `tools`。
+- `tool_schema_tokens`、`tool_count`、`message_count`：排查工具 schema 体积和请求增长用。
+
+示例：
+
+```json
+{"msg":"upstream_usage","model":"deepseek-v4-flash","profile":"deepseek","cached_input_tokens":8000,"fresh_input_tokens":1200,"cache_hit_rate_permille":869,"prefix_changed":false}
+```
+
+如果 `fresh_input_tokens` 突然升高，先看 `prefix_change_reasons`。`tools` 变化通常说明 Codex 本轮暴露的工具集合或工具参数 schema 变了；`system` 变化通常说明 instructions、bridge 策略提示或能力边界提示发生了变化。
+
 ## 刷新模型目录
 
 服务启动时会自动刷新模型目录，也可以手动执行：
