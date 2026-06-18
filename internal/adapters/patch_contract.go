@@ -22,7 +22,7 @@ For appending to an existing file, use Update File, not Add File.
 Unchanged context lines are byte-significant: copy indentation, tabs, spaces, and text exactly from the current file.
 For whitespace-sensitive files, use the smallest valid hunk and avoid nearby context unless needed for uniqueness.
 If apply_patch reports a context mismatch, do not retry the same patch. Read the current file and generate a smaller patch from exact current lines.
-After apply_patch succeeds for a file, do not call apply_patch on that same file again. Use read-only commands to verify, then summarize unless verification proves a real missing edit.`
+After apply_patch succeeds for a file, do not repeat an already-completed edit. Use read-only commands to verify. If another requested change is still missing in the same file, make the smallest follow-up patch from exact current context; otherwise summarize.`
 
 type PatchFailureKind string
 
@@ -32,6 +32,7 @@ const (
 	PatchFailureMalformedPatch      PatchFailureKind = "malformed_patch"
 	PatchFailureInvalidHunk         PatchFailureKind = "invalid_hunk"
 	PatchFailureReadFileOperation   PatchFailureKind = "read_file_operation"
+	PatchFailureAlreadyApplied      PatchFailureKind = "already_applied"
 	PatchFailurePathError           PatchFailureKind = "path_error"
 	PatchFailurePermissionOrSandbox PatchFailureKind = "permission_or_sandbox"
 	PatchFailureUnknown             PatchFailureKind = "unknown"
@@ -55,6 +56,8 @@ func ClassifyPatchFailure(output string) PatchFailureKind {
 	switch {
 	case strings.Contains(text, "*** read file:"):
 		return PatchFailureReadFileOperation
+	case strings.Contains(text, "text_editor_already_applied"):
+		return PatchFailureAlreadyApplied
 	case strings.Contains(text, "invalid hunk"),
 		strings.Contains(text, "expected hunk"),
 		strings.Contains(text, "expected line prefix"),
@@ -163,6 +166,32 @@ func PatchTouchedFiles(input string) []string {
 	return files
 }
 
+func PatchIsNoopUpdate(input string) bool {
+	lines := strings.Split(NormalizePatchInput(input), "\n")
+	hasUpdate := false
+	hasHunk := false
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "*** Add File: "),
+			strings.HasPrefix(line, "*** Delete File: "),
+			strings.HasPrefix(line, "*** Move to: "):
+			return false
+		case strings.HasPrefix(line, "*** Update File: "):
+			hasUpdate = true
+		case line == "@@":
+			hasHunk = true
+		case strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-"):
+			return false
+		}
+	}
+	return hasUpdate && hasHunk
+}
+
+func PatchIsAlreadyApplied(input string) bool {
+	return strings.Contains(strings.ToLower(NormalizePatchInput(input)), "text_editor_already_applied") ||
+		PatchIsNoopUpdate(input)
+}
+
 func PatchFilesOverlap(left []string, right []string) bool {
 	seen := map[string]bool{}
 	for _, file := range left {
@@ -188,6 +217,8 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 		return "APPLY_PATCH_INVALID_HUNK\nrequired_next_action: fix_patch_syntax\nforbidden_next_action: change_target_code_to_fit_bad_patch\nrecovery: preserve exact hunk line prefixes: space for context, + for additions, - for removals.\npatch_discipline: keep the intended edit small; do not switch to shell file writes."
 	case PatchFailureReadFileOperation:
 		return "APPLY_PATCH_WRONG_TOOL_FOR_READ\nrequired_next_action: inspect_file_with_read_only_shell\nforbidden_next_action: use_apply_patch_to_read_files\nrecovery: apply_patch only supports Add File, Update File, Delete File, and Move. Use read-only shell commands such as sed, grep, rg, head, tail, or cat to inspect files, then call apply_patch only for the actual edit."
+	case PatchFailureAlreadyApplied:
+		return "APPLY_PATCH_ALREADY_APPLIED\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_patch\nrecovery: the requested content is already present. Do not send the same patch again; inspect current file content, then patch a different missing change or summarize."
 	case PatchFailurePathError:
 		return "APPLY_PATCH_PATH_ERROR\nrequired_next_action: verify_target_path\nforbidden_next_action: retry_same_path_blindly\nrecovery: inspect the directory or target file path, then generate a patch for the correct path."
 	case PatchFailurePermissionOrSandbox:
@@ -202,9 +233,11 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 func TextEditorRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines, then send a smaller text editor edit using exact old_str or insert_after text.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
+		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines. If the requested content is already present, stop editing and summarize; otherwise send a smaller text editor edit using exact current old_str or insert_after text.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
 	case PatchFailureMalformedPatch, PatchFailureInvalidHunk, PatchFailureReadFileOperation:
 		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: use command=create, str_replace, insert_after, or delete_file with exact JSON arguments."
+	case PatchFailureAlreadyApplied:
+		return "TEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit\nrecovery: the requested content is already present. Do not send the same text editor edit again; inspect current file content, then edit a different missing change or summarize."
 	case PatchFailurePathError:
 		return "TEXT_EDITOR_PATH_ERROR\nrequired_next_action: verify_target_path\nforbidden_next_action: retry_same_path_blindly\nrecovery: inspect the directory or target file path, then send a text editor edit for the correct path."
 	case PatchFailurePermissionOrSandbox:
@@ -334,7 +367,7 @@ func chatPatchToolDescription(tool ToolDescriptor) string {
 		"Every unchanged context line is byte-significant and must be copied exactly from the current file.",
 		"Whitespace inside hunks is significant: preserve tabs, spaces, blank lines, and line prefixes exactly.",
 		"If a patch fails because context does not match, read the current file and generate a smaller patch from exact current lines; never retry the same patch.",
-		"After a patch succeeds for a file, do not call apply_patch on that same file again. Use read-only commands to verify, then summarize unless verification proves a real missing edit.",
+		"After a patch succeeds for a file, do not repeat an already-completed edit. Use read-only commands to verify. If another requested change is still missing in the same file, make the smallest follow-up patch from exact current context; otherwise summarize.",
 		"Do not wrap the patch in Markdown fences, JSON text, or explanatory prose.",
 		"Example: *** Begin Patch\n*** Update File: hello.txt\n@@\n-old\n+new\n*** End Patch\n",
 	}

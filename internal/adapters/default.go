@@ -26,7 +26,6 @@ func (defaultAdapter) ToolPolicy() ToolPolicy {
 }
 
 func (defaultAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	req = prepareTextEditorRequest(req)
 	return prepareChatPatchRequest(req)
 }
 
@@ -90,25 +89,6 @@ func hasApplyPatchTool(items []providers.ChatTool) bool {
 	return false
 }
 
-func prepareTextEditorRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	if hasTextEditorTool(req.Tools) && shouldAddTextEditorSuccessStopNote(req.Messages) {
-		req.Messages = append([]providers.ChatMessage{{
-			Role:    "system",
-			Content: textEditorSuccessStopNote(req.Messages),
-		}}, req.Messages...)
-	}
-	return req
-}
-
-func hasTextEditorTool(items []providers.ChatTool) bool {
-	for _, item := range items {
-		if item.Function.Name == "codex_text_editor" {
-			return true
-		}
-	}
-	return false
-}
-
 func hasPatchSystemInstruction(messages []providers.ChatMessage) bool {
 	for _, message := range messages {
 		if message.Role != "system" {
@@ -130,6 +110,7 @@ func textEditorToolDescription() string {
 		"Use command=delete_file to delete path.",
 		"Before str_replace or insert_after, inspect the target lines with read-only shell commands unless the current turn already contains the exact text.",
 		"If old_str or insert_after is not exact and unique, the edit will fail. Do not retry blindly; read the current file and send a smaller exact edit.",
+		"If the result says TEXT_EDITOR_ALREADY_APPLIED, do not repeat that same edit; verify current file content, then edit a different missing change or summarize.",
 		"Use this editor tool for file writes.",
 	}, "\n")
 }
@@ -146,7 +127,7 @@ func formatTextEditorToolOutput(output string) string {
 		if len(files) > 0 {
 			extra += "\nchanged_files: " + strings.Join(files, ", ")
 		}
-		extra += "\nnext_action: read_only_verify_or_summarize_or_edit_different_file\nallowed_next_action: grep_sed_diff_tests_or_text_editor_different_file\nforbidden_next_action: text_editor_same_file_again_without_verified_missing_edit"
+		extra += "\nnext_action: read_only_verify_or_summarize_or_continue_editing_if_needed\nallowed_next_action: grep_sed_diff_tests_or_text_editor_if_needed"
 		return output + "\n\n" + extra
 	}
 	return output
@@ -156,102 +137,4 @@ func sanitizeTextEditorOutput(output string) string {
 	output = strings.ReplaceAll(output, "apply_patch verification failed", "text editor verification failed")
 	output = strings.ReplaceAll(output, "apply_patch failed", "text editor edit failed")
 	return output
-}
-
-func shouldAddTextEditorSuccessStopNote(messages []providers.ChatMessage) bool {
-	if hasTextEditorSuccessStopNote(messages) {
-		return false
-	}
-	return len(textEditorImmediateSuccessOutputs(messages)) > 0
-}
-
-func TextEditorCooldownFiles(messages []providers.ChatMessage) []string {
-	files := make([]string, 0)
-	seen := map[string]bool{}
-	add := func(file string) {
-		file = normalizePatchFilePath(file)
-		if file == "" || seen[file] {
-			return
-		}
-		seen[file] = true
-		files = append(files, file)
-	}
-	for _, output := range textEditorImmediateSuccessOutputs(messages) {
-		for _, file := range PatchSucceededFiles(output) {
-			add(file)
-		}
-	}
-	return files
-}
-
-func textEditorSuccessStopNote(messages []providers.ChatMessage) string {
-	files := TextEditorCooldownFiles(messages)
-	if len(files) == 0 {
-		return "TEXT_EDITOR_SUCCESS_STOP: The previous text editor call already succeeded. In this immediate follow-up turn, do not call the text editor again for the same completed edit. If no different file still needs editing, stop editing now and write the final answer. Use read-only verification commands such as grep, sed, git diff, or tests if you need evidence."
-	}
-	return "TEXT_EDITOR_SUCCESS_STOP: The previous text editor call already succeeded for these files: " + strings.Join(files, ", ") + ". Do not call the text editor on those files again in this immediate follow-up turn, and never use delete_file to recover from a duplicate edit. If all requested edits are already on the listed files, stop editing now and write the final answer. The text editor remains available only for different files explicitly still needing edits. Use read-only verification commands such as grep, sed, git diff, or tests for the listed files if you need evidence."
-}
-
-func textEditorImmediateSuccessOutputs(messages []providers.ChatMessage) []string {
-	start := 0
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			start = i + 1
-			break
-		}
-	}
-	var outputs []string
-	verifiedAfterSuccess := false
-	pendingTextEditorOutput := false
-	for _, message := range messages[start:] {
-		if message.Role == "assistant" && len(message.ToolCalls) > 0 {
-			pendingTextEditorOutput = onlyTextEditorToolCalls(message.ToolCalls)
-			if !pendingTextEditorOutput && len(outputs) > 0 {
-				verifiedAfterSuccess = true
-			}
-			continue
-		}
-		text, _ := message.Content.(string)
-		if message.Role == "system" && strings.Contains(text, "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN") && textEditorOutputSucceeded(text) {
-			outputs = append(outputs, text)
-			verifiedAfterSuccess = false
-			continue
-		}
-		if message.Role == "tool" && pendingTextEditorOutput && textEditorOutputSucceeded(text) {
-			outputs = append(outputs, text)
-			verifiedAfterSuccess = false
-		}
-	}
-	if verifiedAfterSuccess {
-		return nil
-	}
-	return outputs
-}
-
-func textEditorOutputSucceeded(text string) bool {
-	return strings.Contains(text, "TEXT_EDITOR_EDIT_SUCCEEDED") || strings.Contains(text, "APPLY_PATCH_SUCCEEDED") || PatchSucceeded(text)
-}
-
-func onlyTextEditorToolCalls(calls []providers.ChatToolCall) bool {
-	for _, call := range calls {
-		if call.Function.Name != "codex_text_editor" && call.Function.Name != "apply_patch" {
-			return false
-		}
-	}
-	return len(calls) > 0
-}
-
-func hasTextEditorSuccessStopNote(messages []providers.ChatMessage) bool {
-	for _, message := range messages {
-		if message.Role != "system" {
-			continue
-		}
-		if text, ok := message.Content.(string); ok &&
-			(strings.Contains(text, "TEXT_EDITOR_SUCCESS_STOP") ||
-				strings.Contains(text, "DEEPSEEK_TEXT_EDITOR_SUCCESS_STOP") ||
-				strings.Contains(text, "DEEPSEEK_APPLY_PATCH_SUCCESS_STOP")) {
-			return true
-		}
-	}
-	return false
 }

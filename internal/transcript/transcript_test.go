@@ -32,11 +32,42 @@ func TestToolOutputFollowsAssistantToolCall(t *testing.T) {
 	}
 }
 
-func TestNonGPTTranscriptHidesApplyPatchAsTextEditor(t *testing.T) {
+func TestNonGPTTranscriptReplaysSimpleApplyPatchAsTextEditor(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"edit"}]},
-		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n@@\n-old\n+new\n*** End Patch\n"},
 		{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM a.java"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if len(result.Messages) != 3 {
+		t.Fatalf("messages len = %d", len(result.Messages))
+	}
+	if len(result.Messages[1].ToolCalls) != 1 {
+		t.Fatalf("history should replay as a tool call: %#v", result.Messages)
+	}
+	call := result.Messages[1].ToolCalls[0]
+	if call.Function.Name != "codex_text_editor" ||
+		!strings.Contains(call.Function.Arguments, `"command":"str_replace"`) ||
+		!strings.Contains(call.Function.Arguments, `"old_str":"old"`) ||
+		!strings.Contains(call.Function.Arguments, `"new_str":"new"`) {
+		t.Fatalf("tool call = %#v", call)
+	}
+	output, _ := result.Messages[2].Content.(string)
+	if result.Messages[2].Role != "tool" || result.Messages[2].ToolCallID != "call_1" ||
+		!strings.Contains(output, "TEXT_EDITOR_EDIT_SUCCEEDED") ||
+		strings.Contains(output, "APPLY_PATCH_SUCCEEDED") {
+		t.Fatalf("output = %s", output)
+	}
+}
+
+func TestNonGPTTranscriptHidesIrreversibleApplyPatchHistory(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"edit"}]},
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n*** Move to: b.java\n@@\n-old\n+new\n*** End Patch\n"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM b.java"}
 	]`)
 	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))
 	if err != nil {
@@ -52,9 +83,38 @@ func TestNonGPTTranscriptHidesApplyPatchAsTextEditor(t *testing.T) {
 	if !strings.Contains(callSummary, "TEXT_EDITOR_HISTORY_HIDDEN") || strings.Contains(callSummary, "old_str") || strings.Contains(callSummary, "new_str") {
 		t.Fatalf("call summary leaked editable arguments: %s", callSummary)
 	}
-	output, _ := result.Messages[2].Content.(string)
-	if !strings.Contains(output, "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN") || !strings.Contains(output, "TEXT_EDITOR_EDIT_SUCCEEDED") || strings.Contains(output, "APPLY_PATCH_SUCCEEDED") {
-		t.Fatalf("output = %s", output)
+}
+
+func TestNonGPTTranscriptMarksAlreadyAppliedTextEditorHistory(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"edit"}]},
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Add File: a.java\n+TEXT_EDITOR_ALREADY_APPLIED\n*** End Patch"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"text editor edit failed: file already exists\nTEXT_EDITOR_ALREADY_APPLIED"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.DeepSeekName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if len(result.Messages) != 3 {
+		t.Fatalf("messages len = %d", len(result.Messages))
+	}
+	callSummary, _ := result.Messages[1].Content.(string)
+	if !strings.Contains(callSummary, "TEXT_EDITOR_ALREADY_APPLIED") ||
+		!strings.Contains(callSummary, "Do not repeat that edit") ||
+		strings.Contains(callSummary, "old_str") ||
+		strings.Contains(callSummary, "new_str") {
+		t.Fatalf("call summary = %s", callSummary)
+	}
+	outputSummary, _ := result.Messages[2].Content.(string)
+	for _, want := range []string{
+		"TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN",
+		"TEXT_EDITOR_ALREADY_APPLIED",
+		"required_next_action: read_only_verify_current_file_or_summarize",
+		"forbidden_next_action: repeat_same_text_editor_edit",
+	} {
+		if !strings.Contains(outputSummary, want) {
+			t.Fatalf("output summary missing %q: %s", want, outputSummary)
+		}
 	}
 }
 

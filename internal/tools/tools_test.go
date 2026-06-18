@@ -172,6 +172,68 @@ func TestTextEditorStrReplaceExpandsUniqueSubstringToLine(t *testing.T) {
 	}
 }
 
+func TestTextEditorStrReplaceAlreadyAppliedSubstringBuildsLocalResult(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("alpha done\nbeta done\ngamma\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	arguments, _ := json.Marshal(map[string]string{
+		"command": "str_replace",
+		"path":    path,
+		"old_str": "alpha",
+		"new_str": "alpha done",
+	})
+	got, err := TextEditorPatchInput(string(arguments))
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	for _, want := range []string{
+		"TEXT_EDITOR_ALREADY_APPLIED",
+		"path: " + path,
+		"file_edit_state: already_applied",
+		"forbidden_next_action: repeat_same_text_editor_edit",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("input missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "*** Add File") {
+		t.Fatalf("local result must not be executable patch: %q", got)
+	}
+}
+
+func TestTextEditorStrReplaceAlreadyAppliedBuildsLocalResult(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("alpha done\nbeta\ngamma\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	arguments, _ := json.Marshal(map[string]string{
+		"command": "str_replace",
+		"path":    path,
+		"old_str": "alpha",
+		"new_str": "alpha done",
+	})
+	got, err := TextEditorPatchInput(string(arguments))
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	for _, want := range []string{
+		"TEXT_EDITOR_ALREADY_APPLIED",
+		"path: " + path,
+		"file_edit_state: already_applied",
+		"forbidden_next_action: repeat_same_text_editor_edit",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("input missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "*** Add File") {
+		t.Fatalf("local result must not be executable patch: %q", got)
+	}
+}
+
 func TestTextEditorCreateBuildsApplyPatchInput(t *testing.T) {
 	got, err := TextEditorPatchInput(`{"command":"create","path":"deep/path/notes.md","file_text":"# Notes\n\nHello\n"}`)
 	if err != nil {
@@ -180,6 +242,55 @@ func TestTextEditorCreateBuildsApplyPatchInput(t *testing.T) {
 	want := "*** Begin Patch\n*** Add File: deep/path/notes.md\n+# Notes\n+\n+Hello\n*** End Patch"
 	if got != want {
 		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestTextEditorArgumentsFromPatchReplaysSimpleReplace(t *testing.T) {
+	got, ok := TextEditorArgumentsFromPatch("*** Begin Patch\n*** Update File: a.java\n@@\n-old\n+new\n*** End Patch")
+	if !ok {
+		t.Fatalf("expected patch to be reversible")
+	}
+	for _, want := range []string{`"command":"str_replace"`, `"path":"a.java"`, `"old_str":"old"`, `"new_str":"new"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("arguments missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestTextEditorArgumentsFromPatchRejectsComplexPatch(t *testing.T) {
+	got, ok := TextEditorArgumentsFromPatch("*** Begin Patch\n*** Update File: a.java\n*** Move to: b.java\n@@\n-old\n+new\n*** End Patch")
+	if ok || got != "" {
+		t.Fatalf("complex patch should not be replayed as text editor arguments: %q", got)
+	}
+}
+
+func TestTextEditorCreateExistingFileBuildsLocalResult(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	arguments, _ := json.Marshal(map[string]string{
+		"command":   "create",
+		"path":      path,
+		"file_text": "new\n",
+	})
+	got, err := TextEditorPatchInput(string(arguments))
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	for _, want := range []string{
+		"TEXT_EDITOR_CREATE_TARGET_ALREADY_EXISTS",
+		"path: " + path,
+		"file_edit_state: not_modified",
+		"forbidden_next_action: retry_create_same_path",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("input missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "*** Add File") {
+		t.Fatalf("local result must not be executable patch: %q", got)
 	}
 }
 

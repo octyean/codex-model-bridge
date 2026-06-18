@@ -3,8 +3,6 @@ package adapters
 import (
 	"strings"
 	"testing"
-
-	"codex-bridge/internal/providers"
 )
 
 func TestNormalizePatchInputExtractsJSONEnvelope(t *testing.T) {
@@ -80,43 +78,35 @@ func TestPatchSucceededFilesExtractsFormattedChangedFiles(t *testing.T) {
 	}
 }
 
-func TestTextEditorCooldownFilesCollectsContinuousSuccessfulEdits(t *testing.T) {
-	messages := []providers.ChatMessage{
-		{Role: "user", Content: "edit two files"},
-		{Role: "system", Content: "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN\nTEXT_EDITOR_EDIT_SUCCEEDED\nchanged_files: a.java"},
-		{Role: "assistant", ToolCalls: []providers.ChatToolCall{{
-			ID: "call_2", Type: "function",
-			Function: providers.ChatCallFunction{Name: "codex_text_editor", Arguments: `{"command":"str_replace","path":"b.vue","old_str":"old","new_str":"new"}`},
-		}}},
-		{Role: "tool", Content: "TEXT_EDITOR_EDIT_SUCCEEDED\nchanged_files: b.vue"},
-	}
-	got := TextEditorCooldownFiles(messages)
-	want := []string{"a.java", "b.vue"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("files = %#v, want %#v", got, want)
-	}
-}
-
-func TestTextEditorCooldownFilesClearsAfterReadOnlyVerification(t *testing.T) {
-	messages := []providers.ChatMessage{
-		{Role: "user", Content: "edit then verify"},
-		{Role: "tool", Content: "TEXT_EDITOR_EDIT_SUCCEEDED\nchanged_files: a.java"},
-		{Role: "assistant", ToolCalls: []providers.ChatToolCall{{
-			ID: "call_2", Type: "function",
-			Function: providers.ChatCallFunction{Name: "exec_command", Arguments: `{"cmd":"rg foo a.java"}`},
-		}}},
-		{Role: "tool", ToolCallID: "call_2", Content: "foo"},
-	}
-	if got := TextEditorCooldownFiles(messages); len(got) != 0 {
-		t.Fatalf("cooldown files = %#v", got)
-	}
-}
-
 func TestPatchTouchedFilesExtractsMultiFilePatch(t *testing.T) {
 	got := PatchTouchedFiles("*** Begin Patch\n*** Update File: ./a.java\n@@\n-old\n+new\n*** Add File: web/src/App.vue\n+<template />\n*** Delete File: old/request.js\n*** End Patch")
 	want := []string{"a.java", "web/src/App.vue", "old/request.js"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("files = %#v, want %#v", got, want)
+	}
+}
+
+func TestPatchIsNoopUpdate(t *testing.T) {
+	if !PatchIsNoopUpdate("*** Begin Patch\n*** Update File: a.java\n@@\n alpha done\n*** End Patch") {
+		t.Fatalf("expected noop update")
+	}
+	if PatchIsNoopUpdate("*** Begin Patch\n*** Update File: a.java\n@@\n-alpha\n+alpha done\n*** End Patch") {
+		t.Fatalf("replacement patch should not be noop")
+	}
+	if PatchIsNoopUpdate("*** Begin Patch\n*** Add File: a.java\n+alpha\n*** End Patch") {
+		t.Fatalf("add file patch should not be noop")
+	}
+}
+
+func TestPatchIsAlreadyApplied(t *testing.T) {
+	if !PatchIsAlreadyApplied("*** Begin Patch\n*** Add File: a.java\n+TEXT_EDITOR_ALREADY_APPLIED\n*** End Patch") {
+		t.Fatalf("expected already applied sentinel")
+	}
+	if !PatchIsAlreadyApplied("*** Begin Patch\n*** Update File: a.java\n@@\n alpha done\n*** End Patch") {
+		t.Fatalf("expected noop update to be already applied")
+	}
+	if PatchIsAlreadyApplied("*** Begin Patch\n*** Update File: a.java\n@@\n-alpha\n+alpha done\n*** End Patch") {
+		t.Fatalf("replacement patch should not be already applied")
 	}
 }
 
@@ -138,9 +128,10 @@ func TestClassifyPatchFailure(t *testing.T) {
 		"open foo: no such file": PatchFailurePathError,
 		"invalid hunk at line 3": PatchFailureInvalidHunk,
 		"invalid hunk at line 2, '*** Read File: README.md' is not a valid hunk header": PatchFailureReadFileOperation,
-		"invalid patch: missing *** Begin Patch":                                        PatchFailureMalformedPatch,
-		"apply_patch failed unexpectedly":                                               PatchFailureUnknown,
-		"ok":                                                                            PatchFailureNone,
+		"TEXT_EDITOR_ALREADY_APPLIED":            PatchFailureAlreadyApplied,
+		"invalid patch: missing *** Begin Patch": PatchFailureMalformedPatch,
+		"apply_patch failed unexpectedly":        PatchFailureUnknown,
+		"ok":                                     PatchFailureNone,
 	}
 	for output, want := range cases {
 		if got := ClassifyPatchFailure(output); got != want {

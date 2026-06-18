@@ -94,7 +94,7 @@ func TestDeepSeekPrepareRequestAddsOpenVikingReadBoundaryNote(t *testing.T) {
 	}
 }
 
-func TestDeepSeekPrepareRequestAddsTextEditorSuccessCooldownNote(t *testing.T) {
+func TestDeepSeekPrepareRequestDoesNotAddTextEditorSuccessStopNote(t *testing.T) {
 	adapter := Get(DeepSeekName)
 	prepared := adapter.PrepareChatRequest(providers.ChatCompletionRequest{
 		Model: "deepseek-v4-flash",
@@ -111,21 +111,14 @@ func TestDeepSeekPrepareRequestAddsTextEditorSuccessCooldownNote(t *testing.T) {
 			Function: providers.ChatFunction{Name: "codex_text_editor"},
 		}},
 	})
-	found := false
 	for _, message := range prepared.Messages {
 		text, _ := message.Content.(string)
-		if message.Role == "system" &&
-			strings.Contains(text, "TEXT_EDITOR_SUCCESS_STOP") &&
-			strings.Contains(text, "a.java") &&
-			strings.Contains(text, "stop editing now") {
-			found = true
+		if message.Role == "system" && strings.Contains(text, "TEXT_EDITOR_SUCCESS_STOP") {
+			t.Fatalf("unexpected stop note: %#v", prepared.Messages)
 		}
 	}
-	if !found {
-		t.Fatalf("missing stop note: %#v", prepared.Messages)
-	}
 	if len(prepared.Tools) != 1 || prepared.Tools[0].Function.Name != "codex_text_editor" {
-		t.Fatalf("text editor should remain available for different files: %#v", prepared.Tools)
+		t.Fatalf("text editor should remain available: %#v", prepared.Tools)
 	}
 }
 
@@ -196,11 +189,15 @@ func TestDeepSeekPatchSystemInstructionCoversGeneralEditDiscipline(t *testing.T)
 		"inspect the current target lines",
 		"Prefer small, surgical hunks",
 		"do not retry the same patch",
-		"After apply_patch succeeds for a file, do not call apply_patch on that same file again",
+		"After apply_patch succeeds for a file, do not repeat an already-completed edit",
+		"make the smallest follow-up patch from exact current context",
 	} {
 		if !strings.Contains(instruction, want) {
 			t.Fatalf("instruction missing %q: %s", want, instruction)
 		}
+	}
+	if strings.Contains(instruction, "do not call apply_patch on that same file again") {
+		t.Fatalf("instruction still contains hard same-file stop rule: %s", instruction)
 	}
 }
 
@@ -214,6 +211,7 @@ func TestDeepSeekFormatsTextEditorContextMismatch(t *testing.T) {
 		"TEXT_EDITOR_CONTEXT_MISMATCH",
 		"required_next_action: inspect_current_file",
 		"forbidden_next_action: retry_same_edit",
+		"If the requested content is already present, stop editing and summarize",
 		"edit_discipline: do not broaden the edit",
 		"do not use shell as a file editor",
 	} {
@@ -240,7 +238,7 @@ func TestDeepSeekFormatsInvalidTextEditorEdit(t *testing.T) {
 	}
 }
 
-func TestDeepSeekFormatsSuccessfulPatchWithStopProtocol(t *testing.T) {
+func TestDeepSeekFormatsSuccessfulPatchWithContinueEditingProtocol(t *testing.T) {
 	adapter := Get(DeepSeekName)
 	output := adapter.FormatToolOutput(ToolDescriptor{
 		Name: "codex_text_editor",
@@ -250,8 +248,8 @@ func TestDeepSeekFormatsSuccessfulPatchWithStopProtocol(t *testing.T) {
 		"TEXT_EDITOR_EDIT_SUCCEEDED",
 		"file_edit_state: completed",
 		"changed_files: README.md",
-		"allowed_next_action: grep_sed_diff_tests_or_text_editor_different_file",
-		"forbidden_next_action: text_editor_same_file_again_without_verified_missing_edit",
+		"next_action: read_only_verify_or_summarize_or_continue_editing_if_needed",
+		"allowed_next_action: grep_sed_diff_tests_or_text_editor_if_needed",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q: %s", want, output)

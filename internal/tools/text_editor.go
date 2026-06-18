@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"codex-bridge/internal/adapters"
 )
 
 const maxTextEditorReadBytes = 4 * 1024 * 1024
@@ -36,12 +38,19 @@ func TextEditorPatchInput(arguments string) (string, error) {
 		if content == "" {
 			return "", fmt.Errorf("create requires file_text or text")
 		}
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return existingFileCreateResult(path), nil
+		}
 		return addFilePatch(path, content), nil
 	case "str_replace":
 		if command.OldStr == "" {
 			return "", fmt.Errorf("str_replace requires old_str")
 		}
-		return replacePatch(path, command.OldStr, alignReplacementIndent(command.OldStr, command.NewStr)), nil
+		newText := alignReplacementIndent(command.OldStr, command.NewStr)
+		if result, ok := alreadyAppliedReplaceResult(path, command.OldStr, newText); ok {
+			return result, nil
+		}
+		return replacePatch(path, command.OldStr, newText), nil
 	case "insert_after":
 		anchor := firstNonEmpty(command.InsertAfter, command.OldStr)
 		text := firstNonEmpty(command.Text, command.NewStr, command.Content)
@@ -59,9 +68,123 @@ func TextEditorPatchInput(arguments string) (string, error) {
 	}
 }
 
+func TextEditorArgumentsFromPatch(input string) (string, bool) {
+	lines := strings.Split(adapters.NormalizePatchInput(input), "\n")
+	if len(lines) < 3 || lines[0] != "*** Begin Patch" || lines[len(lines)-1] != "*** End Patch" {
+		return "", false
+	}
+	if path, ok := strings.CutPrefix(lines[1], "*** Add File: "); ok {
+		content, ok := unprefixedPatchLines(lines[2:len(lines)-1], "+")
+		if !ok {
+			return "", false
+		}
+		return textEditorArguments(map[string]string{
+			"command":   "create",
+			"path":      normalizeEditorPath(path),
+			"file_text": content,
+		})
+	}
+	if path, ok := strings.CutPrefix(lines[1], "*** Delete File: "); ok && len(lines) == 3 {
+		return textEditorArguments(map[string]string{
+			"command": "delete_file",
+			"path":    normalizeEditorPath(path),
+		})
+	}
+	if path, ok := strings.CutPrefix(lines[1], "*** Update File: "); ok {
+		return textEditorUpdateArguments(normalizeEditorPath(path), lines[2:len(lines)-1])
+	}
+	return "", false
+}
+
+func textEditorUpdateArguments(path string, lines []string) (string, bool) {
+	if path == "" || len(lines) < 2 || lines[0] != "@@" {
+		return "", false
+	}
+	body := lines[1:]
+	if oldText, newText, ok := textEditorReplaceFromHunk(body); ok {
+		return textEditorArguments(map[string]string{
+			"command": "str_replace",
+			"path":    path,
+			"old_str": oldText,
+			"new_str": newText,
+		})
+	}
+	if anchor, text, ok := textEditorInsertAfterFromHunk(body); ok {
+		return textEditorArguments(map[string]string{
+			"command":      "insert_after",
+			"path":         path,
+			"insert_after": anchor,
+			"text":         text,
+		})
+	}
+	return "", false
+}
+
+func textEditorReplaceFromHunk(lines []string) (string, string, bool) {
+	if len(lines) < 2 {
+		return "", "", false
+	}
+	i := 0
+	var oldLines []string
+	for i < len(lines) && strings.HasPrefix(lines[i], "-") {
+		oldLines = append(oldLines, strings.TrimPrefix(lines[i], "-"))
+		i++
+	}
+	var newLines []string
+	for i < len(lines) && strings.HasPrefix(lines[i], "+") {
+		newLines = append(newLines, strings.TrimPrefix(lines[i], "+"))
+		i++
+	}
+	if i != len(lines) || len(oldLines) == 0 || len(newLines) == 0 {
+		return "", "", false
+	}
+	return strings.Join(oldLines, "\n"), strings.Join(newLines, "\n"), true
+}
+
+func textEditorInsertAfterFromHunk(lines []string) (string, string, bool) {
+	if len(lines) < 2 {
+		return "", "", false
+	}
+	i := 0
+	var anchorLines []string
+	for i < len(lines) && strings.HasPrefix(lines[i], " ") {
+		anchorLines = append(anchorLines, strings.TrimPrefix(lines[i], " "))
+		i++
+	}
+	var textLines []string
+	for i < len(lines) && strings.HasPrefix(lines[i], "+") {
+		textLines = append(textLines, strings.TrimPrefix(lines[i], "+"))
+		i++
+	}
+	if i != len(lines) || len(anchorLines) == 0 || len(textLines) == 0 {
+		return "", "", false
+	}
+	return strings.Join(anchorLines, "\n"), strings.Join(textLines, "\n"), true
+}
+
+func unprefixedPatchLines(lines []string, prefix string) (string, bool) {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, prefix) {
+			return "", false
+		}
+		out = append(out, strings.TrimPrefix(line, prefix))
+	}
+	return strings.Join(out, "\n"), true
+}
+
+func textEditorArguments(values map[string]string) (string, bool) {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
 func parseTextEditorCommand(arguments string) (textEditorCommand, error) {
 	var command textEditorCommand
 	if err := json.Unmarshal([]byte(arguments), &command); err == nil && (command.Command != "" || command.Path != "") {
+		command.Command = normalizeEditorCommand(command.Command)
 		return command, nil
 	}
 	var wrapped map[string]json.RawMessage
@@ -78,6 +201,7 @@ func parseTextEditorCommand(arguments string) (textEditorCommand, error) {
 			return parseTextEditorCommand(nested)
 		}
 		if err := json.Unmarshal(raw, &command); err == nil {
+			command.Command = normalizeEditorCommand(command.Command)
 			return command, nil
 		}
 	}
@@ -116,6 +240,17 @@ func addFilePatch(path string, content string) string {
 	return "*** Begin Patch\n*** Add File: " + path + "\n" + strings.Join(lines, "\n") + "\n*** End Patch"
 }
 
+func existingFileCreateResult(path string) string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_CREATE_TARGET_ALREADY_EXISTS",
+		"path: " + path,
+		"file_edit_state: not_modified",
+		"required_next_action: inspect_current_file_then_use_str_replace_or_summarize",
+		"forbidden_next_action: retry_create_same_path",
+		"recovery: the target file already exists. Do not use create for existing files; inspect the current file, then use str_replace or insert_after only if a real change is still missing.",
+	}, "\n")
+}
+
 func replacePatch(path string, oldText string, newText string) string {
 	if expandedOld, expandedNew, ok := expandReplacementFromFile(path, oldText, newText); ok {
 		oldText = expandedOld
@@ -126,6 +261,61 @@ func replacePatch(path string, oldText string, newText string) string {
 	lines = append(lines, prefixedLines("+", newText)...)
 	lines = append(lines, "*** End Patch")
 	return strings.Join(lines, "\n")
+}
+
+func alreadyAppliedReplaceResult(path string, oldText string, newText string) (string, bool) {
+	if strings.TrimSpace(newText) == "" {
+		return "", false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() > maxTextEditorReadBytes {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	content := string(data)
+	if countExactLineBlock(content, oldText) > 0 || countExactLineBlock(content, newText) != 1 {
+		return "", false
+	}
+	return alreadyAppliedResult(path), true
+}
+
+func alreadyAppliedResult(path string) string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_ALREADY_APPLIED",
+		"path: " + path,
+		"file_edit_state: already_applied",
+		"required_next_action: read_only_verify_current_file_or_summarize",
+		"forbidden_next_action: repeat_same_text_editor_edit",
+		"recovery: the requested content is already present. Do not send the same text editor edit again; inspect current file content, then edit a different missing change or summarize.",
+	}, "\n")
+}
+
+func countExactLineBlock(content string, block string) int {
+	if block == "" {
+		return 0
+	}
+	lines := normalizedEditorLines(content)
+	blockLines := normalizedEditorLines(block)
+	if len(blockLines) == 0 || len(blockLines) > len(lines) {
+		return 0
+	}
+	count := 0
+	for i := 0; i <= len(lines)-len(blockLines); i++ {
+		matched := true
+		for j, blockLine := range blockLines {
+			if lines[i+j] != blockLine {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			count++
+		}
+	}
+	return count
 }
 
 func expandReplacementFromFile(path string, oldText string, newText string) (string, string, bool) {
@@ -152,6 +342,9 @@ func expandReplacementFromFile(path string, oldText string, newText string) (str
 		lineEnd = end + nextNewline
 	}
 	oldSegment := content[lineStart:lineEnd]
+	if strings.Contains(oldSegment, newText) {
+		return "", "", false
+	}
 	newSegment := content[lineStart:start] + newText + content[end:lineEnd]
 	return oldSegment, newSegment, true
 }

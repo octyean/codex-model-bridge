@@ -32,7 +32,6 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 			Content: deepSeekOpenVikingToolBoundaryNote,
 		}}, req.Messages...)
 	}
-	req = prepareTextEditorRequest(req)
 	if name := ForcedToolName(req.ToolChoice); name != "" {
 		req.Messages = append([]providers.ChatMessage{{
 			Role:    "system",

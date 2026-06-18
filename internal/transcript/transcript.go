@@ -19,6 +19,11 @@ type Result struct {
 	Items    []map[string]any
 }
 
+type hiddenFileEditCall struct {
+	files          []string
+	alreadyApplied bool
+}
+
 func ToChatMessages(req codex.ResponsesRequest, adapter adapters.Adapter) (Result, error) {
 	return ToChatMessagesWithRuntime(context.Background(), req, adapter, capabilities.Runtime{})
 }
@@ -42,7 +47,7 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	var pendingToolCalls []providers.ChatToolCall
 	pendingReasoning := ""
 	toolCallsByID := map[string]providers.ChatToolCall{}
-	hiddenFileEditCalls := map[string][]string{}
+	hiddenFileEditCalls := map[string]hiddenFileEditCall{}
 	for _, item := range items {
 		itemType, _ := item["type"].(string)
 		switch itemType {
@@ -66,15 +71,23 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			toolCallsByID[call.ID] = call
 		case "custom_tool_call":
 			if shouldHideApplyPatchHistory(item, adapter) {
+				callID, input := applyPatchHistoryInput(item)
+				if call, ok := textEditorHistoryToolCall(callID, input); ok {
+					pendingToolCalls = append(pendingToolCalls, call)
+					toolCallsByID[call.ID] = call
+					continue
+				}
 				if len(pendingToolCalls) > 0 {
 					messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
 					pendingToolCalls = nil
 					pendingReasoning = ""
 				}
-				callID, _ := item["call_id"].(string)
-				files := adapters.PatchTouchedFiles(valueText(item["input"]))
-				hiddenFileEditCalls[callID] = files
-				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryCallSummary(files)})
+				call := hiddenFileEditCall{
+					files:          adapters.PatchTouchedFiles(input),
+					alreadyApplied: adapters.PatchIsAlreadyApplied(input),
+				}
+				hiddenFileEditCalls[callID] = call
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryCallSummary(call)})
 				continue
 			}
 			call := customToolCall(item, adapter)
@@ -82,15 +95,23 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			toolCallsByID[call.ID] = call
 		case "apply_patch_call":
 			if adapters.UseTextEditorForApplyPatch(adapter) {
+				callID, input := applyPatchHistoryInput(item)
+				if call, ok := textEditorHistoryToolCall(callID, input); ok {
+					pendingToolCalls = append(pendingToolCalls, call)
+					toolCallsByID[call.ID] = call
+					continue
+				}
 				if len(pendingToolCalls) > 0 {
 					messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
 					pendingToolCalls = nil
 					pendingReasoning = ""
 				}
-				callID, input := applyPatchHistoryInput(item)
-				files := adapters.PatchTouchedFiles(input)
-				hiddenFileEditCalls[callID] = files
-				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryCallSummary(files)})
+				call := hiddenFileEditCall{
+					files:          adapters.PatchTouchedFiles(input),
+					alreadyApplied: adapters.PatchIsAlreadyApplied(input),
+				}
+				hiddenFileEditCalls[callID] = call
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryCallSummary(call)})
 				continue
 			}
 			call := applyPatchToolCall(item, adapter)
@@ -111,9 +132,9 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				pendingReasoning = ""
 			}
 			callID, _ := item["call_id"].(string)
-			if files, ok := hiddenFileEditCalls[callID]; ok {
+			if call, ok := hiddenFileEditCalls[callID]; ok {
 				rawOutput := outputText(item)
-				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryOutputSummary(rawOutput, files)})
+				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryOutputSummary(rawOutput, call)})
 				continue
 			}
 			descriptor := outputToolDescriptor(item)
@@ -345,6 +366,24 @@ func applyPatchToolCall(item map[string]any, adapter adapters.Adapter) providers
 	}
 }
 
+func textEditorHistoryToolCall(callID string, input string) (providers.ChatToolCall, bool) {
+	if adapters.PatchIsAlreadyApplied(input) {
+		return providers.ChatToolCall{}, false
+	}
+	arguments, ok := tools.TextEditorArgumentsFromPatch(input)
+	if !ok {
+		return providers.ChatToolCall{}, false
+	}
+	return providers.ChatToolCall{
+		ID:   callID,
+		Type: "function",
+		Function: providers.ChatCallFunction{
+			Name:      "codex_text_editor",
+			Arguments: arguments,
+		},
+	}, true
+}
+
 func shouldHideApplyPatchHistory(item map[string]any, adapter adapters.Adapter) bool {
 	if !adapters.UseTextEditorForApplyPatch(adapter) {
 		return false
@@ -365,21 +404,32 @@ func applyPatchHistoryInput(item map[string]any) (string, string) {
 	return callID, ""
 }
 
-func hiddenTextEditorHistoryCallSummary(files []string) string {
+func hiddenTextEditorHistoryCallSummary(call hiddenFileEditCall) string {
+	files := call.files
+	if call.alreadyApplied {
+		if len(files) == 0 {
+			return "TEXT_EDITOR_HISTORY_HIDDEN\nTEXT_EDITOR_ALREADY_APPLIED: The previous text editor call was a no-op because the requested replacement was already present. Do not repeat that edit. Use read-only inspection, then edit a different missing change or summarize."
+		}
+		return "TEXT_EDITOR_HISTORY_HIDDEN\nTEXT_EDITOR_ALREADY_APPLIED: The previous text editor call was a no-op because the requested replacement was already present in these files: " + strings.Join(files, ", ") + ". Do not repeat that edit. Use read-only inspection, then edit a different missing change or summarize."
+	}
 	if len(files) == 0 {
 		return "TEXT_EDITOR_HISTORY_HIDDEN: A previous file edit tool call was hidden from the upstream model. Do not reconstruct or repeat that historical edit. Use the current user request and read-only inspection if more work is needed."
 	}
 	return "TEXT_EDITOR_HISTORY_HIDDEN: A previous file edit tool call already targeted these files: " + strings.Join(files, ", ") + ". The exact edit arguments are hidden to prevent stale or duplicate edits. Do not reconstruct or repeat that historical edit. Use read-only inspection if more work is needed."
 }
 
-func hiddenTextEditorHistoryOutputSummary(output string, files []string) string {
+func hiddenTextEditorHistoryOutputSummary(output string, call hiddenFileEditCall) string {
 	formattedOutput := strings.ReplaceAll(output, "APPLY_PATCH_SUCCEEDED", "TEXT_EDITOR_EDIT_SUCCEEDED")
 	formattedOutput = strings.ReplaceAll(formattedOutput, "apply_patch verification failed", "text editor verification failed")
 	if (strings.Contains(formattedOutput, "TEXT_EDITOR_EDIT_SUCCEEDED") || adapters.PatchSucceeded(formattedOutput)) && !strings.Contains(formattedOutput, "TEXT_EDITOR_EDIT_SUCCEEDED") {
 		formattedOutput += "\nTEXT_EDITOR_EDIT_SUCCEEDED"
 	}
+	files := call.files
 	if len(files) > 0 && patchOutputLacksFiles(output) {
 		formattedOutput += "\nchanged_files: " + strings.Join(files, ", ")
+	}
+	if call.alreadyApplied {
+		formattedOutput += "\nTEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit"
 	}
 	if recovery := adapters.TextEditorRecoveryText(adapters.ClassifyPatchFailure(formattedOutput)); recovery != "" {
 		formattedOutput += "\n\n" + recovery

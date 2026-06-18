@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -65,11 +66,51 @@ func TestResponseItemsConvertsDeepSeekTextEditorToApplyPatchCall(t *testing.T) {
 	}
 }
 
-func TestResponseItemsAllowsDifferentFilePatchDuringCooldown(t *testing.T) {
+func TestResponseItemsTurnsAlreadyAppliedTextEditorIntoExecCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/a.java"
+	if err := os.WriteFile(path, []byte("old done\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	arguments, _ := json.Marshal(map[string]string{
+		"command": "str_replace",
+		"path":    path,
+		"old_str": "old",
+		"new_str": "old done",
+	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	adapter := adapters.Get(adapters.DeepSeekName)
 	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
-	items := responseItemsFromMessageWithOptions(providers.ChatMessage{
+	items := responseItemsFromMessage(providers.ChatMessage{
+		ToolCalls: []providers.ChatToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: providers.ChatCallFunction{
+				Name:      "codex_text_editor",
+				Arguments: string(arguments),
+			},
+		}},
+	}, toolCtx, adapter, "req_test", logger)
+	if len(items) != 1 {
+		t.Fatalf("items len = %d", len(items))
+	}
+	if items[0]["type"] != "function_call" || items[0]["name"] != "exec_command" {
+		t.Fatalf("item = %#v", items[0])
+	}
+	callArguments := items[0]["arguments"].(string)
+	if !strings.Contains(callArguments, "TEXT_EDITOR_ALREADY_APPLIED") || !strings.Contains(callArguments, "sed -n") {
+		t.Fatalf("arguments = %#v", callArguments)
+	}
+	if strings.Contains(callArguments, "exit 1") || !strings.Contains(callArguments, "exit 0") {
+		t.Fatalf("local result should be a non-failing status command: %#v", callArguments)
+	}
+}
+
+func TestResponseItemsAllowsDifferentFilePatchAfterSuccess(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adapter := adapters.Get(adapters.DeepSeekName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	items := responseItemsFromMessage(providers.ChatMessage{
 		ToolCalls: []providers.ChatToolCall{{
 			ID:   "call_1",
 			Type: "function",
@@ -78,7 +119,7 @@ func TestResponseItemsAllowsDifferentFilePatchDuringCooldown(t *testing.T) {
 				Arguments: `{"command":"str_replace","path":"b.vue","old_str":"old","new_str":"new"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger, responseConversionOptions{patchCooldownFiles: []string{"a.java"}})
+	}, toolCtx, adapter, "req_test", logger)
 	if len(items) != 1 || items[0]["type"] != "custom_tool_call" {
 		t.Fatalf("items = %#v", items)
 	}
@@ -87,11 +128,11 @@ func TestResponseItemsAllowsDifferentFilePatchDuringCooldown(t *testing.T) {
 	}
 }
 
-func TestResponseItemsBlocksSameFilePatchDuringCooldown(t *testing.T) {
+func TestResponseItemsAllowsSameFilePatchAfterSuccess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	adapter := adapters.Get(adapters.DeepSeekName)
 	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
-	items := responseItemsFromMessageWithOptions(providers.ChatMessage{
+	items := responseItemsFromMessage(providers.ChatMessage{
 		ToolCalls: []providers.ChatToolCall{{
 			ID:   "call_1",
 			Type: "function",
@@ -100,42 +141,12 @@ func TestResponseItemsBlocksSameFilePatchDuringCooldown(t *testing.T) {
 				Arguments: `{"command":"str_replace","path":"./a.java","old_str":"old","new_str":"new"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger, responseConversionOptions{patchCooldownFiles: []string{"a.java"}})
-	if len(items) != 1 || items[0]["type"] != "message" {
+	}, toolCtx, adapter, "req_test", logger)
+	if len(items) != 1 || items[0]["type"] != "custom_tool_call" {
 		t.Fatalf("items = %#v", items)
 	}
-	content := items[0]["content"].([]map[string]string)[0]["text"]
-	if !strings.Contains(content, "已跳过重复的同文件编辑") || !strings.Contains(content, "a.java") {
-		t.Fatalf("content = %s", content)
-	}
-}
-
-func TestResponseItemsCollapsesRepeatedSameFileCooldownMessages(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	adapter := adapters.Get(adapters.DeepSeekName)
-	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
-	items := responseItemsFromMessageWithOptions(providers.ChatMessage{
-		ToolCalls: []providers.ChatToolCall{
-			{
-				ID:   "call_1",
-				Type: "function",
-				Function: providers.ChatCallFunction{
-					Name:      "codex_text_editor",
-					Arguments: `{"command":"str_replace","path":"a.java","old_str":"old","new_str":"new"}`,
-				},
-			},
-			{
-				ID:   "call_2",
-				Type: "function",
-				Function: providers.ChatCallFunction{
-					Name:      "codex_text_editor",
-					Arguments: `{"command":"str_replace","path":"./a.java","old_str":"old2","new_str":"new2"}`,
-				},
-			},
-		},
-	}, toolCtx, adapter, "req_test", logger, responseConversionOptions{patchCooldownFiles: []string{"a.java"}})
-	if len(items) != 1 || items[0]["type"] != "message" {
-		t.Fatalf("items = %#v", items)
+	if !strings.Contains(items[0]["input"].(string), "a.java") {
+		t.Fatalf("input = %#v", items[0]["input"])
 	}
 }
 
@@ -157,6 +168,67 @@ func TestResponseItemsKeepsDeepSeekReasoningBeforeToolCall(t *testing.T) {
 	}
 	if items[1]["type"] != "custom_tool_call" {
 		t.Fatalf("tool item = %#v", items[1])
+	}
+}
+
+func TestTextEditorStreamProjectorStreamsStablePatchPrefix(t *testing.T) {
+	adapter := adapters.Get(adapters.DeepSeekName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	entry := toolCtx.Entry("codex_text_editor")
+	projector := newTextEditorStreamProjector("call_1", entry)
+
+	if events := projector.update(`{"command":"create",`, adapter); len(events) != 0 {
+		t.Fatalf("events before parseable JSON = %#v", events)
+	}
+	events := projector.update(`{"command":"create","path":"hello.txt","file_text":"hel`, adapter)
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	added := events[0]
+	if added["type"] != "response.output_item.added" {
+		t.Fatalf("added event = %#v", added)
+	}
+	item := added["item"].(map[string]any)
+	if item["type"] != "custom_tool_call" || item["name"] != "apply_patch" || item["status"] != "in_progress" {
+		t.Fatalf("added item = %#v", item)
+	}
+	delta := events[1]
+	if delta["type"] != "response.custom_tool_call_input.delta" ||
+		!strings.Contains(delta["delta"].(string), "*** Add File: hello.txt") ||
+		!strings.Contains(delta["delta"].(string), "+hel") ||
+		strings.Contains(delta["delta"].(string), "*** End Patch") {
+		t.Fatalf("delta event = %#v", delta)
+	}
+	events = projector.update(`{"command":"create","path":"hello.txt","file_text":"hello"}`, adapter)
+	if len(events) != 1 || !strings.Contains(events[0]["delta"].(string), "lo\n*** End Patch") {
+		t.Fatalf("completion delta = %#v", events)
+	}
+}
+
+func TestTextEditorStreamProjectorDoesNotPretendLocalResultIsApplyPatch(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/a.java"
+	if err := os.WriteFile(path, []byte("old done\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	adapter := adapters.Get(adapters.DeepSeekName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	entry := toolCtx.Entry("codex_text_editor")
+	projector := newTextEditorStreamProjector("call_1", entry)
+	arguments, _ := json.Marshal(map[string]string{
+		"command": "str_replace",
+		"path":    path,
+		"old_str": "old",
+		"new_str": "old done",
+	})
+
+	events := projector.update(string(arguments), adapter)
+	if len(events) != 1 {
+		t.Fatalf("events = %#v", events)
+	}
+	item := events[0]["item"].(codex.ResponseItem)
+	if item["type"] != "function_call" || item["name"] != "exec_command" {
+		t.Fatalf("item = %#v", item)
 	}
 }
 

@@ -3,7 +3,12 @@ package server
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
@@ -12,15 +17,7 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-type responseConversionOptions struct {
-	patchCooldownFiles []string
-}
-
 func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, logger *slog.Logger) []codex.ResponseItem {
-	return responseItemsFromMessageWithOptions(message, toolCtx, adapter, requestID, logger, responseConversionOptions{})
-}
-
-func responseItemsFromMessageWithOptions(message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, logger *slog.Logger, options responseConversionOptions) []codex.ResponseItem {
 	if len(message.ToolCalls) > 0 {
 		items := make([]codex.ResponseItem, 0, len(message.ToolCalls))
 		if item := reasoningItem(message.ReasoningContent); item != nil {
@@ -28,12 +25,12 @@ func responseItemsFromMessageWithOptions(message providers.ChatMessage, toolCtx 
 		}
 		for _, call := range message.ToolCalls {
 			entry := toolCtx.Entry(call.Function.Name)
-			item := responseItemFromToolCallWithOptions(call.ID, entry, call.Function.Arguments, adapter, options)
+			item := responseItemFromToolCall(call.ID, entry, call.Function.Arguments, adapter)
 			items = append(items, item)
 			logToolTranslation(logger, requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(requestID, call.ID, entry, call.Function.Arguments, item)
 		}
-		return collapseBlockedPatchCooldownItems(items)
+		return items
 	}
 	items := make([]codex.ResponseItem, 0, 2)
 	if item := reasoningItem(message.ReasoningContent); item != nil {
@@ -52,7 +49,6 @@ type streamState struct {
 	adapter   adapters.Adapter
 	requestID string
 	logger    *slog.Logger
-	options   responseConversionOptions
 	textAdded bool
 	text      string
 	reasoning string
@@ -64,20 +60,15 @@ type streamToolCall struct {
 	name      string
 	arguments string
 	added     bool
-	deferred  bool
+	projector *textEditorStreamProjector
 }
 
 func newStreamState(toolCtx tools.Context, adapter adapters.Adapter, requestID string, logger *slog.Logger) *streamState {
-	return newStreamStateWithOptions(toolCtx, adapter, requestID, logger, responseConversionOptions{})
-}
-
-func newStreamStateWithOptions(toolCtx tools.Context, adapter adapters.Adapter, requestID string, logger *slog.Logger, options responseConversionOptions) *streamState {
 	return &streamState{
 		toolCtx:   toolCtx,
 		adapter:   adapter,
 		requestID: requestID,
 		logger:    logger,
-		options:   options,
 		toolCalls: map[int]*streamToolCall{},
 	}
 }
@@ -118,10 +109,10 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 			}
 			if !call.added && call.name != "" {
 				entry := s.toolCtx.Entry(call.name)
-				if isPatchWriteEntry(entry) && len(s.options.patchCooldownFiles) > 0 {
-					call.deferred = true
+				call.added = true
+				if entry.Kind() == tools.KindTextEditor {
+					call.projector = newTextEditorStreamProjector(call.id, entry)
 				} else {
-					call.added = true
 					events = append(events, map[string]any{
 						"type":         "response.output_item.added",
 						"item":         inProgressItem(call.id, entry),
@@ -132,7 +123,9 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 			if delta.Function.Arguments != "" {
 				call.arguments += delta.Function.Arguments
 				entry := s.toolCtx.Entry(call.name)
-				if event := argumentDeltaEvent(call.id, entry, delta.Function.Arguments); event != nil {
+				if call.projector != nil {
+					events = append(events, call.projector.update(call.arguments, s.adapter)...)
+				} else if event := argumentDeltaEvent(call.id, entry, delta.Function.Arguments); event != nil {
 					events = append(events, event)
 				}
 			}
@@ -153,16 +146,16 @@ func (s *streamState) Done() []codex.ResponseItem {
 				continue
 			}
 			entry := s.toolCtx.Entry(call.name)
-			item := responseItemFromToolCallWithOptions(call.id, entry, call.arguments, s.adapter, s.options)
+			item := responseItemFromToolCall(call.id, entry, call.arguments, s.adapter)
 			item["id"] = call.id
-			if call.deferred {
-				item["_deferred_added"] = true
+			if call.projector != nil {
+				item["_streamed_text_editor_projector"] = call.projector
 			}
 			items = append(items, item)
 			logToolTranslation(s.logger, s.requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(s.requestID, call.id, entry, call.arguments, item)
 		}
-		return collapseBlockedPatchCooldownItems(items)
+		return items
 	}
 	items := make([]codex.ResponseItem, 0, 2)
 	if item := reasoningItem(s.reasoning); item != nil {
@@ -182,10 +175,6 @@ func (s *streamState) ToolCallCount() int {
 }
 
 func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, adapter adapters.Adapter) codex.ResponseItem {
-	return responseItemFromToolCallWithOptions(callID, entry, arguments, adapter, responseConversionOptions{})
-}
-
-func responseItemFromToolCallWithOptions(callID string, entry tools.Entry, arguments string, adapter adapters.Adapter, options responseConversionOptions) codex.ResponseItem {
 	if rewritten, ok := adapter.ToolPolicy().RewriteBlockedToolCall(entry.Name(), arguments); ok {
 		toollog.BlockedToolRewrite(callID, entry, arguments, rewritten)
 		arguments = rewritten
@@ -193,8 +182,10 @@ func responseItemFromToolCallWithOptions(callID string, entry tools.Entry, argum
 	switch entry.Kind() {
 	case tools.KindCustom, tools.KindPatch, tools.KindTextEditor:
 		input := tools.ExtractCustomToolInput(entry, arguments, adapter)
-		if isPatchWriteEntry(entry) && adapters.PatchFilesOverlap(adapters.PatchTouchedFiles(input), options.patchCooldownFiles) {
-			return blockedPatchCooldownMessage(options.patchCooldownFiles)
+		if entry.Kind() == tools.KindTextEditor {
+			if strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_") {
+				return textEditorLocalResultExecCommandCall(callID, input)
+			}
 		}
 		return codex.ResponseItem{
 			"type":    "custom_tool_call",
@@ -233,6 +224,439 @@ func responseItemFromToolCallWithOptions(callID string, entry tools.Entry, argum
 	}
 }
 
+func textEditorLocalResultExecCommandCall(callID string, input string) codex.ResponseItem {
+	arguments, _ := json.Marshal(map[string]string{"cmd": textEditorLocalResultCommand(input)})
+	return codex.ResponseItem{
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      "exec_command",
+		"arguments": string(arguments),
+		"status":    "completed",
+	}
+}
+
+type textEditorStreamProjector struct {
+	callID string
+	entry  tools.Entry
+	input  string
+	added  bool
+	local  bool
+}
+
+func newTextEditorStreamProjector(callID string, entry tools.Entry) *textEditorStreamProjector {
+	return &textEditorStreamProjector{callID: callID, entry: entry}
+}
+
+func (p *textEditorStreamProjector) addedEvent() map[string]any {
+	return map[string]any{
+		"type":         "response.output_item.added",
+		"item":         inProgressTextEditorPatchItem(p.callID, p.entry),
+		"output_index": 0,
+	}
+}
+
+func (p *textEditorStreamProjector) update(arguments string, adapter adapters.Adapter) []map[string]any {
+	input, local, ok := p.project(arguments, adapter)
+	if !ok {
+		return nil
+	}
+	if local {
+		return p.startLocal(input)
+	}
+	return p.appendPatchInput(input)
+}
+
+func (p *textEditorStreamProjector) project(arguments string, adapter adapters.Adapter) (string, bool, bool) {
+	if input := tools.ExtractCustomToolInput(p.entry, arguments, adapter); input != "" {
+		return input, strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_"), true
+	}
+	return p.projectPartial(arguments, adapter)
+}
+
+func (p *textEditorStreamProjector) projectPartial(arguments string, adapter adapters.Adapter) (string, bool, bool) {
+	fields := parseTextEditorArgumentPrefix(arguments)
+	command := normalizeTextEditorStreamCommand(fields.value("command"))
+	path := fields.value("path")
+	if command == "" || path == "" || !fields.complete("command") || !fields.complete("path") {
+		return "", false, false
+	}
+	switch command {
+	case "create":
+		if textEditorStreamFileExists(path) {
+			return "", false, false
+		}
+		text, ok := fields.firstValue("file_text", "content", "text", "new_str")
+		if !ok {
+			return "", false, false
+		}
+		return projectedPartialTextEditorInput(adapter, map[string]string{
+			"command":   command,
+			"path":      path,
+			"file_text": text,
+		})
+	case "str_replace":
+		oldText := fields.value("old_str")
+		if oldText == "" || !fields.complete("old_str") || textEditorStreamFileMissingOldText(path, oldText) {
+			return "", false, false
+		}
+		newText, ok := fields.firstValue("new_str", "text", "content")
+		if !ok {
+			return "", false, false
+		}
+		return projectedPartialTextEditorInput(adapter, map[string]string{
+			"command": command,
+			"path":    path,
+			"old_str": oldText,
+			"new_str": newText,
+		})
+	case "insert_after":
+		anchor := fields.value("insert_after")
+		if anchor == "" {
+			anchor = fields.value("old_str")
+		}
+		if anchor == "" {
+			return "", false, false
+		}
+		text, ok := fields.firstValue("text", "new_str", "content")
+		if !ok {
+			return "", false, false
+		}
+		return projectedPartialTextEditorInput(adapter, map[string]string{
+			"command":      command,
+			"path":         path,
+			"insert_after": anchor,
+			"text":         text,
+		})
+	case "delete_file":
+		return projectedTextEditorInput(adapter, map[string]string{
+			"command": command,
+			"path":    path,
+		})
+	default:
+		return "", false, false
+	}
+}
+
+func (p *textEditorStreamProjector) appendPatchInput(input string) []map[string]any {
+	if p.local || !strings.HasPrefix(input, p.input) {
+		return nil
+	}
+	var events []map[string]any
+	if !p.added {
+		p.added = true
+		events = append(events, p.addedEvent())
+	}
+	delta := strings.TrimPrefix(input, p.input)
+	if delta == "" {
+		return events
+	}
+	p.input = input
+	return append(events, map[string]any{
+		"type":    "response.custom_tool_call_input.delta",
+		"item_id": p.callID,
+		"call_id": p.callID,
+		"delta":   delta,
+	})
+}
+
+func (p *textEditorStreamProjector) startLocal(input string) []map[string]any {
+	p.local = true
+	if p.added {
+		return nil
+	}
+	p.added = true
+	item := textEditorLocalResultExecCommandCall(p.callID, input)
+	item["id"] = p.callID
+	item["status"] = "in_progress"
+	delete(item, "arguments")
+	return []map[string]any{{
+		"type":         "response.output_item.added",
+		"item":         item,
+		"output_index": 0,
+	}}
+}
+
+func (p *textEditorStreamProjector) doneEvents(item codex.ResponseItem) []map[string]any {
+	if !p.added {
+		if item["type"] == "custom_tool_call" {
+			p.added = true
+			return append([]map[string]any{p.addedEvent()}, p.doneEvents(item)...)
+		}
+		return []map[string]any{{
+			"type":         "response.output_item.added",
+			"item":         item,
+			"output_index": 0,
+		}}
+	}
+	if item["type"] != "custom_tool_call" {
+		return nil
+	}
+	input, _ := item["input"].(string)
+	var events []map[string]any
+	if strings.HasPrefix(input, p.input) {
+		if delta := strings.TrimPrefix(input, p.input); delta != "" {
+			events = append(events, map[string]any{
+				"type":    "response.custom_tool_call_input.delta",
+				"item_id": item["id"],
+				"call_id": item["call_id"],
+				"delta":   delta,
+			})
+		}
+	}
+	events = append(events, map[string]any{
+		"type":    "response.custom_tool_call_input.done",
+		"item_id": item["id"],
+		"call_id": item["call_id"],
+		"input":   input,
+	})
+	return events
+}
+
+func textEditorLocalResultCommand(input string) string {
+	command := "printf '%s\\n' " + shellSingleQuote(input)
+	if path := textEditorLocalResultPath(input); path != "" {
+		command += "; printf '%s\\n' '--- current file ---'; sed -n '1,200p' " + shellSingleQuote(path)
+	}
+	return command + "; exit 0"
+}
+
+func textEditorLocalResultPath(input string) string {
+	for _, line := range strings.Split(input, "\n") {
+		if path, ok := strings.CutPrefix(line, "path: "); ok {
+			return strings.TrimSpace(path)
+		}
+	}
+	return ""
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+type textEditorArgumentFields map[string]streamedJSONField
+
+type streamedJSONField struct {
+	value    string
+	seen     bool
+	complete bool
+}
+
+func (f textEditorArgumentFields) value(name string) string {
+	return f[name].value
+}
+
+func (f textEditorArgumentFields) complete(name string) bool {
+	field := f[name]
+	return field.seen && field.complete
+}
+
+func (f textEditorArgumentFields) firstValue(names ...string) (string, bool) {
+	for _, name := range names {
+		field := f[name]
+		if field.seen {
+			return field.value, true
+		}
+	}
+	return "", false
+}
+
+func parseTextEditorArgumentPrefix(arguments string) textEditorArgumentFields {
+	fields := textEditorArgumentFields{}
+	i := skipJSONSpace(arguments, 0)
+	if i >= len(arguments) || arguments[i] != '{' {
+		return fields
+	}
+	for i++; i < len(arguments); {
+		i = skipJSONSpace(arguments, i)
+		if i >= len(arguments) || arguments[i] == '}' {
+			return fields
+		}
+		if arguments[i] != '"' {
+			i++
+			continue
+		}
+		key, next, complete := scanJSONStringPrefix(arguments, i)
+		if !complete {
+			return fields
+		}
+		i = skipJSONSpace(arguments, next)
+		if i >= len(arguments) || arguments[i] != ':' {
+			return fields
+		}
+		i = skipJSONSpace(arguments, i+1)
+		if i >= len(arguments) {
+			return fields
+		}
+		if arguments[i] == '"' {
+			value, valueNext, valueComplete := scanJSONStringPrefix(arguments, i)
+			if isTextEditorStreamField(key) {
+				fields[key] = streamedJSONField{value: value, seen: true, complete: valueComplete}
+			}
+			if !valueComplete {
+				return fields
+			}
+			i = valueNext
+			continue
+		}
+		for i < len(arguments) && arguments[i] != ',' && arguments[i] != '}' {
+			i++
+		}
+		if i < len(arguments) && arguments[i] == ',' {
+			i++
+		}
+	}
+	return fields
+}
+
+func scanJSONStringPrefix(text string, start int) (string, int, bool) {
+	var out strings.Builder
+	i := start + 1
+	for i < len(text) {
+		ch := text[i]
+		switch ch {
+		case '"':
+			return out.String(), i + 1, true
+		case '\\':
+			decoded, next, ok := scanJSONEscapePrefix(text, i+1)
+			if !ok {
+				return out.String(), len(text), false
+			}
+			out.WriteString(decoded)
+			i = next
+		default:
+			r, size := rune(ch), 1
+			if ch >= utf8.RuneSelf {
+				r, size = utf8.DecodeRuneInString(text[i:])
+			}
+			out.WriteRune(r)
+			i += size
+		}
+	}
+	return out.String(), len(text), false
+}
+
+func scanJSONEscapePrefix(text string, start int) (string, int, bool) {
+	if start >= len(text) {
+		return "", len(text), false
+	}
+	switch text[start] {
+	case '"', '\\', '/':
+		return string(text[start]), start + 1, true
+	case 'b':
+		return "\b", start + 1, true
+	case 'f':
+		return "\f", start + 1, true
+	case 'n':
+		return "\n", start + 1, true
+	case 'r':
+		return "\r", start + 1, true
+	case 't':
+		return "\t", start + 1, true
+	case 'u':
+		if start+5 > len(text) {
+			return "", len(text), false
+		}
+		r, ok := decodeJSONUnicodeEscape(text[start+1 : start+5])
+		if !ok {
+			return "", start + 5, true
+		}
+		return string(r), start + 5, true
+	default:
+		return string(text[start]), start + 1, true
+	}
+}
+
+func decodeJSONUnicodeEscape(hexText string) (rune, bool) {
+	value, err := strconv.ParseInt(hexText, 16, 32)
+	if err != nil {
+		return unicode.ReplacementChar, false
+	}
+	r := rune(value)
+	if utf16.IsSurrogate(r) {
+		return unicode.ReplacementChar, false
+	}
+	return r, true
+}
+
+func skipJSONSpace(text string, index int) int {
+	for index < len(text) {
+		switch text[index] {
+		case ' ', '\n', '\r', '\t':
+			index++
+		default:
+			return index
+		}
+	}
+	return index
+}
+
+func isTextEditorStreamField(name string) bool {
+	switch name {
+	case "command", "path", "old_str", "new_str", "insert_after", "text", "file_text", "content":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeTextEditorStreamCommand(command string) string {
+	switch strings.TrimSpace(strings.ToLower(command)) {
+	case "create":
+		return "create"
+	case "str_replace", "replace":
+		return "str_replace"
+	case "insert", "insert_after":
+		return "insert_after"
+	case "delete", "delete_file":
+		return "delete_file"
+	default:
+		return ""
+	}
+}
+
+func projectedTextEditorInput(adapter adapters.Adapter, values map[string]string) (string, bool, bool) {
+	data, _ := json.Marshal(values)
+	input, err := tools.TextEditorPatchInput(string(data))
+	if err != nil || input == "" {
+		return "", false, false
+	}
+	input = adapter.NormalizePatchInput(input)
+	return input, strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_"), true
+}
+
+func projectedPartialTextEditorInput(adapter adapters.Adapter, values map[string]string) (string, bool, bool) {
+	input, local, ok := projectedTextEditorInput(adapter, values)
+	if !ok || local {
+		return input, local, ok
+	}
+	return strings.TrimSuffix(input, "\n*** End Patch"), false, true
+}
+
+func textEditorStreamFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func textEditorStreamFileContains(path string, text string) bool {
+	if text == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	return err == nil && strings.Contains(string(data), text)
+}
+
+func textEditorStreamFileMissingOldText(path string, oldText string) bool {
+	if oldText == "" {
+		return true
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	return err == nil && !strings.Contains(string(data), oldText)
+}
+
 func isPatchWriteEntry(entry tools.Entry) bool {
 	return entry.Kind() == tools.KindPatch || entry.Kind() == tools.KindTextEditor
 }
@@ -243,50 +667,6 @@ func logPatchWriteToolCall(requestID string, callID string, entry tools.Entry, a
 	}
 }
 
-func blockedPatchCooldownMessage(files []string) codex.ResponseItem {
-	return codex.ResponseItem{
-		"type": "message",
-		"role": "assistant",
-		"content": []map[string]string{{
-			"type": "output_text",
-			"text": "已跳过重复的同文件编辑：上一轮已经成功修改 " + strings.Join(files, ", ") + "。这次没有再次写入，避免把文件改脏；如需确认，请用只读命令查看 `git diff` 或目标片段。",
-		}},
-	}
-}
-
-func collapseBlockedPatchCooldownItems(items []codex.ResponseItem) []codex.ResponseItem {
-	if len(items) == 0 {
-		return items
-	}
-	var blocked []codex.ResponseItem
-	var kept []codex.ResponseItem
-	for _, item := range items {
-		if isBlockedPatchCooldownItem(item) {
-			blocked = append(blocked, item)
-			continue
-		}
-		kept = append(kept, item)
-	}
-	if len(blocked) == 0 {
-		return items
-	}
-	if len(kept) > 0 {
-		return kept
-	}
-	return []codex.ResponseItem{blocked[0]}
-}
-
-func isBlockedPatchCooldownItem(item codex.ResponseItem) bool {
-	if item["type"] != "message" || item["role"] != "assistant" {
-		return false
-	}
-	content, ok := item["content"].([]map[string]string)
-	if !ok || len(content) == 0 {
-		return false
-	}
-	return strings.Contains(content[0]["text"], "已跳过重复的同文件编辑")
-}
-
 func inProgressItem(callID string, entry tools.Entry) map[string]any {
 	item := responseItemFromToolCall(callID, entry, "{}", adapters.Get(adapters.DefaultName))
 	item["id"] = callID
@@ -294,6 +674,16 @@ func inProgressItem(callID string, entry tools.Entry) map[string]any {
 	delete(item, "input")
 	delete(item, "arguments")
 	return item
+}
+
+func inProgressTextEditorPatchItem(callID string, entry tools.Entry) map[string]any {
+	return map[string]any{
+		"id":      callID,
+		"type":    "custom_tool_call",
+		"call_id": callID,
+		"name":    entry.OriginalName(),
+		"status":  "in_progress",
+	}
 }
 
 func argumentDeltaEvent(callID string, entry tools.Entry, delta string) map[string]any {
@@ -311,6 +701,24 @@ func argumentDeltaEvent(callID string, entry tools.Entry, delta string) map[stri
 }
 
 func toolDoneEvents(item codex.ResponseItem) []map[string]any {
+	if projector, _ := item["_streamed_text_editor_projector"].(*textEditorStreamProjector); projector != nil {
+		delete(item, "_streamed_text_editor_projector")
+		events := projector.doneEvents(item)
+		if item["type"] == "function_call" {
+			events = append(events, map[string]any{
+				"type":      "response.function_call_arguments.done",
+				"item_id":   item["id"],
+				"call_id":   item["call_id"],
+				"arguments": item["arguments"],
+			})
+		}
+		events = append(events, map[string]any{
+			"type":         "response.output_item.done",
+			"item":         item,
+			"output_index": 0,
+		})
+		return events
+	}
 	events := []map[string]any{}
 	itemType, _ := item["type"].(string)
 	switch itemType {
