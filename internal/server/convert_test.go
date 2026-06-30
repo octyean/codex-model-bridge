@@ -205,6 +205,24 @@ func TestTextEditorStreamProjectorStreamsStablePatchPrefix(t *testing.T) {
 	}
 }
 
+func TestTextEditorStreamProjectorAcceptsCreateFileAlias(t *testing.T) {
+	adapter := adapters.Get(adapters.MimoName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	entry := toolCtx.Entry("codex_text_editor")
+	projector := newTextEditorStreamProjector("call_1", entry)
+
+	events := projector.update(`{"command":"create_file","path":"hello.txt","file_text":"hello"}`, adapter)
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	delta := events[1]["delta"].(string)
+	for _, want := range []string{"*** Add File: hello.txt", "+hello", "*** End Patch"} {
+		if !strings.Contains(delta, want) {
+			t.Fatalf("delta missing %q: %s", want, delta)
+		}
+	}
+}
+
 func TestTextEditorStreamProjectorStreamsMoveFile(t *testing.T) {
 	adapter := adapters.Get(adapters.KimiName)
 	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)

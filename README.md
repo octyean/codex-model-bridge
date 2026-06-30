@@ -20,6 +20,7 @@ Codex CLI / App
 - 让 text-only 模型也能接图片：先读图，再把内容转成文字交给模型。
 - 让 OpenAI 原生 GPT / o 系列模型走原生 `/responses`，保留 `reasoning` 和相关参数。
 - 让不同模型按自己的脾气走不同 profile，减少工具调用和补丁格式的毛刺。
+- 安装时探测上游 `/responses` 和 `/chat/completions` 流式能力，自动选择更合适的协议。
 
 ## 快速安装
 
@@ -29,14 +30,22 @@ Linux / macOS：
 curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | bash
 ```
 
-带上 DeepSeek key：
+非交互安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | env CODEX_BRIDGE_API_KEY="sk-xxx" bash
+curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
+  env CODEX_BRIDGE_BASE_URL="https://api.deepseek.com" CODEX_BRIDGE_API_KEY="sk-xxx" bash
 ```
 
-安装脚本会下载二进制、创建 `~/.codex-bridge/config.toml`、写入 Codex provider，并注册用户级服务。重复执行同一条命令即可更新，已有配置不会被覆盖。
+安装脚本会下载二进制、询问或读取上游 URL/API key、探测流式协议、创建 `~/.codex-bridge/config.toml`、写入 Codex provider，并注册用户级服务。重复执行同一条命令即可更新；已有配置不会被覆盖，也不会重新要求填写上游或探测上游。
 脚本只补充 `codex_bridge` provider 和模型目录，不会覆盖你已有的 Codex 默认模型。
+
+更换上游时显式执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
+  env CODEX_BRIDGE_REPLACE_UPSTREAM=1 CODEX_BRIDGE_BASE_URL="https://api.example.com/v1" CODEX_BRIDGE_API_KEY="sk-xxx" bash
+```
 
 Windows 用户可从 [GitHub Releases latest](https://github.com/octyean/codex-model-bridge/releases/latest) 下载对应 exe，放到固定目录后双击运行。首次运行会在 exe 同目录创建 `config.toml`。
 
@@ -44,7 +53,7 @@ Windows 用户可从 [GitHub Releases latest](https://github.com/octyean/codex-m
 
 ## 配置样子
 
-一键安装后，通常只要改这几项：
+配置文件会由安装向导生成。手写配置时，核心结构是 provider 绑定上游，model 绑定 provider：
 
 ```toml
 [providers.deepseek]

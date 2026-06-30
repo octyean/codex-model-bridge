@@ -11,6 +11,8 @@ import (
 
 	"codex-bridge/internal/config"
 	"codex-bridge/internal/providers"
+	bridgesetup "codex-bridge/internal/setup"
+	"codex-bridge/internal/upstreamprobe"
 )
 
 func TestEnsureDefaultConfigCreatesOnce(t *testing.T) {
@@ -115,5 +117,37 @@ func TestConfigureCodexRequiresDefaultModel(t *testing.T) {
 	cfg.Codex.DefaultModel = "auto-model"
 	if _, err := configureCodex(cfg, filepath.Join(dir, ".codex"), "", "Codex Bridge", "http://127.0.0.1:8787/v1"); err != nil {
 		t.Fatalf("configure codex: %v", err)
+	}
+}
+
+func TestRunSetupPreservesExistingConfigWithoutUpstream(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if _, err := bridgesetup.Run(bridgesetup.Options{
+		ConfigPath:   path,
+		CodexHome:    filepath.Join(dir, ".codex"),
+		BaseURL:      "https://old.test/v1",
+		APIKey:       "sk-old",
+		DefaultModel: "kimi-for-coding",
+	}, upstreamprobe.Result{
+		Models:              []string{"kimi-for-coding"},
+		ResponsesStreamOK:   true,
+		RecommendedProtocol: "responses",
+	}); err != nil {
+		t.Fatalf("initial setup: %v", err)
+	}
+	result, err := runSetup(path, filepath.Join(dir, ".codex"), "", "", "", false, true)
+	if err != nil {
+		t.Fatalf("preserve setup: %v", err)
+	}
+	if !result.ExistingPreserved {
+		t.Fatalf("expected existing config to be preserved: %#v", result)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := cfg.Providers["upstream"].BaseURL; got != "https://old.test/v1" {
+		t.Fatalf("base url = %q", got)
 	}
 }

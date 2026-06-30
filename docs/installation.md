@@ -8,17 +8,19 @@
 curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | bash
 ```
 
-带上 DeepSeek key：
+脚本会在首次安装时询问上游 URL 和 API key，并自动探测上游是否支持 `/responses` 流式协议。适合服务器或批量安装的非交互写法：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | env CODEX_BRIDGE_API_KEY="sk-xxx" bash
+curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
+  env CODEX_BRIDGE_BASE_URL="https://api.deepseek.com" CODEX_BRIDGE_API_KEY="sk-xxx" bash
 ```
 
 安装脚本会自动完成这些事：
 
 - 按系统和 CPU 架构下载 GitHub Releases latest 里的二进制。
 - 安装到 `~/.codex-bridge/bin/codex-bridge`。
-- 首次运行时创建 `~/.codex-bridge/config.toml`。
+- 首次运行时探测上游 `/models`、`/responses` 流式和 `/chat/completions` 流式能力。
+- 按探测结果创建 `~/.codex-bridge/config.toml`，优先使用真实可用的 `/responses` 流式协议。
 - 写入 Codex `codex_bridge` provider、auth helper 和模型目录配置。
 - 保留已有 Codex 默认模型；只有全新 Codex 配置才默认选 bridge 模型。
 - Linux 注册 systemd user service，macOS 注册 launchd agent。
@@ -32,9 +34,17 @@ CODEX_BRIDGE_BASE_URL="https://api.deepseek.com"
 CODEX_BRIDGE_MODEL="deepseek-v4-flash"
 CODEX_BRIDGE_HOME="$HOME/.codex-bridge"
 CODEX_BRIDGE_CONFIG="$HOME/.codex-bridge/config.toml"
+CODEX_BRIDGE_REPLACE_UPSTREAM=1
 ```
 
-重复执行同一条安装命令即可更新。配置文件不会被覆盖。
+重复执行同一条安装命令即可更新二进制和重启服务。已有配置默认不会被覆盖，也不会静默更换 URL/API key；未打开替换开关时也不会重新要求填写上游或探测上游协议。
+
+需要更换上游时显式打开替换开关：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
+  env CODEX_BRIDGE_REPLACE_UPSTREAM=1 CODEX_BRIDGE_BASE_URL="https://api.example.com/v1" CODEX_BRIDGE_API_KEY="sk-xxx" bash
+```
 
 ## Windows
 

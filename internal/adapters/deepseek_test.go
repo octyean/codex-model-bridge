@@ -178,7 +178,12 @@ func TestDeepSeekApplyPatchDescriptionIsTextEditorOnly(t *testing.T) {
 			t.Fatalf("description leaked old apply_patch protocol %q: %s", forbidden, description)
 		}
 	}
-	for _, want := range []string{"Codex's text editor bridge", "str_replace", "old_str", "insert_after", "move_file", "delete_file"} {
+	for _, forbidden := range []string{"bridge", "Bridge", "Codex"} {
+		if strings.Contains(description, forbidden) {
+			t.Fatalf("description leaked implementation detail %q: %s", forbidden, description)
+		}
+	}
+	for _, want := range []string{"text editor tool", "str_replace", "old_str", "insert_after", "move_file", "delete_file"} {
 		if !strings.Contains(description, want) {
 			t.Fatalf("description missing %q: %s", want, description)
 		}

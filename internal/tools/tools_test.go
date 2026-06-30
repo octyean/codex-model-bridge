@@ -38,7 +38,7 @@ func TestNonGPTApplyPatchDescription(t *testing.T) {
 		t.Fatalf("non-GPT should see text editor tool, got %q", chatTools[0].Function.Name)
 	}
 	description := chatTools[0].Function.Description
-	for _, forbidden := range []string{"apply_patch", "*** Begin Patch", "*** End Patch"} {
+	for _, forbidden := range []string{"apply_patch", "*** Begin Patch", "*** End Patch", "bridge", "Bridge", "Codex"} {
 		if strings.Contains(description, forbidden) {
 			t.Fatalf("description should hide %q: %q", forbidden, description)
 		}
@@ -46,6 +46,28 @@ func TestNonGPTApplyPatchDescription(t *testing.T) {
 	for _, want := range []string{"str_replace", "old_str", "insert_after", "move_file", "delete_file"} {
 		if !strings.Contains(description, want) {
 			t.Fatalf("description missing %q: %q", want, description)
+		}
+	}
+}
+
+func TestNormalizeTextEditorCommand(t *testing.T) {
+	cases := map[string]string{
+		"create":       "create",
+		"create_file":  "create",
+		"replace":      "str_replace",
+		"str_replace":  "str_replace",
+		"insert":       "insert_after",
+		"insert_after": "insert_after",
+		"rename":       "move_file",
+		"rename_file":  "move_file",
+		"move":         "move_file",
+		"move_file":    "move_file",
+		"delete":       "delete_file",
+		"delete_file":  "delete_file",
+	}
+	for input, want := range cases {
+		if got := NormalizeTextEditorCommand(input); got != want {
+			t.Fatalf("NormalizeTextEditorCommand(%q) = %q, want %q", input, got, want)
 		}
 	}
 }
@@ -260,6 +282,17 @@ func TestTextEditorStrReplaceAlreadyAppliedBuildsLocalResult(t *testing.T) {
 
 func TestTextEditorCreateBuildsApplyPatchInput(t *testing.T) {
 	got, err := TextEditorPatchInput(`{"command":"create","path":"deep/path/notes.md","file_text":"# Notes\n\nHello\n"}`)
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	want := "*** Begin Patch\n*** Add File: deep/path/notes.md\n+# Notes\n+\n+Hello\n*** End Patch"
+	if got != want {
+		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestTextEditorCreateFileAliasBuildsApplyPatchInput(t *testing.T) {
+	got, err := TextEditorPatchInput(`{"command":"create_file","path":"deep/path/notes.md","file_text":"# Notes\n\nHello\n"}`)
 	if err != nil {
 		t.Fatalf("text editor patch: %v", err)
 	}

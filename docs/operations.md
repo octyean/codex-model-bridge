@@ -8,6 +8,48 @@
 codex-bridge config check --config config/config.toml
 ```
 
+## 探测上游协议
+
+只探测，不修改配置：
+
+```bash
+codex-bridge probe \
+  --upstream-base-url https://api.example.com/v1 \
+  --upstream-api-key sk-xxx \
+  --model kimi-for-coding
+```
+
+输出里重点看：
+
+- `models_ok`：上游 `/models` 是否可用。
+- `responses_stream_ok`：上游 `/responses` 是否支持流式。
+- `chat_stream_ok`：上游 `/chat/completions` 是否支持流式。
+- `recommended_protocol`：建议写入配置的协议。
+
+## 生成或更新配置
+
+首次生成配置：
+
+```bash
+codex-bridge setup \
+  --config ~/.codex-bridge/config.toml \
+  --upstream-base-url https://api.example.com/v1 \
+  --upstream-api-key sk-xxx \
+  --model kimi-for-coding \
+  --yes
+```
+
+已有配置默认保留。需要更换上游时：
+
+```bash
+codex-bridge setup \
+  --config ~/.codex-bridge/config.toml \
+  --upstream-base-url https://api.new.example/v1 \
+  --upstream-api-key sk-new \
+  --replace-upstream \
+  --yes
+```
+
 ## 启动服务
 
 ```bash

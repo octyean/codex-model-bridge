@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -20,7 +21,9 @@ import (
 	"codex-bridge/internal/logging"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/server"
+	bridgesetup "codex-bridge/internal/setup"
 	"codex-bridge/internal/toollog"
+	"codex-bridge/internal/upstreamprobe"
 )
 
 func main() {
@@ -61,8 +64,43 @@ func main() {
 	providerName := flags.String("provider-name", "", "Codex model provider name to write")
 	providerDisplayName := flags.String("provider-display-name", "Codex Bridge", "Codex model provider display name")
 	baseURL := flags.String("base-url", "", "Bridge base URL to write into Codex config, defaults to server.listen + /v1")
+	upstreamBaseURL := flags.String("upstream-base-url", "", "Upstream OpenAI-compatible base URL")
+	upstreamAPIKey := flags.String("upstream-api-key", "", "Upstream API key")
+	probeModel := flags.String("model", "", "Model to use for upstream probing")
+	replaceUpstream := flags.Bool("replace-upstream", false, "Replace existing upstream config")
+	yes := flags.Bool("yes", false, "Run setup without prompts")
 	if err := flags.Parse(args); err != nil {
 		os.Exit(1)
+	}
+	if command == "probe" {
+		result := upstreamprobe.Run(context.Background(), upstreamprobe.Options{
+			BaseURL: *upstreamBaseURL,
+			APIKey:  *upstreamAPIKey,
+			Model:   *probeModel,
+		})
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(data))
+		if !result.ResponsesStreamOK && !result.ChatStreamOK {
+			os.Exit(1)
+		}
+		return
+	}
+	if command == "setup" {
+		result, err := runSetup(*configPath, *codexHome, *upstreamBaseURL, *upstreamAPIKey, *probeModel, *replaceUpstream, *yes)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("config: %s\n", result.ConfigPath)
+		if result.ExistingPreserved {
+			fmt.Println("existing config preserved")
+			return
+		}
+		fmt.Printf("protocol: %s\n", result.Protocol)
+		fmt.Printf("default_model: %s\n", result.DefaultModel)
+		fmt.Printf("responses_stream: %t\n", result.ResponsesStream)
+		fmt.Printf("chat_stream: %t\n", result.ChatStream)
+		return
 	}
 	if autoConfigure {
 		created, err := ensureDefaultConfig(*configPath)
@@ -211,6 +249,54 @@ func ensureDefaultConfig(path string) (bool, error) {
 	}
 	fmt.Printf("created config at %s\n", path)
 	return true, nil
+}
+
+func runSetup(configPath string, codexHome string, baseURL string, apiKey string, model string, replaceUpstream bool, yes bool) (bridgesetup.Result, error) {
+	if !replaceUpstream && configExists(configPath) {
+		return bridgesetup.Run(bridgesetup.Options{
+			ConfigPath: configPath,
+			CodexHome:  codexHome,
+		}, upstreamprobe.Result{})
+	}
+	if strings.TrimSpace(baseURL) == "" && !yes {
+		fmt.Print("Upstream base URL: ")
+		if _, err := fmt.Scanln(&baseURL); err != nil {
+			return bridgesetup.Result{}, fmt.Errorf("read upstream base URL: %w", err)
+		}
+	}
+	if strings.TrimSpace(apiKey) == "" && !yes {
+		fmt.Print("Upstream API key: ")
+		if _, err := fmt.Scanln(&apiKey); err != nil {
+			return bridgesetup.Result{}, fmt.Errorf("read upstream API key: %w", err)
+		}
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		return bridgesetup.Result{}, fmt.Errorf("upstream base URL is required")
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		return bridgesetup.Result{}, fmt.Errorf("upstream API key is required")
+	}
+	probe := upstreamprobe.Run(context.Background(), upstreamprobe.Options{
+		BaseURL: baseURL,
+		APIKey:  apiKey,
+		Model:   model,
+	})
+	if !probe.ResponsesStreamOK && !probe.ChatStreamOK {
+		return bridgesetup.Result{}, fmt.Errorf("upstream stream probe failed: %s", probe.Error)
+	}
+	return bridgesetup.Run(bridgesetup.Options{
+		ConfigPath:      configPath,
+		CodexHome:       codexHome,
+		BaseURL:         baseURL,
+		APIKey:          apiKey,
+		DefaultModel:    model,
+		ReplaceUpstream: replaceUpstream,
+	}, probe)
+}
+
+func configExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func configureCodex(cfg *config.Config, codexHome string, providerName string, providerDisplayName string, baseURL string) (codexconfig.Result, error) {

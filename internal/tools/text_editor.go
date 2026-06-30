@@ -34,7 +34,7 @@ func TextEditorPatchInput(arguments string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	switch normalizeEditorCommand(command.Command) {
+	switch NormalizeTextEditorCommand(command.Command) {
 	case "create":
 		content := firstNonEmpty(command.FileText, command.Content, command.Text, command.NewStr)
 		if content == "" {
@@ -227,7 +227,7 @@ func textEditorArguments(values map[string]string) (string, bool) {
 func parseTextEditorCommand(arguments string) (textEditorCommand, error) {
 	var command textEditorCommand
 	if err := json.Unmarshal([]byte(arguments), &command); err == nil && (command.Command != "" || command.Path != "") {
-		command.Command = normalizeEditorCommand(command.Command)
+		command.Command = NormalizeTextEditorCommand(command.Command)
 		return command, nil
 	}
 	var wrapped map[string]json.RawMessage
@@ -244,28 +244,38 @@ func parseTextEditorCommand(arguments string) (textEditorCommand, error) {
 			return parseTextEditorCommand(nested)
 		}
 		if err := json.Unmarshal(raw, &command); err == nil {
-			command.Command = normalizeEditorCommand(command.Command)
+			command.Command = NormalizeTextEditorCommand(command.Command)
 			return command, nil
 		}
 	}
 	return command, fmt.Errorf("arguments must include command and path")
 }
 
-func normalizeEditorCommand(command string) string {
-	switch strings.TrimSpace(strings.ToLower(command)) {
-	case "create":
-		return "create"
-	case "str_replace", "replace":
-		return "str_replace"
-	case "insert", "insert_after":
-		return "insert_after"
-	case "move", "rename", "move_file", "rename_file":
-		return "move_file"
-	case "delete", "delete_file":
-		return "delete_file"
-	default:
-		return strings.TrimSpace(strings.ToLower(command))
+func NormalizeTextEditorCommand(command string) string {
+	value := strings.TrimSpace(strings.ToLower(command))
+	if canonical, ok := textEditorCommandAliases[value]; ok {
+		return canonical
 	}
+	return value
+}
+
+var textEditorCommandAliases = map[string]string{
+	"create":      "create",
+	"create_file": "create",
+
+	"str_replace": "str_replace",
+	"replace":     "str_replace",
+
+	"insert":       "insert_after",
+	"insert_after": "insert_after",
+
+	"move":        "move_file",
+	"rename":      "move_file",
+	"move_file":   "move_file",
+	"rename_file": "move_file",
+
+	"delete":      "delete_file",
+	"delete_file": "delete_file",
 }
 
 func normalizeEditorPath(path string) string {

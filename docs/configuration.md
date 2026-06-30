@@ -14,7 +14,38 @@ Windows 双击运行：exe 同目录下的 config.toml
 chmod 600 config/config.toml
 ```
 
-## 基础配置
+## 自动配置
+
+推荐先让内置向导探测上游能力并生成配置：
+
+```bash
+codex-bridge setup \
+  --config ~/.codex-bridge/config.toml \
+  --upstream-base-url https://api.example.com/v1 \
+  --upstream-api-key sk-xxx \
+  --model kimi-for-coding \
+  --yes
+```
+
+`setup` 会探测 `/models`、`/responses` 流式和 `/chat/completions` 流式能力。上游支持 `/responses` 流式时，会写入：
+
+```toml
+protocol = "responses"
+```
+
+已有配置默认会保留；需要更换上游时加：
+
+```bash
+--replace-upstream
+```
+
+只想查看探测结果、不写配置时，用：
+
+```bash
+codex-bridge probe --upstream-base-url https://api.example.com/v1 --upstream-api-key sk-xxx --model kimi-for-coding
+```
+
+## 手写配置
 
 下面是可直接改的 DeepSeek 系列示例。把占位值替换成自己的服务地址、模型名和 key。
 

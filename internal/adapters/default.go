@@ -112,12 +112,13 @@ func hasPatchSystemInstruction(messages []providers.ChatMessage) bool {
 
 func textEditorToolDescription() string {
 	return strings.Join([]string{
-		"Edit files through Codex's text editor bridge. The real file write is executed by Codex's native file-edit handler after this tool call is converted by the bridge.",
+		"Edit files with the text editor tool.",
 		"Use command=create to create a new file with path and file_text/text.",
 		"Use command=str_replace to replace exact old_str with new_str in path. old_str must be copied exactly from the current file.",
 		"Use command=insert_after to insert text/new_str immediately after an exact insert_after anchor.",
 		"Use command=move_file to rename or move path to destination_path/new_path. When the moved file content also needs a small edit, include exact old_str and replacement new_str in the same call.",
 		"Use command=delete_file to delete path.",
+		"Do not invent command names. Use only create, str_replace, insert_after, move_file, or delete_file.",
 		"Before str_replace or insert_after, inspect the target lines with read-only shell commands unless the current turn already contains the exact text.",
 		"If old_str or insert_after is not exact and unique, the edit will fail. Do not retry blindly; read the current file and send a smaller exact edit.",
 		"If the result says TEXT_EDITOR_ALREADY_APPLIED, do not repeat that same edit; verify current file content, then edit a different missing change or summarize.",

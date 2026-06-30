@@ -289,8 +289,11 @@ func (p *textEditorStreamProjector) project(arguments string, adapter adapters.A
 
 func (p *textEditorStreamProjector) projectPartial(arguments string, adapter adapters.Adapter) (string, bool, bool) {
 	fields := parseTextEditorArgumentPrefix(arguments)
-	command := normalizeTextEditorStreamCommand(fields.value("command"))
+	command := tools.NormalizeTextEditorCommand(fields.value("command"))
 	path := fields.value("path")
+	if !isTextEditorStreamCommand(command) {
+		command = ""
+	}
 	if command == "" || path == "" || !fields.complete("command") || !fields.complete("path") {
 		return "", false, false
 	}
@@ -632,20 +635,12 @@ func isTextEditorStreamField(name string) bool {
 	}
 }
 
-func normalizeTextEditorStreamCommand(command string) string {
-	switch strings.TrimSpace(strings.ToLower(command)) {
-	case "create":
-		return "create"
-	case "str_replace", "replace":
-		return "str_replace"
-	case "insert", "insert_after":
-		return "insert_after"
-	case "move", "rename", "move_file", "rename_file":
-		return "move_file"
-	case "delete", "delete_file":
-		return "delete_file"
+func isTextEditorStreamCommand(command string) bool {
+	switch command {
+	case "create", "str_replace", "insert_after", "move_file", "delete_file":
+		return true
 	default:
-		return ""
+		return false
 	}
 }
 

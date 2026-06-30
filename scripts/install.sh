@@ -9,12 +9,10 @@ BIN_PATH="$BIN_DIR/codex-bridge"
 LOG_DIR="$INSTALL_DIR/logs"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 
-BASE_URL="${CODEX_BRIDGE_BASE_URL:-https://api.deepseek.com}"
-API_KEY="${CODEX_BRIDGE_API_KEY:-sk-xxx}"
+BASE_URL="${CODEX_BRIDGE_BASE_URL:-}"
+API_KEY="${CODEX_BRIDGE_API_KEY:-}"
 MODEL="${CODEX_BRIDGE_MODEL:-deepseek-v4-flash}"
-DISPLAY_NAME="${CODEX_BRIDGE_DISPLAY_NAME:-DeepSeek V4 Flash}"
-CONTEXT_WINDOW="${CODEX_BRIDGE_CONTEXT_WINDOW:-64000}"
-LOCAL_TOKEN="${CODEX_BRIDGE_LOCAL_TOKEN:-}"
+REPLACE_UPSTREAM="${CODEX_BRIDGE_REPLACE_UPSTREAM:-0}"
 
 detect_asset() {
   local os
@@ -43,77 +41,41 @@ download() {
   fi
 }
 
-random_token() {
-  if [ -n "$LOCAL_TOKEN" ]; then
-    printf '%s\n' "$LOCAL_TOKEN"
-    return
-  fi
-  od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
-}
-
 write_config() {
-  if [ -f "$CONFIG_PATH" ]; then
-    chmod 600 "$CONFIG_PATH"
-    return
-  fi
   mkdir -p "$(dirname "$CONFIG_PATH")" "$CODEX_DIR"
-  local token
-  token="$(random_token)"
-  cat > "$CONFIG_PATH" <<EOF
-[server]
-listen = "127.0.0.1:8787"
-
-[codex]
-model_catalog_path = "$CODEX_DIR/models.codex-bridge.json"
-default_model = "$MODEL"
-local_token = "$token"
-
-[model_discovery]
-enabled = true
-mode = "merge"
-
-[extensions.network]
-proxy_url = ""
-
-[capabilities.search]
-enabled = false
-providers = ["jina"]
-max_results = 5
-read_top_k = 3
-
-[capabilities.vision]
-enabled = false
-provider = "jina_vlm"
-mode = "describe"
-
-[search_providers.jina]
-type = "jina"
-search_base_url = "https://s.jina.ai"
-reader_base_url = "https://r.jina.ai"
-api_key = "jina_xxx"
-
-[vision_providers.jina_vlm]
-type = "openai_chat_compatible_vision"
-base_url = "https://api-beta-vlm.jina.ai/v1"
-api_key = "jina_xxx"
-model = "jina-vlm"
-
-[providers.deepseek]
-type = "openai_compatible"
-base_url = "$BASE_URL"
-api_key = "$API_KEY"
-profile = "deepseek"
-protocol = "chat_completions"
-
-[models.$MODEL]
-display_name = "$DISPLAY_NAME"
-provider = "deepseek"
-upstream_model = "$MODEL"
-context_window = $CONTEXT_WINDOW
-supports_parallel_tool_calls = true
-apply_patch_tool_type = "freeform"
-EOF
-  chmod 600 "$CONFIG_PATH"
+  local needs_upstream=0
+  if [ ! -f "$CONFIG_PATH" ] || [ "$REPLACE_UPSTREAM" = "1" ] || [ "$REPLACE_UPSTREAM" = "true" ]; then
+    needs_upstream=1
+    if [ -z "$BASE_URL" ]; then
+      if [ -r /dev/tty ]; then
+        printf "Upstream base URL: " >/dev/tty
+        IFS= read -r BASE_URL </dev/tty
+      else
+        echo "CODEX_BRIDGE_BASE_URL is required" >&2
+        exit 1
+      fi
+    fi
+    if [ -z "$API_KEY" ]; then
+      if [ -r /dev/tty ]; then
+        printf "Upstream API key: " >/dev/tty
+        stty -echo </dev/tty || true
+        IFS= read -r API_KEY </dev/tty
+        stty echo </dev/tty || true
+        printf "\n" >/dev/tty
+      else
+        echo "CODEX_BRIDGE_API_KEY is required" >&2
+        exit 1
+      fi
+    fi
+  fi
+  local args=(setup --config "$CONFIG_PATH" --codex-home "$CODEX_DIR" --model "$MODEL" --yes)
+  if [ "$needs_upstream" = "1" ]; then
+    args+=(--upstream-base-url "$BASE_URL" --upstream-api-key "$API_KEY")
+  fi
+  if [ "$REPLACE_UPSTREAM" = "1" ] || [ "$REPLACE_UPSTREAM" = "true" ]; then
+    args+=(--replace-upstream)
+  fi
+  "$BIN_PATH" "${args[@]}"
 }
 
 install_service() {
@@ -207,6 +169,3 @@ echo
 echo "codex-bridge installed"
 echo "binary: $BIN_PATH"
 echo "config: $CONFIG_PATH"
-if [ "$API_KEY" = "sk-xxx" ]; then
-  echo "edit config api_key before using upstream model"
-fi
