@@ -49,13 +49,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.7"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.8"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.7",
+		"version": "0.2.8",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -107,7 +107,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "provider is not available: "+modelCfg.Provider)
 		return
 	}
-	if s.cfg.UpstreamProtocol(modelCfg, providerCfg) == "responses" {
+	if shouldForwardResponses(s.cfg.UpstreamProtocol(modelCfg, providerCfg), adapter) {
 		responsesProvider, ok := provider.(providers.ResponsesProvider)
 		if !ok {
 			writeError(w, http.StatusInternalServerError, "provider does not support responses protocol: "+modelCfg.Provider)
@@ -185,6 +185,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Output:    items,
 		Usage:     codexUsage(usage),
 	})
+}
+
+func shouldForwardResponses(protocol string, adapter adapters.Adapter) bool {
+	return protocol == "responses" && adapter.Name() == adapters.OpenAIName
 }
 
 func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter) {

@@ -184,6 +184,18 @@ func TestResponsesEndpointPureForwardsNativeGPTResponses(t *testing.T) {
 	}
 }
 
+func TestShouldForwardResponsesOnlyForOpenAIAdapter(t *testing.T) {
+	if !shouldForwardResponses("responses", adapters.Get(adapters.OpenAIName)) {
+		t.Fatalf("openai responses should be forwarded")
+	}
+	if shouldForwardResponses("responses", adapters.Get(adapters.KimiName)) {
+		t.Fatalf("kimi responses should use chat tool adapter")
+	}
+	if shouldForwardResponses("chat_completions", adapters.Get(adapters.OpenAIName)) {
+		t.Fatalf("chat completions should not be forwarded as responses")
+	}
+}
+
 func TestResponsesEndpointPreparesNativeKimiResponses(t *testing.T) {
 	provider := &fakeResponsesProvider{}
 	cfg := testConfig()
@@ -211,12 +223,21 @@ func TestResponsesEndpointPreparesNativeKimiResponses(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	instructions, _ := provider.responseReq["instructions"].(string)
-	if !strings.Contains(instructions, "KIMI_CODEX_TOOL_DISCIPLINE") {
-		t.Fatalf("instructions = %q", instructions)
+	if provider.responseReq != nil {
+		t.Fatalf("kimi should use chat tool adapter, got native responses req = %#v", provider.responseReq)
 	}
-	if !strings.Contains(instructions, "Follow the user request.") {
-		t.Fatalf("original instructions missing: %q", instructions)
+	if provider.req.Model != "kimi-for-coding" {
+		t.Fatalf("upstream model = %q", provider.req.Model)
+	}
+	if len(provider.req.Tools) != 1 || provider.req.Tools[0].Function.Name != "codex_text_editor" {
+		t.Fatalf("tools = %#v", provider.req.Tools)
+	}
+	if len(provider.req.Messages) == 0 || provider.req.Messages[0].Role != "system" {
+		t.Fatalf("missing system discipline note: %#v", provider.req.Messages)
+	}
+	text, _ := provider.req.Messages[0].Content.(string)
+	if !strings.Contains(text, "KIMI_CODEX_TOOL_DISCIPLINE") {
+		t.Fatalf("discipline note = %q", text)
 	}
 }
 
