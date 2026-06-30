@@ -745,6 +745,43 @@ func TestResponsesEndpointStreamsInternalWebSearchAsFinalMessage(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointStreamsInternalWebSearchDirectTextDeltas(t *testing.T) {
+	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"content":"tool "}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"content":"list"}}]}`)},
+	}}
+	cfg := testConfig()
+	cfg.Capabilities.Search.Enabled = true
+	handler := NewWithRuntime(cfg, map[string]providers.ChatProvider{"fake": provider}, capabilities.Runtime{
+		Search: capabilities.StaticSearchProvider{Result: capabilities.SearchResult{RawText: "unused"}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"请详细列举你能够使用的工具。",
+		"tools":[{"type":"web_search_preview"}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	events := sseEvents(t, rec.Body.String())
+	var deltas []string
+	for _, event := range events {
+		if event["type"] == "response.output_text.delta" {
+			deltas = append(deltas, event["delta"].(string))
+		}
+	}
+	if strings.Join(deltas, "") != "tool list" {
+		t.Fatalf("deltas = %#v, events = %#v", deltas, events)
+	}
+}
+
 func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
 		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"reasoning_content":"think "}}]}`)},

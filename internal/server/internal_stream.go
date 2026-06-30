@@ -12,23 +12,6 @@ import (
 )
 
 func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape) {
-	first, err := s.collectStreamedMessage(r, chatReq, provider, toolCtx, adapter, requestID, req.Model, profile)
-	if err != nil {
-		s.logger.Error("upstream_failed", "request_id", requestID, "error", err.Error())
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	final := first
-	if followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), chatReq, first); ok {
-		shape = optimization.CaptureShape(followUpReq)
-		final, err = s.collectStreamedMessage(r, followUpReq, provider, toolCtx, adapter, requestID, req.Model, profile)
-		if err != nil {
-			s.logger.Error("internal_tool_followup_failed", "request_id", requestID, "error", err.Error())
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-	}
-	items := responseItemsFromMessage(final, toolCtx, adapter, requestID, req.Model, profile, s.logger)
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID
 	createdAt := time.Now().Unix()
@@ -44,22 +27,22 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
 		},
 	})
-	for index, item := range items {
-		itemID, _ := item["id"].(string)
-		if itemID == "" {
-			itemID = "msg_0"
-			item["id"] = itemID
-		}
-		_ = writer.Event(map[string]any{
-			"type":         "response.output_item.added",
-			"item":         item,
-			"output_index": index,
-		})
-		for _, event := range toolDoneEvents(item) {
-			event["output_index"] = index
-			_ = writer.Event(event)
+
+	first, err := s.streamVisibleMessage(r, writer, chatReq, provider, toolCtx, adapter, requestID, req.Model, profile, true)
+	if err != nil {
+		_ = writer.Event(map[string]any{"type": "response.failed", "response": map[string]any{"id": respID, "error": map[string]any{"message": err.Error(), "type": "server_error"}}})
+		return
+	}
+	final := first
+	if followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), chatReq, first); ok {
+		shape = optimization.CaptureShape(followUpReq)
+		final, err = s.streamVisibleMessage(r, writer, followUpReq, provider, toolCtx, adapter, requestID, req.Model, profile, false)
+		if err != nil {
+			_ = writer.Event(map[string]any{"type": "response.failed", "response": map[string]any{"id": respID, "error": map[string]any{"message": err.Error(), "type": "server_error"}}})
+			return
 		}
 	}
+	items := responseItemsFromMessage(final, toolCtx, adapter, requestID, req.Model, profile, s.logger)
 	_ = writer.Event(map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
@@ -69,7 +52,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 	s.logUsage(requestID, req.Model, profile, adapter, shape, providers.NormalizedUsage{})
 }
 
-func (s *Server) collectStreamedMessage(r *http.Request, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string) (providers.ChatMessage, error) {
+func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool) (providers.ChatMessage, error) {
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
 		return providers.ChatMessage{}, err
@@ -82,9 +65,20 @@ func (s *Server) collectStreamedMessage(r *http.Request, chatReq providers.ChatC
 		if event.Done {
 			break
 		}
-		_ = state.AddChunk(event.Chunk)
+		for _, out := range state.AddChunk(event.Chunk) {
+			if hideInternalTools && isInternalToolEvent(out) {
+				continue
+			}
+			_ = writer.Event(out)
+		}
 	}
 	return chatMessageFromStreamState(state), nil
+}
+
+func isInternalToolEvent(event map[string]any) bool {
+	item, _ := event["item"].(map[string]any)
+	name, _ := item["name"].(string)
+	return name == bridgeWebSearchTool
 }
 
 func chatMessageFromStreamState(state *streamState) providers.ChatMessage {
