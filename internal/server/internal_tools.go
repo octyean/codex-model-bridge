@@ -48,13 +48,26 @@ func requestHasWebSearch(tools []codex.ResponseTool) bool {
 }
 
 func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
-	if len(message.ToolCalls) == 0 {
+	followUp, ok := s.internalToolFollowUpRequest(ctx, req, message)
+	if !ok {
 		return nil, providers.ChatCompletionRequest{}, false
+	}
+	resp, err := provider.Create(ctx, followUp)
+	if err != nil {
+		s.logger.Error("internal_tool_followup_failed", "error", err.Error())
+		return nil, providers.ChatCompletionRequest{}, false
+	}
+	return resp, followUp, true
+}
+
+func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage) (providers.ChatCompletionRequest, bool) {
+	if len(message.ToolCalls) == 0 {
+		return providers.ChatCompletionRequest{}, false
 	}
 	var outputs []providers.ChatMessage
 	for _, call := range message.ToolCalls {
 		if call.Function.Name != bridgeWebSearchTool {
-			return nil, providers.ChatCompletionRequest{}, false
+			return providers.ChatCompletionRequest{}, false
 		}
 		outputs = append(outputs, providers.ChatMessage{
 			Role:       "tool",
@@ -63,16 +76,10 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 		})
 	}
 	followUp := req
-	followUp.Stream = false
 	followUp.ToolChoice = "none"
 	followUp.Messages = append(append(followUp.Messages, message), outputs...)
 	followUp.Tools = nil
-	resp, err := provider.Create(ctx, followUp)
-	if err != nil {
-		s.logger.Error("internal_tool_followup_failed", "error", err.Error())
-		return nil, providers.ChatCompletionRequest{}, false
-	}
-	return resp, followUp, true
+	return followUp, true
 }
 
 func (s *Server) searchToolOutput(ctx context.Context, arguments string) string {

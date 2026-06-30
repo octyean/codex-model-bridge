@@ -19,11 +19,13 @@ import (
 )
 
 type fakeProvider struct {
-	req          providers.ChatCompletionRequest
-	reqs         []providers.ChatCompletionRequest
-	streamReq    providers.ChatCompletionRequest
-	streamEvents []providers.StreamEvent
-	responses    []providers.ChatCompletionResponse
+	req           providers.ChatCompletionRequest
+	reqs          []providers.ChatCompletionRequest
+	streamReq     providers.ChatCompletionRequest
+	streamReqs    []providers.ChatCompletionRequest
+	streamEvents  []providers.StreamEvent
+	streamBatches [][]providers.StreamEvent
+	responses     []providers.ChatCompletionResponse
 }
 
 type fakeResponsesProvider struct {
@@ -243,10 +245,16 @@ func TestResponsesEndpointPreparesNativeKimiResponses(t *testing.T) {
 
 func (p *fakeProvider) Stream(_ context.Context, req providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
 	p.streamReq = req
-	out := make(chan providers.StreamEvent, len(p.streamEvents)+1)
+	p.streamReqs = append(p.streamReqs, req)
+	events := p.streamEvents
+	if len(p.streamBatches) > 0 {
+		events = p.streamBatches[0]
+		p.streamBatches = p.streamBatches[1:]
+	}
+	out := make(chan providers.StreamEvent, len(events)+1)
 	go func() {
 		defer close(out)
-		for _, event := range p.streamEvents {
+		for _, event := range events {
 			out <- event
 		}
 		out <- providers.StreamEvent{Done: true}
@@ -691,33 +699,12 @@ func TestResponsesEndpointResolvesInternalWebSearch(t *testing.T) {
 }
 
 func TestResponsesEndpointStreamsInternalWebSearchAsFinalMessage(t *testing.T) {
-	provider := &fakeProvider{responses: []providers.ChatCompletionResponse{
+	provider := &fakeProvider{streamBatches: [][]providers.StreamEvent{
 		{
-			ID: "first",
-			Choices: []struct {
-				Index        int                   `json:"index"`
-				Message      providers.ChatMessage `json:"message"`
-				FinishReason string                `json:"finish_reason"`
-			}{{
-				Message: providers.ChatMessage{ToolCalls: []providers.ChatToolCall{{
-					ID:   "call_search",
-					Type: "function",
-					Function: providers.ChatCallFunction{
-						Name:      bridgeWebSearchTool,
-						Arguments: `{"query":"codex bridge"}`,
-					},
-				}}},
-			}},
+			{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"codex bridge\"}"}}]}}]}`)},
 		},
 		{
-			ID: "second",
-			Choices: []struct {
-				Index        int                   `json:"index"`
-				Message      providers.ChatMessage `json:"message"`
-				FinishReason string                `json:"finish_reason"`
-			}{{
-				Message: providers.ChatMessage{Role: "assistant", Content: "stream search result used"},
-			}},
+			{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"content":"stream search result used"}}]}`)},
 		},
 	}}
 	cfg := testConfig()
@@ -741,6 +728,12 @@ func TestResponsesEndpointStreamsInternalWebSearchAsFinalMessage(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(provider.streamReqs) != 2 {
+		t.Fatalf("stream request count = %d", len(provider.streamReqs))
+	}
+	if !provider.streamReqs[0].Stream || !provider.streamReqs[1].Stream {
+		t.Fatalf("internal search should use upstream streaming: %#v", provider.streamReqs)
 	}
 	events := sseEvents(t, rec.Body.String())
 	completed := events[len(events)-1]["response"].(map[string]any)
