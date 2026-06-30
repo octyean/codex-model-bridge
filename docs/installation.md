@@ -19,7 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scr
 - 按系统和 CPU 架构下载 GitHub Releases latest 里的二进制。
 - 安装到 `~/.codex-bridge/bin/codex-bridge`。
 - 首次运行时创建 `~/.codex-bridge/config.toml`。
-- 写入 Codex provider 和模型目录配置。
+- 写入 Codex `codex_bridge` provider、auth helper 和模型目录配置。
+- 保留已有 Codex 默认模型；只有全新 Codex 配置才默认选 bridge 模型。
 - Linux 注册 systemd user service，macOS 注册 launchd agent。
 - 启动或重启 bridge 服务。
 

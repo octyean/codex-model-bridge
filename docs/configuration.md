@@ -29,8 +29,7 @@ local_token = "codex-bridge-local-token"
 
 [model_discovery]
 enabled = true
-mode = "config"
-cache_ttl = "10m"
+mode = "merge"
 
 [extensions.network]
 proxy_url = ""
@@ -104,22 +103,42 @@ apply_patch_tool_type = "freeform"
 
 `default` 适合普通 OpenAI-compatible 模型。`deepseek` 适合 DeepSeek 这类对工具调用和补丁格式更挑剔的模型。
 
+## 自动发现模型
+
+bridge 可以从上游 `/models` 自动获取模型，并生成 Codex 可直接请求的模型映射：
+
+```toml
+[model_discovery]
+enabled = true
+mode = "merge"
+```
+
+`mode` 有三种：
+
+- `config`：只使用手写的 `[models.*]`。
+- `merge`：保留手写模型，再把上游 `/models` 里新增的模型补进来。默认推荐这个。
+- `upstream`：只使用上游 `/models` 返回的模型，适合想完全免手写模型的人。
+
+自动发现的模型会使用对应 provider 的 `profile`，上下文窗口默认按保守值处理，`apply_patch_tool_type` 固定为 `freeform`。如果某个模型需要更准确的上下文、图片能力或专门 profile，再给它补一段手写 `[models.<slug>]` 覆盖即可。
+
+`codex-bridge codex configure` 和服务启动都会执行一次模型发现。`mode = "upstream"` 且没有手写模型时，只要上游 `/models` 可用，也能自动选出默认模型写入 Codex 配置。
+
 ## 模型名与显示名
 
 Codex App 里看到的是模型目录，真正发给上游的是 `upstream_model`。
 
 三层名字各管一件事：
 
-- `models.<slug>`：Codex 侧选择模型时使用的模型 ID。为了兼容 Codex App，可以用 `gpt-*` 形式。
+- `models.<slug>`：Codex 侧选择模型时使用的模型 ID。建议使用真实模型名，例如 `deepseek-v4-flash`、`qwen3-coder`。
 - `display_name`：Codex App / CLI 里显示给人的名字，可以写成 `DeepSeek V4 Flash`、`Qwen3 Coder` 这类人能看懂的名称。
 - `upstream_model`：实际发给上游 API 的模型名，比如 `deepseek-v4-flash`。
 
-如果你想让 Codex App 里显示得顺眼，`slug` 可以保留 `gpt-*`，`display_name` 改成真实模型名。
+不要用 `gpt-*`、`o3*`、`o4*` 伪装第三方模型。Codex 会把这些名字当成 OpenAI 原生模型处理，可能错误展示 reasoning、verbosity、迁移提示或其它原生能力。
 
 示例：
 
 ```toml
-[models."gpt-5.2"]
+[models.deepseek-v4-flash]
 display_name = "DeepSeek V4 Flash"
 provider = "deepseek"
 profile = "deepseek"
@@ -274,6 +293,7 @@ go run ./cmd/codex-bridge codex configure --config config/config.toml
 
 - `model_catalog_json`
 - `[model_providers.codex_bridge]`
+- `[model_providers.codex_bridge.auth]`
 
 已存在的 `~/.codex/config.toml` 会先写备份，例如：
 
@@ -292,7 +312,12 @@ model_catalog_json = "/home/you/.codex/models.codex-bridge.json"
 name = "Codex Bridge"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
-experimental_bearer_token = "codex-bridge-local-token"
+
+[model_providers.codex_bridge.auth]
+command = "/home/you/.codex-bridge/bin/codex-bridge"
+args = ["auth", "token", "--config", "/home/you/.codex-bridge/config.toml"]
+timeout_ms = 5000
+refresh_interval_ms = 0
 ```
 
 需要让 Codex 默认使用 bridge 模型时，可以手动加：
@@ -301,3 +326,5 @@ experimental_bearer_token = "codex-bridge-local-token"
 model_provider = "codex_bridge"
 model = "deepseek-v4-flash"
 ```
+
+Codex 官方要求自定义 provider 放在用户级 `~/.codex/config.toml`。项目里的 `.codex/config.toml` 不能覆盖 `model_provider`、`model_providers` 或 provider 认证配置。`model_catalog_json` 是启动时读取，改完模型目录后需要重启 Codex App，或新开 Codex CLI 会话。

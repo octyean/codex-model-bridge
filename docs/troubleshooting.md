@@ -16,7 +16,10 @@ model_catalog_json = "/home/you/.codex/models.codex-bridge.json"
 [model_providers.codex_bridge]
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
-experimental_bearer_token = "codex-bridge-local-token"
+
+[model_providers.codex_bridge.auth]
+command = "/home/you/.codex-bridge/bin/codex-bridge"
+args = ["auth", "token", "--config", "/home/you/.codex-bridge/config.toml"]
 ```
 
 缺少配置时执行：
@@ -25,9 +28,29 @@ experimental_bearer_token = "codex-bridge-local-token"
 codex-bridge codex configure --config config/config.toml
 ```
 
+如果想自动展示上游模型，确认：
+
+```toml
+[model_discovery]
+enabled = true
+mode = "merge" # 或 "upstream"
+```
+
+服务启动日志里应出现 `model_discovery_completed`。如果上游 `/models` 不可用，bridge 会继续使用手写 `[models.*]`，并在日志里写 `model_discovery_failed`。
+
 ## 请求返回 401
 
-`codex.local_token` 和 Codex provider 的 `experimental_bearer_token` 必须一致。
+Codex 会通过 `[model_providers.codex_bridge.auth]` 调用：
+
+```bash
+codex-bridge auth token --config ~/.codex-bridge/config.toml
+```
+
+这条命令输出的值必须和 bridge 服务读取到的 `codex.local_token` 一致。如果改过 `codex.local_token`，重新执行：
+
+```bash
+codex-bridge codex configure --config ~/.codex-bridge/config.toml
+```
 
 ## 服务启动时报配置权限错误
 
@@ -86,7 +109,7 @@ codex-bridge catalog generate --config config/config.toml
 
 ## 工具调用没跑起来
 
-先看模型目录里的 `profile` 和 `apply_patch_tool_type`。
+先看 bridge 配置里的 `profile`，以及生成模型目录里的 `apply_patch_tool_type`。
 
 - `profile = "deepseek"`：适合 DeepSeek。
 - `profile = "default"`：适合普通 OpenAI-compatible 模型。

@@ -16,6 +16,7 @@ Codex CLI / App
 - 让第三方模型在 Codex 里调用 `apply_patch`，能创建、修改、删除文件。
 - 让 `web_search`、`tool_search`、`local_shell`、`function`、`custom` 这些 Codex 原生能力继续可用。
 - 让 Codex App 识别模型目录里的 `display_name`、上下文窗口、工具能力和图片能力。
+- 自动读取上游 `/models`，把可请求的模型补进 Codex 模型目录。
 - 让 text-only 模型也能接图片：先读图，再把内容转成文字交给模型。
 - 让 OpenAI 原生 GPT / o 系列模型走原生 `/responses`，保留 `reasoning` 和相关参数。
 - 让不同模型按自己的脾气走不同 profile，减少工具调用和补丁格式的毛刺。
@@ -35,6 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scr
 ```
 
 安装脚本会下载二进制、创建 `~/.codex-bridge/config.toml`、写入 Codex provider，并注册用户级服务。重复执行同一条命令即可更新，已有配置不会被覆盖。
+脚本只补充 `codex_bridge` provider 和模型目录，不会覆盖你已有的 Codex 默认模型。
 
 Windows 用户可从 [GitHub Releases latest](https://github.com/octyean/codex-model-bridge/releases/latest) 下载对应 exe，放到固定目录后双击运行。首次运行会在 exe 同目录创建 `config.toml`。
 

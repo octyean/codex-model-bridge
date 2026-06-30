@@ -4,12 +4,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,6 +49,10 @@ func main() {
 		args = args[1:]
 		command = "codex configure"
 	}
+	if command == "auth" && len(args) > 0 && args[0] == "token" {
+		args = args[1:]
+		command = "auth token"
+	}
 
 	flags := flag.NewFlagSet(command, flag.ExitOnError)
 	configPath := flags.String("config", defaultConfigPath, "Path to codex-bridge config")
@@ -72,6 +78,8 @@ func main() {
 		os.Exit(1)
 	}
 	if command == "catalog generate" {
+		providerClients := buildProviderClients(cfg)
+		discoverModels(context.Background(), cfg, providerClients, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if err := cfg.WriteCatalog(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -83,11 +91,17 @@ func main() {
 		fmt.Printf("config ok: %s\n", *configPath)
 		return
 	}
+	if command == "auth token" {
+		fmt.Println(cfg.Codex.LocalToken)
+		return
+	}
 	if command == "codex configure" {
 		configBaseURL := *baseURL
 		if configBaseURL == "" {
 			configBaseURL = cfg.BridgeBaseURL()
 		}
+		providerClients := buildProviderClients(cfg)
+		discoverModels(context.Background(), cfg, providerClients, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 		result, err := configureCodex(cfg, *codexHome, *providerName, *providerDisplayName, configBaseURL)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -113,16 +127,13 @@ func main() {
 			logger.Info("codex_configured", slog.String("path", result.ConfigPath))
 		}
 	}
+	providerClients := buildProviderClients(cfg)
+	discoverModels(context.Background(), cfg, providerClients, logger)
 	if err := cfg.WriteCatalog(); err != nil {
 		logger.Error("catalog_write_failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
-	logger.Info("catalog_written", slog.String("path", cfg.Codex.ModelCatalogPath))
-
-	providerClients := map[string]providers.ChatProvider{}
-	for name, providerCfg := range cfg.Providers {
-		providerClients[name] = providers.NewOpenAIChatClient(providerCfg.BaseURL, providerCfg.APIKey)
-	}
+	logger.Info("catalog_written", slog.String("path", cfg.Codex.ModelCatalogPath), slog.Int("models", len(cfg.Models)))
 
 	handler := server.New(cfg, providerClients, logger)
 	httpServer := &http.Server{
@@ -188,6 +199,14 @@ func ensureDefaultConfig(path string) (bool, error) {
 }
 
 func configureCodex(cfg *config.Config, codexHome string, providerName string, providerDisplayName string, baseURL string) (codexconfig.Result, error) {
+	if strings.TrimSpace(cfg.Codex.DefaultModel) == "" {
+		return codexconfig.Result{}, fmt.Errorf("no default model is available; configure a [models.*] entry or make upstream /models discovery succeed")
+	}
+	configPath := cfg.Path
+	if abs, err := filepath.Abs(configPath); err == nil {
+		configPath = abs
+	}
+	command, args, timeout := authHelper(configPath)
 	return codexconfig.Configure(codexconfig.Settings{
 		CodexHome:           codexHome,
 		ProviderName:        providerName,
@@ -195,6 +214,61 @@ func configureCodex(cfg *config.Config, codexHome string, providerName string, p
 		BaseURL:             baseURL,
 		ModelCatalogPath:    cfg.Codex.ModelCatalogPath,
 		DefaultModel:        cfg.Codex.DefaultModel,
-		BearerToken:         cfg.Codex.LocalToken,
+		AuthCommand:         command,
+		AuthArgs:            args,
+		AuthConfigPath:      configPath,
+		AuthTimeoutMS:       timeout,
 	})
+}
+
+func buildProviderClients(cfg *config.Config) map[string]providers.ChatProvider {
+	providerClients := map[string]providers.ChatProvider{}
+	for name, providerCfg := range cfg.Providers {
+		providerClients[name] = providers.NewOpenAIChatClient(providerCfg.BaseURL, providerCfg.APIKey)
+	}
+	return providerClients
+}
+
+func discoverModels(ctx context.Context, cfg *config.Config, providerClients map[string]providers.ChatProvider, logger *slog.Logger) {
+	if !cfg.ModelDiscovery.Enabled || cfg.ModelDiscoveryMode() == "config" {
+		cfg.AddDiscoveredModels("", nil)
+		return
+	}
+	for name, provider := range providerClients {
+		resp, err := provider.ListModels(ctx)
+		if err != nil {
+			logger.Warn("model_discovery_failed", slog.String("provider", name), slog.String("error", err.Error()))
+			continue
+		}
+		ids := make([]string, 0, len(resp.Data))
+		for _, item := range resp.Data {
+			ids = append(ids, item.ID)
+		}
+		added := cfg.AddDiscoveredModels(name, ids)
+		logger.Info("model_discovery_completed", slog.String("provider", name), slog.Int("upstream_models", len(ids)), slog.Int("added", added))
+	}
+}
+
+func authHelper(configPath string) (string, []string, int) {
+	path, err := os.Executable()
+	if err != nil {
+		return "codex-bridge", []string{"auth", "token", "--config", configPath}, 5000
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return authHelperFromPath(path, cwd, configPath)
+}
+
+func authHelperFromPath(path string, cwd string, configPath string) (string, []string, int) {
+	if isGoRunExecutable(path) && cwd != "" {
+		return "go", []string{"run", filepath.Join(cwd, "cmd", "codex-bridge"), "auth", "token", "--config", configPath}, 30000
+	}
+	return path, []string{"auth", "token", "--config", configPath}, 5000
+}
+
+func isGoRunExecutable(path string) bool {
+	sep := string(filepath.Separator)
+	return strings.Contains(path, sep+".cache"+sep+"go-build"+sep) || strings.Contains(path, sep+"go-build")
 }

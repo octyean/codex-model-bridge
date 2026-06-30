@@ -8,8 +8,7 @@ local_token = "codex-bridge-local-token"
 
 [model_discovery]
 enabled = true
-mode = "config"
-cache_ttl = "10m"
+mode = "merge"
 
 [extensions.network]
 proxy_url = ""

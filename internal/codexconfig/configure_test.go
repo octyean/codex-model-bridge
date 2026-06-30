@@ -16,7 +16,8 @@ func TestConfigureCreatesCodexConfig(t *testing.T) {
 		BaseURL:             "http://127.0.0.1:8787/v1",
 		ModelCatalogPath:    filepath.Join(dir, "models.codex-bridge.json"),
 		DefaultModel:        "deepseek-v4-flash",
-		BearerToken:         "local-token",
+		AuthCommand:         "/usr/local/bin/codex-bridge",
+		AuthConfigPath:      filepath.Join(dir, "bridge.toml"),
 	})
 	if err != nil {
 		t.Fatalf("configure codex: %v", err)
@@ -33,7 +34,10 @@ func TestConfigureCreatesCodexConfig(t *testing.T) {
 		`[model_providers.codex_bridge]`,
 		`base_url = "http://127.0.0.1:8787/v1"`,
 		`wire_api = "responses"`,
-		`experimental_bearer_token = "local-token"`,
+		`[model_providers.codex_bridge.auth]`,
+		`command = "/usr/local/bin/codex-bridge"`,
+		`args = ["auth", "token", "--config", "` + filepath.Join(dir, "bridge.toml") + `"]`,
+		`refresh_interval_ms = 0`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
@@ -66,7 +70,8 @@ experimental_bearer_token = "old-token"
 		BaseURL:             "http://127.0.0.1:8787/v1",
 		ModelCatalogPath:    filepath.Join(dir, "models.codex-bridge.json"),
 		DefaultModel:        "deepseek-v4-flash",
-		BearerToken:         "new-token",
+		AuthCommand:         "/usr/local/bin/codex-bridge",
+		AuthConfigPath:      filepath.Join(dir, "bridge.toml"),
 	})
 	if err != nil {
 		t.Fatalf("configure codex: %v", err)
@@ -92,10 +97,11 @@ experimental_bearer_token = "old-token"
 		`model_catalog_json = "` + filepath.Join(dir, "models.codex-bridge.json") + `"`,
 		`[features]`,
 		`unified_exec = true`,
-		`name = "Codex Bridge"`,
+		`name = "Old"`,
 		`base_url = "http://127.0.0.1:8787/v1"`,
 		`wire_api = "responses"`,
-		`experimental_bearer_token = "new-token"`,
+		`[model_providers.codex_bridge.auth]`,
+		`command = "/usr/local/bin/codex-bridge"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
@@ -111,7 +117,7 @@ experimental_bearer_token = "old-token"
 	}
 }
 
-func TestConfigureUsesExistingModelProviderWhenProviderNameIsEmpty(t *testing.T) {
+func TestConfigureReusesExistingModelProvider(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	before := `model_provider = "mcodex"
@@ -132,7 +138,8 @@ requires_openai_auth = true
 		BaseURL:             "http://127.0.0.1:8787/v1",
 		ModelCatalogPath:    filepath.Join(dir, "models.codex-bridge.json"),
 		DefaultModel:        "deepseek-v4-flash",
-		BearerToken:         "new-token",
+		AuthCommand:         "/usr/local/bin/codex-bridge",
+		AuthConfigPath:      filepath.Join(dir, "bridge.toml"),
 	})
 	if err != nil {
 		t.Fatalf("configure codex: %v", err)
@@ -146,16 +153,18 @@ requires_openai_auth = true
 		`model_provider = "mcodex"`,
 		`model = "gpt-5.5"`,
 		`[model_providers.mcodex]`,
+		`name = "mcodex"`,
 		`base_url = "http://127.0.0.1:8787/v1"`,
-		`experimental_bearer_token = "new-token"`,
+		`[model_providers.mcodex.auth]`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
 		}
 	}
 	for _, unwanted := range []string{
+		`experimental_bearer_token`,
 		`[model_providers.codex_bridge]`,
-		`requires_openai_auth`,
+		`name = "Codex Bridge"`,
 	} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("config should not contain %q:\n%s", unwanted, text)

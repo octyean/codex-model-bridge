@@ -70,8 +70,7 @@ local_token = "$token"
 
 [model_discovery]
 enabled = true
-mode = "config"
-cache_ttl = "10m"
+mode = "merge"
 
 [extensions.network]
 proxy_url = ""
@@ -100,10 +99,11 @@ api_key = "jina_xxx"
 model = "jina-vlm"
 
 [providers.deepseek]
-type = "openai_chat_compatible"
+type = "openai_compatible"
 base_url = "$BASE_URL"
 api_key = "$API_KEY"
 profile = "deepseek"
+protocol = "chat_completions"
 
 [models.$MODEL]
 display_name = "$DISPLAY_NAME"

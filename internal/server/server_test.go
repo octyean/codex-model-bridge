@@ -188,6 +188,33 @@ func TestV1RootAndModels(t *testing.T) {
 	}
 }
 
+func TestDiscoveredModelIsRoutable(t *testing.T) {
+	provider := &fakeProvider{}
+	cfg := testConfig()
+	cfg.Models = nil
+	cfg.ModelDiscovery = config.ModelDiscoveryConfig{Enabled: true, Mode: "upstream"}
+	cfg.AddDiscoveredModels("fake", []string{"upstream-model"})
+	handler := New(cfg, map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"gpt-5.3-codex",
+		"input":"create hello.txt",
+		"tools":[{"type":"custom","name":"apply_patch"}],
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if provider.req.Model != "upstream-model" {
+		t.Fatalf("upstream model = %q", provider.req.Model)
+	}
+}
+
 func TestResponsesEndpointReturnsApplyPatchCustomToolCall(t *testing.T) {
 	provider := &fakeProvider{}
 	cfg := &config.Config{

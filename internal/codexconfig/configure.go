@@ -16,7 +16,10 @@ type Settings struct {
 	BaseURL             string
 	ModelCatalogPath    string
 	DefaultModel        string
-	BearerToken         string
+	AuthCommand         string
+	AuthArgs            []string
+	AuthConfigPath      string
+	AuthTimeoutMS       int
 }
 
 type Result struct {
@@ -60,29 +63,26 @@ func withDefaults(settings Settings) Settings {
 	if strings.TrimSpace(settings.ProviderDisplayName) == "" {
 		settings.ProviderDisplayName = "Codex Bridge"
 	}
+	if strings.TrimSpace(settings.ProviderName) == "" {
+		settings.ProviderName = "codex_bridge"
+	}
+	if settings.AuthTimeoutMS == 0 {
+		settings.AuthTimeoutMS = 5000
+	}
 	return settings
 }
 
 func updateConfigText(input string, settings Settings) string {
 	lines := splitLines(input)
-	settings.ProviderName = effectiveProviderName(lines, settings.ProviderName)
 	if !hasTopLevelValue(lines, "model_provider") && !hasTopLevelValue(lines, "model") {
 		lines = setTopLevelValue(lines, "model_provider", settings.ProviderName)
 		lines = setTopLevelValue(lines, "model", settings.DefaultModel)
+	} else if currentProvider := topLevelValue(lines, "model_provider"); currentProvider != "" && settings.ProviderName == "codex_bridge" && hasProviderTable(lines, currentProvider) {
+		settings.ProviderName = currentProvider
 	}
 	lines = setTopLevelValue(lines, "model_catalog_json", settings.ModelCatalogPath)
 	lines = setProviderTable(lines, settings)
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n"
-}
-
-func effectiveProviderName(lines []string, configured string) string {
-	if name := strings.TrimSpace(configured); name != "" {
-		return name
-	}
-	if name := topLevelStringValue(lines, "model_provider"); name != "" {
-		return name
-	}
-	return "codex_bridge"
 }
 
 func splitLines(input string) []string {
@@ -113,37 +113,18 @@ func setTopLevelValue(lines []string, key string, value string) []string {
 }
 
 func hasTopLevelValue(lines []string, key string) bool {
-	for _, current := range lines {
-		trimmed := strings.TrimSpace(current)
-		if isTableHeader(trimmed) {
-			return false
-		}
-		if keyOf(trimmed) == key {
-			return true
-		}
-	}
-	return false
+	return topLevelValue(lines, key) != ""
 }
 
-func topLevelStringValue(lines []string, key string) string {
+func topLevelValue(lines []string, key string) string {
 	for _, current := range lines {
 		trimmed := strings.TrimSpace(current)
 		if isTableHeader(trimmed) {
 			return ""
 		}
-		if keyOf(trimmed) != key {
-			continue
+		if keyOf(trimmed) == key {
+			return stringValueOf(trimmed)
 		}
-		index := strings.Index(trimmed, "=")
-		if index < 0 {
-			return ""
-		}
-		value := strings.TrimSpace(trimmed[index+1:])
-		unquoted, err := strconv.Unquote(value)
-		if err == nil {
-			return strings.TrimSpace(unquoted)
-		}
-		return strings.TrimSpace(value)
 	}
 	return ""
 }
@@ -151,10 +132,8 @@ func topLevelStringValue(lines []string, key string) string {
 func setProviderTable(lines []string, settings Settings) []string {
 	header := "[model_providers." + settings.ProviderName + "]"
 	values := map[string]string{
-		"name":                      settings.ProviderDisplayName,
-		"base_url":                  settings.BaseURL,
-		"wire_api":                  "responses",
-		"experimental_bearer_token": settings.BearerToken,
+		"base_url": settings.BaseURL,
+		"wire_api": "responses",
 	}
 	start := -1
 	end := len(lines)
@@ -176,17 +155,25 @@ func setProviderTable(lines []string, settings Settings) []string {
 		lines = append(lines, header)
 		start = len(lines) - 1
 		end = len(lines)
+		values["name"] = settings.ProviderDisplayName
 	}
 	for i := start + 1; i < end; {
-		if keyOf(strings.TrimSpace(lines[i])) == "requires_openai_auth" {
+		switch keyOf(strings.TrimSpace(lines[i])) {
+		case "requires_openai_auth", "experimental_bearer_token", "env_key":
 			lines = append(lines[:i], lines[i+1:]...)
 			end--
 			continue
 		}
 		i++
 	}
-	order := []string{"name", "base_url", "wire_api", "experimental_bearer_token"}
+	if _, ok := values["name"]; !ok && !providerKeyExists(lines, start, end, "name") {
+		values["name"] = settings.ProviderDisplayName
+	}
+	order := []string{"name", "base_url", "wire_api"}
 	for _, key := range order {
+		if _, ok := values[key]; !ok {
+			continue
+		}
 		line := key + " = " + strconv.Quote(values[key])
 		updated := false
 		for i := start + 1; i < end; i++ {
@@ -201,7 +188,117 @@ func setProviderTable(lines []string, settings Settings) []string {
 			end++
 		}
 	}
+	lines = setAuthTable(lines, settings.ProviderName, settings, end)
 	return lines
+}
+
+func providerKeyExists(lines []string, start int, end int, key string) bool {
+	for i := start + 1; i < end; i++ {
+		if keyOf(strings.TrimSpace(lines[i])) == key {
+			return true
+		}
+	}
+	return false
+}
+
+func hasProviderTable(lines []string, providerName string) bool {
+	header := "[model_providers." + providerName + "]"
+	for _, line := range lines {
+		if strings.TrimSpace(line) == header {
+			return true
+		}
+	}
+	return false
+}
+
+func setAuthTable(lines []string, providerName string, settings Settings, after int) []string {
+	command := strings.TrimSpace(settings.AuthCommand)
+	configPath := strings.TrimSpace(settings.AuthConfigPath)
+	if command == "" || configPath == "" {
+		return lines
+	}
+	header := "[model_providers." + providerName + ".auth]"
+	start := -1
+	end := len(lines)
+	for i, current := range lines {
+		trimmed := strings.TrimSpace(current)
+		if trimmed == header {
+			start = i
+			continue
+		}
+		if start >= 0 && i > start && isTableHeader(trimmed) {
+			end = i
+			break
+		}
+	}
+	if start < 0 {
+		insert := after
+		if insert == len(lines) && len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+			lines = append(lines, "")
+			insert++
+		} else if insert < len(lines) && strings.TrimSpace(lines[insert]) != "" {
+			lines = insertAt(lines, insert, "")
+			insert++
+		}
+		lines = insertAt(lines, insert, header)
+		start = insert
+		end = start + 1
+	}
+	values := map[string]string{
+		"command":             command,
+		"timeout_ms":          strconv.Itoa(settings.AuthTimeoutMS),
+		"refresh_interval_ms": "0",
+	}
+	args := settings.AuthArgs
+	if len(args) == 0 {
+		args = []string{"auth", "token", "--config", configPath}
+	}
+	argsLine := "args = " + tomlStringArray(args)
+	for _, key := range []string{"command"} {
+		line := key + " = " + strconv.Quote(values[key])
+		updated := false
+		for i := start + 1; i < end; i++ {
+			if keyOf(strings.TrimSpace(lines[i])) == key {
+				lines[i] = line
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			lines = insertAt(lines, end, line)
+			end++
+		}
+	}
+	for _, item := range []struct {
+		key  string
+		line string
+	}{
+		{"args", argsLine},
+		{"timeout_ms", "timeout_ms = " + values["timeout_ms"]},
+		{"refresh_interval_ms", "refresh_interval_ms = " + values["refresh_interval_ms"]},
+	} {
+		updated := false
+		for i := start + 1; i < end; i++ {
+			if keyOf(strings.TrimSpace(lines[i])) == item.key {
+				lines[i] = item.line
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			lines = insertAt(lines, end, item.line)
+			end++
+		}
+	}
+	return lines
+}
+
+func tomlStringArray(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, strconv.Quote(value))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func insertAt(lines []string, index int, value string) []string {
@@ -220,6 +317,18 @@ func keyOf(line string) string {
 		return ""
 	}
 	return strings.TrimSpace(line[:index])
+}
+
+func stringValueOf(line string) string {
+	index := strings.Index(line, "=")
+	if index < 0 {
+		return ""
+	}
+	value, err := strconv.Unquote(strings.TrimSpace(line[index+1:]))
+	if err != nil {
+		return ""
+	}
+	return value
 }
 
 func isTableHeader(line string) bool {

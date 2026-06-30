@@ -48,9 +48,8 @@ type ProviderConfig struct {
 }
 
 type ModelDiscoveryConfig struct {
-	Enabled  bool   `toml:"enabled"`
-	Mode     string `toml:"mode"`
-	CacheTTL string `toml:"cache_ttl"`
+	Enabled bool   `toml:"enabled"`
+	Mode    string `toml:"mode"`
 }
 
 type ExtensionsConfig struct {
@@ -117,7 +116,7 @@ type ModelInfo struct {
 	Slug                          string                  `json:"slug"`
 	DisplayName                   string                  `json:"display_name"`
 	Description                   string                  `json:"description"`
-	DefaultReasoningLevel         string                  `json:"default_reasoning_level"`
+	DefaultReasoningLevel         string                  `json:"default_reasoning_level,omitempty"`
 	SupportedReasoningLevels      []ReasoningEffortPreset `json:"supported_reasoning_levels"`
 	ShellType                     string                  `json:"shell_type"`
 	Visibility                    string                  `json:"visibility"`
@@ -182,19 +181,23 @@ func (cfg *Config) Validate() error {
 	if cfg.Codex.ModelCatalogPath == "" {
 		return fmt.Errorf("codex.model_catalog_path is required")
 	}
-	if cfg.Codex.DefaultModel == "" {
-		return fmt.Errorf("codex.default_model is required")
-	}
 	if cfg.Codex.LocalToken == "" {
 		return fmt.Errorf("codex.local_token is required")
 	}
 	if len(cfg.Providers) == 0 {
 		return fmt.Errorf("at least one provider is required")
 	}
-	if len(cfg.Models) == 0 {
+	if err := cfg.validateCapabilities(); err != nil {
+		return err
+	}
+	discoveryProvidesModels := cfg.ModelDiscovery.Enabled && cfg.ModelDiscoveryMode() != "config"
+	if cfg.Codex.DefaultModel == "" && !discoveryProvidesModels {
+		return fmt.Errorf("codex.default_model is required")
+	}
+	if len(cfg.Models) == 0 && !discoveryProvidesModels {
 		return fmt.Errorf("at least one model is required")
 	}
-	if _, ok := cfg.Models[cfg.Codex.DefaultModel]; !ok {
+	if _, ok := cfg.Models[cfg.Codex.DefaultModel]; !ok && !discoveryProvidesModels {
 		return fmt.Errorf("codex.default_model %q is not configured", cfg.Codex.DefaultModel)
 	}
 	for name, provider := range cfg.Providers {
@@ -238,9 +241,6 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("models.%s.profile %q is not supported", slug, model.Profile)
 		}
 	}
-	if err := cfg.validateCapabilities(); err != nil {
-		return err
-	}
 	if err := cfg.validateExtensions(); err != nil {
 		return err
 	}
@@ -265,9 +265,7 @@ func (cfg *Config) validateExtensions() error {
 }
 
 func (cfg *Config) validateCapabilities() error {
-	if cfg.ModelDiscovery.Mode == "" {
-		cfg.ModelDiscovery.Mode = "config"
-	}
+	cfg.ModelDiscovery.Mode = cfg.ModelDiscoveryMode()
 	switch cfg.ModelDiscovery.Mode {
 	case "config", "upstream", "merge":
 	default:
@@ -320,6 +318,14 @@ func (cfg *Config) validateCapabilities() error {
 	return nil
 }
 
+func (cfg *Config) ModelDiscoveryMode() string {
+	mode := strings.TrimSpace(cfg.ModelDiscovery.Mode)
+	if mode == "" {
+		return "config"
+	}
+	return mode
+}
+
 func (cfg *Config) checkPermissions() error {
 	info, err := os.Stat(cfg.Path)
 	if err != nil {
@@ -343,6 +349,82 @@ func (cfg *Config) Model(slug string) (ModelConfig, bool) {
 func (cfg *Config) Provider(name string) (ProviderConfig, bool) {
 	provider, ok := cfg.Providers[name]
 	return provider, ok
+}
+
+func (cfg *Config) AddDiscoveredModels(providerName string, ids []string) int {
+	mode := cfg.ModelDiscoveryMode()
+	if !cfg.ModelDiscovery.Enabled || mode == "config" || len(ids) == 0 {
+		return 0
+	}
+	if cfg.Models == nil || mode == "upstream" {
+		cfg.Models = map[string]ModelConfig{}
+	}
+	added := 0
+	slotIndex := 0
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		slug := id
+		if !desktopVisibleModel(id) {
+			for slotIndex < len(desktopModelSlots) {
+				candidate := desktopModelSlots[slotIndex]
+				slotIndex++
+				if _, exists := cfg.Models[candidate]; !exists {
+					slug = candidate
+					break
+				}
+			}
+			if !desktopVisibleModel(slug) {
+				continue
+			}
+		}
+		if mode == "merge" {
+			if _, exists := cfg.Models[slug]; exists {
+				continue
+			}
+		}
+		cfg.Models[slug] = ModelConfig{
+			DisplayName:               id,
+			Provider:                  providerName,
+			Profile:                   cfg.Providers[providerName].Profile,
+			UpstreamModel:             id,
+			ContextWindow:             64000,
+			SupportsParallelToolCalls: true,
+			ApplyPatchToolType:        "freeform",
+		}
+		added++
+	}
+	cfg.ensureDefaultModel()
+	return added
+}
+
+var desktopModelSlots = []string{"gpt-5.3-codex", "gpt-5.2", "gpt-5.4-mini"}
+
+func desktopVisibleModel(slug string) bool {
+	switch strings.TrimSpace(slug) {
+	case "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2":
+		return true
+	default:
+		return false
+	}
+}
+
+func (cfg *Config) ensureDefaultModel() {
+	if cfg.Codex.DefaultModel != "" {
+		if _, ok := cfg.Models[cfg.Codex.DefaultModel]; ok {
+			return
+		}
+	}
+	slugs := make([]string, 0, len(cfg.Models))
+	for slug := range cfg.Models {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	if len(slugs) > 0 {
+		cfg.Codex.DefaultModel = slugs[0]
+	}
 }
 
 func (cfg *Config) ProfileName(model ModelConfig, provider ProviderConfig) string {
@@ -431,12 +513,14 @@ func (cfg *Config) Catalog() ModelsResponse {
 		}
 		inputModalities = adapters.NormalizeInputModalities(inputModalities)
 		contextWindow := model.ContextWindow
+		supportsResponsesOptions := cfg.UpstreamProtocol(model, provider) == "responses" && isOpenAIModel
+		supportsSearchTool := cfg.Capabilities.Search.Enabled && caps.SupportsSearchTool
 		models = append(models, ModelInfo{
 			Slug:                       slug,
 			DisplayName:                model.DisplayName,
 			Description:                model.DisplayName + " through Codex Bridge",
-			DefaultReasoningLevel:      "medium",
-			SupportedReasoningLevels:   reasoningLevelsForModel(model),
+			DefaultReasoningLevel:      defaultReasoningLevel(supportsResponsesOptions),
+			SupportedReasoningLevels:   reasoningLevelsForModel(model, supportsResponsesOptions),
 			ShellType:                  "shell_command",
 			Visibility:                 "list",
 			SupportedInAPI:             true,
@@ -447,9 +531,9 @@ func (cfg *Config) Catalog() ModelsResponse {
 			Upgrade:                    nil,
 			BaseInstructions:           "",
 			ModelMessages:              nil,
-			SupportsReasoningSummaries: isOpenAIModel,
-			SupportVerbosity:           isOpenAIModel,
-			DefaultVerbosity:           defaultVerbosityForModel(model),
+			SupportsReasoningSummaries: supportsResponsesOptions,
+			SupportVerbosity:           supportsResponsesOptions,
+			DefaultVerbosity:           defaultVerbosityForModel(supportsResponsesOptions),
 			ApplyPatchToolType:         model.ApplyPatchToolType,
 			WebSearchToolType:          "text",
 			TruncationPolicy: TruncationPolicy{
@@ -464,27 +548,37 @@ func (cfg *Config) Catalog() ModelsResponse {
 			EffectiveContextWindowPercent: 95,
 			ExperimentalSupportedTools:    caps.ExperimentalSupportedTools,
 			InputModalities:               inputModalities,
-			SupportsSearchTool:            caps.SupportsSearchTool,
+			SupportsSearchTool:            supportsSearchTool,
 			UseResponsesLite:              false,
 		})
 	}
 	return ModelsResponse{Models: models}
 }
 
-func reasoningLevelsForModel(model ModelConfig) []ReasoningEffortPreset {
+func defaultReasoningLevel(enabled bool) string {
+	if enabled {
+		return "medium"
+	}
+	return ""
+}
+
+func reasoningLevelsForModel(model ModelConfig, enabled bool) []ReasoningEffortPreset {
+	if !enabled {
+		return []ReasoningEffortPreset{}
+	}
 	levels := []ReasoningEffortPreset{
 		{Effort: "low", Description: "Fast responses with lighter reasoning"},
 		{Effort: "medium", Description: "Balanced reasoning for coding tasks"},
 		{Effort: "high", Description: "Deeper reasoning for complex changes"},
 	}
-	if isOpenAINativeModel(model.UpstreamModel) {
+	if enabled {
 		levels = append(levels, ReasoningEffortPreset{Effort: "xhigh", Description: "Maximum reasoning for the hardest coding tasks"})
 	}
 	return levels
 }
 
-func defaultVerbosityForModel(model ModelConfig) any {
-	if isOpenAINativeModel(model.UpstreamModel) {
+func defaultVerbosityForModel(enabled bool) any {
+	if enabled {
 		return "medium"
 	}
 	return nil

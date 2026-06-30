@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -39,11 +41,32 @@ func TestCatalogIncludesCodexModelFields(t *testing.T) {
 	if model.TruncationPolicy.Limit != 950000 {
 		t.Fatalf("truncation limit = %d", model.TruncationPolicy.Limit)
 	}
+	if model.DefaultReasoningLevel != "" || len(model.SupportedReasoningLevels) != 0 {
+		t.Fatalf("chat model should not advertise reasoning: %#v", model)
+	}
+	if model.SupportsSearchTool {
+		t.Fatalf("search should follow capabilities.search.enabled")
+	}
+}
+
+func TestCatalogJSONOmitsEmptyReasoningEffort(t *testing.T) {
+	cfg := validTestConfig()
+	data, err := json.Marshal(cfg.Catalog())
+	if err != nil {
+		t.Fatalf("marshal catalog: %v", err)
+	}
+	text := string(data)
+	if containsStringLiteral(text, `"default_reasoning_level":""`) {
+		t.Fatalf("catalog contains empty reasoning effort: %s", text)
+	}
+	if containsStringLiteral(text, `"supported_reasoning_levels":null`) {
+		t.Fatalf("catalog contains null reasoning levels: %s", text)
+	}
 }
 
 func TestCatalogIncludesXHighForOpenAINativeModels(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default", Protocol: "responses"}
 	cfg.Models["m"] = ModelConfig{
 		DisplayName: "GPT", Provider: "p", UpstreamModel: "gpt-5.4",
 		ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
@@ -56,7 +79,7 @@ func TestCatalogIncludesXHighForOpenAINativeModels(t *testing.T) {
 
 func TestOpenAINativeModelDefaultsToImageInput(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default", Protocol: "responses"}
 	cfg.Models["m"] = ModelConfig{
 		DisplayName: "GPT", Provider: "p", UpstreamModel: "gpt-5.4",
 		ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
@@ -96,7 +119,7 @@ func TestOpenAINativeModelProfileCanBeOverriddenAtModelLevel(t *testing.T) {
 
 func TestOpenAINativeModelExplicitDefaultProfileUsesOpenAI(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default", Protocol: "responses"}
 	cfg.Models["m"] = ModelConfig{
 		DisplayName: "GPT", Provider: "p", UpstreamModel: "gpt-5.4", Profile: "default",
 		ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
@@ -148,6 +171,10 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func containsStringLiteral(value string, want string) bool {
+	return strings.Contains(value, want)
 }
 
 func TestProfileNameUsesModelThenProvider(t *testing.T) {
@@ -242,6 +269,68 @@ func TestValidateCapabilityProviders(t *testing.T) {
 	}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate config: %v", err)
+	}
+}
+
+func TestValidateAllowsDiscoveryWithoutConfiguredModels(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Codex.DefaultModel = ""
+	cfg.Models = nil
+	cfg.ModelDiscovery = ModelDiscoveryConfig{Enabled: true, Mode: "upstream"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate discovery config: %v", err)
+	}
+}
+
+func TestAddDiscoveredModelsCreatesRoutableModels(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Models = nil
+	cfg.ModelDiscovery = ModelDiscoveryConfig{Enabled: true, Mode: "upstream"}
+	added := cfg.AddDiscoveredModels("p", []string{" upstream-model ", "", "other-model"})
+	if added != 2 {
+		t.Fatalf("added = %d", added)
+	}
+	model, ok := cfg.Models["gpt-5.3-codex"]
+	if !ok {
+		t.Fatalf("discovered model missing")
+	}
+	if model.Provider != "p" || model.UpstreamModel != "upstream-model" || model.ApplyPatchToolType != "freeform" {
+		t.Fatalf("model = %#v", model)
+	}
+	if cfg.Codex.DefaultModel != "gpt-5.2" {
+		t.Fatalf("default model = %q", cfg.Codex.DefaultModel)
+	}
+}
+
+func TestAddDiscoveredModelsPreservesConfiguredDesktopSlots(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Codex.DefaultModel = "gpt-5.5"
+	cfg.Models = map[string]ModelConfig{
+		"gpt-5.5": {
+			DisplayName: "GPT-5.5", Provider: "p", UpstreamModel: "gpt-5.5",
+			ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+		},
+		"gpt-5.4": {
+			DisplayName: "GPT-5.4", Provider: "p", UpstreamModel: "gpt-5.4",
+			ContextWindow: 1000000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+		},
+	}
+	cfg.ModelDiscovery = ModelDiscoveryConfig{Enabled: true, Mode: "merge"}
+	added := cfg.AddDiscoveredModels("p", []string{"mimo-v2.5", "mimo-v2.5-pro"})
+	if added != 2 {
+		t.Fatalf("added = %d", added)
+	}
+	if cfg.Models["gpt-5.5"].UpstreamModel != "gpt-5.5" {
+		t.Fatalf("gpt-5.5 was overwritten: %#v", cfg.Models["gpt-5.5"])
+	}
+	if cfg.Models["gpt-5.4"].UpstreamModel != "gpt-5.4" {
+		t.Fatalf("gpt-5.4 was overwritten: %#v", cfg.Models["gpt-5.4"])
+	}
+	if cfg.Models["gpt-5.3-codex"].UpstreamModel != "mimo-v2.5" {
+		t.Fatalf("first desktop slot = %#v", cfg.Models["gpt-5.3-codex"])
+	}
+	if cfg.Models["gpt-5.2"].UpstreamModel != "mimo-v2.5-pro" {
+		t.Fatalf("second desktop slot = %#v", cfg.Models["gpt-5.2"])
 	}
 }
 

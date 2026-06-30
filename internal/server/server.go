@@ -49,13 +49,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.2"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.3"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.2",
+		"version": "0.2.3",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -71,7 +71,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, providers.ModelsResponse{
 		Object: "list",
-		Data:   s.modelList(r.Context()),
+		Data:   s.modelList(),
 	})
 }
 
