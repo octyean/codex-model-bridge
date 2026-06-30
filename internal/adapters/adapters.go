@@ -12,6 +12,7 @@ import (
 const (
 	DefaultName  = "default"
 	DeepSeekName = "deepseek"
+	KimiName     = "kimi"
 	MimoName     = "mimo"
 	OpenAIName   = "openai"
 )
@@ -169,6 +170,7 @@ func canonicalValue(value any) any {
 var registry = map[string]Adapter{
 	DefaultName:  defaultAdapter{},
 	DeepSeekName: deepSeekAdapter{},
+	KimiName:     kimiAdapter{},
 	MimoName:     mimoAdapter{},
 	OpenAIName:   openAIAdapter{},
 }

@@ -17,7 +17,7 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, logger *slog.Logger) []codex.ResponseItem {
+func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) []codex.ResponseItem {
 	if len(message.ToolCalls) > 0 {
 		items := make([]codex.ResponseItem, 0, len(message.ToolCalls))
 		if item := reasoningItem(message.ReasoningContent); item != nil {
@@ -25,7 +25,7 @@ func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Conte
 		}
 		for _, call := range message.ToolCalls {
 			entry := toolCtx.Entry(call.Function.Name)
-			item := responseItemFromToolCall(call.ID, entry, call.Function.Arguments, adapter)
+			item := responseItemFromToolCall(call.ID, entry, call.Function.Arguments, adapter, requestID, model, profile, logger)
 			items = append(items, item)
 			logToolTranslation(logger, requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(requestID, call.ID, entry, call.Function.Arguments, item)
@@ -48,6 +48,8 @@ type streamState struct {
 	toolCtx   tools.Context
 	adapter   adapters.Adapter
 	requestID string
+	model     string
+	profile   string
 	logger    *slog.Logger
 	textAdded bool
 	text      string
@@ -63,11 +65,13 @@ type streamToolCall struct {
 	projector *textEditorStreamProjector
 }
 
-func newStreamState(toolCtx tools.Context, adapter adapters.Adapter, requestID string, logger *slog.Logger) *streamState {
+func newStreamState(toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) *streamState {
 	return &streamState{
 		toolCtx:   toolCtx,
 		adapter:   adapter,
 		requestID: requestID,
+		model:     model,
+		profile:   profile,
 		logger:    logger,
 		toolCalls: map[int]*streamToolCall{},
 	}
@@ -146,7 +150,7 @@ func (s *streamState) Done() []codex.ResponseItem {
 				continue
 			}
 			entry := s.toolCtx.Entry(call.name)
-			item := responseItemFromToolCall(call.id, entry, call.arguments, s.adapter)
+			item := responseItemFromToolCall(call.id, entry, call.arguments, s.adapter, s.requestID, s.model, s.profile, s.logger)
 			item["id"] = call.id
 			if call.projector != nil {
 				item["_streamed_text_editor_projector"] = call.projector
@@ -174,9 +178,19 @@ func (s *streamState) ToolCallCount() int {
 	return len(s.toolCalls)
 }
 
-func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, adapter adapters.Adapter) codex.ResponseItem {
+func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) codex.ResponseItem {
 	if rewritten, ok := adapter.ToolPolicy().RewriteBlockedToolCall(entry.Name(), arguments); ok {
-		toollog.BlockedToolRewrite(callID, entry, arguments, rewritten)
+		toollog.BlockedToolRewrite(requestID, model, profile, callID, entry, arguments, rewritten)
+		if logger != nil {
+			logger.Warn("tool_call_rewritten",
+				slog.String("request_id", requestID),
+				slog.String("model", model),
+				slog.String("profile", profile),
+				slog.String("tool", entry.Name()),
+				slog.String("kind", entry.Kind()),
+				slog.String("reason", "shell_file_mutation_blocked"),
+			)
+		}
 		arguments = rewritten
 	}
 	switch entry.Kind() {
@@ -332,6 +346,25 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 			"command": command,
 			"path":    path,
 		})
+	case "move_file":
+		destPath, ok := fields.firstValue("destination_path", "new_path", "new_str")
+		if !ok {
+			return "", false, false
+		}
+		values := map[string]string{
+			"command":          command,
+			"path":             path,
+			"destination_path": destPath,
+		}
+		if oldText := fields.value("old_str"); oldText != "" && fields.complete("old_str") {
+			newText, ok := fields.firstValue("new_str", "text", "content")
+			if !ok {
+				return "", false, false
+			}
+			values["old_str"] = oldText
+			values["new_str"] = newText
+		}
+		return projectedTextEditorInput(adapter, values)
 	default:
 		return "", false, false
 	}
@@ -592,7 +625,7 @@ func skipJSONSpace(text string, index int) int {
 
 func isTextEditorStreamField(name string) bool {
 	switch name {
-	case "command", "path", "old_str", "new_str", "insert_after", "text", "file_text", "content":
+	case "command", "path", "destination_path", "new_path", "old_str", "new_str", "insert_after", "text", "file_text", "content":
 		return true
 	default:
 		return false
@@ -607,6 +640,8 @@ func normalizeTextEditorStreamCommand(command string) string {
 		return "str_replace"
 	case "insert", "insert_after":
 		return "insert_after"
+	case "move", "rename", "move_file", "rename_file":
+		return "move_file"
 	case "delete", "delete_file":
 		return "delete_file"
 	default:
@@ -668,7 +703,7 @@ func logPatchWriteToolCall(requestID string, callID string, entry tools.Entry, a
 }
 
 func inProgressItem(callID string, entry tools.Entry) map[string]any {
-	item := responseItemFromToolCall(callID, entry, "{}", adapters.Get(adapters.DefaultName))
+	item := responseItemFromToolCall(callID, entry, "{}", adapters.Get(adapters.DefaultName), "", "", "", nil)
 	item["id"] = callID
 	item["status"] = "in_progress"
 	delete(item, "input")

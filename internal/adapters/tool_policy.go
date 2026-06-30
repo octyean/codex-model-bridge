@@ -11,6 +11,8 @@ This model must create, edit, and delete source, document, and config files with
 Shell is still available for reading files, searching, building, testing, formatting, and running real generators.
 Read the target file if needed, then call the text editor tool with a small exact edit.`
 
+const shellFileWritePolicyDescription = `This shell is not a file editor. Do not use shell commands to create, edit, delete, rename, move, or copy source, document, or config files. Do not use redirects, tee, sed -i, perl -pi, Python/Node file writes, rm, mv, or cp for file changes. Use the text editor tool for file changes. Shell is for read-only inspection, search, build, test, formatting, and real project generators.`
+
 var shellFileWritePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)(^|[;&|]\s*)tee\s+(?:-[a-zA-Z]+\s+)*\S+`),
 	regexp.MustCompile(`(?s)\bopen\s*\([^)]*,\s*["'](?:w|a|x|w\+|a\+)["']`),
@@ -71,6 +73,28 @@ func (p ToolPolicy) RewriteBlockedToolCall(toolName string, arguments string) (s
 		return rewriteExecCommandArguments(arguments, output)
 	default:
 		return arguments, false
+	}
+}
+
+func (p ToolPolicy) ToolDescription(toolName string, description string) string {
+	if !p.BlockShellFileWrites || !isShellToolName(toolName) {
+		return description
+	}
+	if strings.Contains(description, "This shell is not a file editor.") {
+		return description
+	}
+	if strings.TrimSpace(description) == "" {
+		return shellFileWritePolicyDescription
+	}
+	return description + "\n" + shellFileWritePolicyDescription
+}
+
+func isShellToolName(toolName string) bool {
+	switch strings.TrimSpace(toolName) {
+	case "shell", "exec_command":
+		return true
+	default:
+		return false
 	}
 }
 

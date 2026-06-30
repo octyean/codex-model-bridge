@@ -63,10 +63,31 @@ func TestNonGPTTranscriptReplaysSimpleApplyPatchAsTextEditor(t *testing.T) {
 	}
 }
 
+func TestNonGPTTranscriptReplaysMovePatchAsTextEditor(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"rename"}]},
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: old.md\n*** Move to: new.md\n*** End Patch\n"},
+		{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nR old.md -> new.md"}
+	]`)
+	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.KimiName))
+	if err != nil {
+		t.Fatalf("to chat messages: %v", err)
+	}
+	if len(result.Messages) != 3 || len(result.Messages[1].ToolCalls) != 1 {
+		t.Fatalf("history should replay as a tool call: %#v", result.Messages)
+	}
+	call := result.Messages[1].ToolCalls[0]
+	for _, want := range []string{`"command":"move_file"`, `"path":"old.md"`, `"destination_path":"new.md"`} {
+		if call.Function.Name != "codex_text_editor" || !strings.Contains(call.Function.Arguments, want) {
+			t.Fatalf("tool call missing %q: %#v", want, call)
+		}
+	}
+}
+
 func TestNonGPTTranscriptHidesIrreversibleApplyPatchHistory(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"edit"}]},
-		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n*** Move to: b.java\n@@\n-old\n+new\n*** End Patch\n"},
+		{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.java\n*** Move to: b.java\n@@\n existing\n+new\n*** End Patch\n"},
 		{"type":"custom_tool_call_output","call_id":"call_1","output":"Success. Updated the following files:\nM b.java"}
 	]`)
 	result, err := ToChatMessages(codex.ResponsesRequest{Input: input}, adapters.Get(adapters.MimoName))

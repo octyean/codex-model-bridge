@@ -15,6 +15,8 @@ const maxTextEditorReadBytes = 4 * 1024 * 1024
 type textEditorCommand struct {
 	Command     string `json:"command"`
 	Path        string `json:"path"`
+	DestPath    string `json:"destination_path"`
+	NewPath     string `json:"new_path"`
 	OldStr      string `json:"old_str"`
 	NewStr      string `json:"new_str"`
 	InsertAfter string `json:"insert_after"`
@@ -61,6 +63,18 @@ func TextEditorPatchInput(arguments string) (string, error) {
 			return "", fmt.Errorf("insert_after requires text or new_str")
 		}
 		return insertAfterPatch(path, anchor, text), nil
+	case "move_file":
+		destPath := normalizeEditorPath(firstNonEmpty(command.DestPath, command.NewPath, command.NewStr))
+		if destPath == "" {
+			return "", fmt.Errorf("move_file requires destination_path or new_path")
+		}
+		if destPath == path {
+			return samePathMoveResult(path), nil
+		}
+		if command.OldStr != "" {
+			return moveFilePatch(path, destPath, command.OldStr, alignReplacementIndent(command.OldStr, command.NewStr)), nil
+		}
+		return moveFilePatch(path, destPath, "", ""), nil
 	case "delete_file":
 		return "*** Begin Patch\n*** Delete File: " + path + "\n*** End Patch", nil
 	default:
@@ -97,7 +111,36 @@ func TextEditorArgumentsFromPatch(input string) (string, bool) {
 }
 
 func textEditorUpdateArguments(path string, lines []string) (string, bool) {
-	if path == "" || len(lines) < 2 || lines[0] != "@@" {
+	if path == "" {
+		return "", false
+	}
+	if len(lines) >= 1 {
+		if destPath, ok := strings.CutPrefix(lines[0], "*** Move to: "); ok {
+			if len(lines) == 1 {
+				return textEditorArguments(map[string]string{
+					"command":          "move_file",
+					"path":             path,
+					"destination_path": normalizeEditorPath(destPath),
+				})
+			}
+			if len(lines) >= 3 && lines[1] == "@@" {
+				if oldText, newText, ok := textEditorReplaceFromHunk(lines[2:]); ok {
+					return textEditorArguments(map[string]string{
+						"command":          "move_file",
+						"path":             path,
+						"destination_path": normalizeEditorPath(destPath),
+						"old_str":          oldText,
+						"new_str":          newText,
+					})
+				}
+			}
+			return "", false
+		}
+	}
+	if len(lines) == 1 {
+		return "", false
+	}
+	if len(lines) < 2 || lines[0] != "@@" {
 		return "", false
 	}
 	body := lines[1:]
@@ -216,6 +259,8 @@ func normalizeEditorCommand(command string) string {
 		return "str_replace"
 	case "insert", "insert_after":
 		return "insert_after"
+	case "move", "rename", "move_file", "rename_file":
+		return "move_file"
 	case "delete", "delete_file":
 		return "delete_file"
 	default:
@@ -248,6 +293,17 @@ func existingFileCreateResult(path string) string {
 		"required_next_action: inspect_current_file_then_use_str_replace_or_summarize",
 		"forbidden_next_action: retry_create_same_path",
 		"recovery: the target file already exists. Do not use create for existing files; inspect the current file, then use str_replace or insert_after only if a real change is still missing.",
+	}, "\n")
+}
+
+func samePathMoveResult(path string) string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_MOVE_TARGET_SAME_AS_SOURCE",
+		"path: " + path,
+		"file_edit_state: not_modified",
+		"required_next_action: use_str_replace_for_same_file_content_edits",
+		"forbidden_next_action: retry_move_file_same_path",
+		"recovery: source and destination are the same file. Do not use move_file for same-path edits; use str_replace or insert_after on the existing path.",
 	}, "\n")
 }
 
@@ -353,6 +409,17 @@ func insertAfterPatch(path string, anchor string, text string) string {
 	lines := []string{"*** Begin Patch", "*** Update File: " + path, "@@"}
 	lines = append(lines, prefixedLines(" ", anchor)...)
 	lines = append(lines, prefixedLines("+", text)...)
+	lines = append(lines, "*** End Patch")
+	return strings.Join(lines, "\n")
+}
+
+func moveFilePatch(path string, destPath string, oldText string, newText string) string {
+	lines := []string{"*** Begin Patch", "*** Update File: " + path, "*** Move to: " + destPath}
+	if oldText != "" {
+		lines = append(lines, "@@")
+		lines = append(lines, prefixedLines("-", oldText)...)
+		lines = append(lines, prefixedLines("+", newText)...)
+	}
 	lines = append(lines, "*** End Patch")
 	return strings.Join(lines, "\n")
 }

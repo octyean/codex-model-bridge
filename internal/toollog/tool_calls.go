@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-const envToolLogPath = "CODEX_BRIDGE_TOOL_LOG"
+const EnvToolLogPath = "CODEX_BRIDGE_TOOL_LOG"
 
 var seenPatchToolOutputs sync.Map
 
@@ -34,10 +35,32 @@ func PatchToolCall(requestID string, callID string, entry tools.Entry, rawArgume
 	})
 }
 
-func BlockedToolRewrite(callID string, entry tools.Entry, rawArguments string, rewrittenArguments string) {
+func ConfiguredPath() string {
+	return strings.TrimSpace(os.Getenv(EnvToolLogPath))
+}
+
+func CheckConfiguredPath() (string, error) {
+	path := ConfiguredPath()
+	if path == "" {
+		return "", nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return path, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return path, err
+	}
+	return path, file.Close()
+}
+
+func BlockedToolRewrite(requestID string, model string, profile string, callID string, entry tools.Entry, rawArguments string, rewrittenArguments string) {
 	appendRecord(map[string]any{
 		"time":                time.Now().Format(time.RFC3339Nano),
 		"event":               "tool_call_rewritten",
+		"request_id":          requestID,
+		"model":               model,
+		"profile":             profile,
 		"call_id":             callID,
 		"tool":                entry.Name(),
 		"kind":                entry.Kind(),
@@ -86,7 +109,7 @@ func outputHash(text string) string {
 }
 
 func appendRecord(record map[string]any) {
-	path := os.Getenv(envToolLogPath)
+	path := ConfiguredPath()
 	if path == "" {
 		return
 	}

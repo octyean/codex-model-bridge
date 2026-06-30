@@ -49,13 +49,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.3"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.4"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.3",
+		"version": "0.2.4",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -173,7 +173,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, s.logger)
+	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger)
 	usage := providers.NormalizeUsage(resp.Usage)
 	s.logUsage(requestID, req.Model, profileName, adapter, shape, usage)
 	writeJSON(w, http.StatusOK, codex.ResponseObject{
@@ -248,7 +248,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 		},
 	})
 
-	state := newStreamState(toolCtx, adapter, requestID, s.logger)
+	state := newStreamState(toolCtx, adapter, requestID, req.Model, profile, s.logger)
 	var usage providers.NormalizedUsage
 	for event := range stream {
 		if event.Err != nil {

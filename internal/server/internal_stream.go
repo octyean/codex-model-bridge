@@ -32,7 +32,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, s.logger)
+	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profile, s.logger)
 	usage := providers.NormalizeUsage(resp.Usage)
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID

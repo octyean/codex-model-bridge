@@ -12,26 +12,42 @@ import (
 
 func TestToolLogDisabledWithoutEnv(t *testing.T) {
 	logPath := t.TempDir() + "/tool-calls.jsonl"
-	t.Setenv(envToolLogPath, "")
+	t.Setenv(EnvToolLogPath, "")
 
 	PatchToolCall("req_test", "call_1", tools.Entry{
 		Descriptor: adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindPatch},
 	}, `{"input":"*** Begin Patch\n*** End Patch"}`, codex.ResponseItem{"type": "custom_tool_call"})
 
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
-		t.Fatalf("tool log should not be created when %s is unset", envToolLogPath)
+		t.Fatalf("tool log should not be created when %s is unset", EnvToolLogPath)
+	}
+}
+
+func TestToolLogCheckConfiguredPathCreatesFile(t *testing.T) {
+	logPath := t.TempDir() + "/nested/tool-calls.jsonl"
+	t.Setenv(EnvToolLogPath, logPath)
+
+	got, err := CheckConfiguredPath()
+	if err != nil {
+		t.Fatalf("check configured path: %v", err)
+	}
+	if got != logPath {
+		t.Fatalf("path = %q", got)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("stat log path: %v", err)
 	}
 }
 
 func TestToolLogWritesWhenEnvIsSet(t *testing.T) {
 	logPath := t.TempDir() + "/tool-calls.jsonl"
-	t.Setenv(envToolLogPath, logPath)
+	t.Setenv(EnvToolLogPath, logPath)
 	entry := tools.Entry{
 		Descriptor: adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindPatch, OriginalType: "custom"},
 	}
 
 	PatchToolCall("req_test", "call_1", entry, `{"input":"*** Begin Patch\n*** End Patch"}`, codex.ResponseItem{"type": "custom_tool_call"})
-	BlockedToolRewrite("call_2", entry, `{"cmd":"rm README.md"}`, `{"cmd":"printf blocked"}`)
+	BlockedToolRewrite("req_test", "gpt-5.3-codex", "kimi", "call_2", entry, `{"cmd":"rm README.md"}`, `{"cmd":"printf blocked"}`)
 	PatchToolOutput("call_3", adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindPatch}, "Failed to find context", "Failed to find context\n\nAPPLY_PATCH_CONTEXT_MISMATCH")
 
 	data, err := os.ReadFile(logPath)
@@ -39,7 +55,7 @@ func TestToolLogWritesWhenEnvIsSet(t *testing.T) {
 		t.Fatalf("read log: %v", err)
 	}
 	text := string(data)
-	for _, want := range []string{"req_test", "tool_call_rewritten", "tool_output", "context_mismatch"} {
+	for _, want := range []string{"req_test", "gpt-5.3-codex", "kimi", "tool_call_rewritten", "tool_output", "context_mismatch"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("log missing %q: %s", want, text)
 		}
@@ -48,7 +64,7 @@ func TestToolLogWritesWhenEnvIsSet(t *testing.T) {
 
 func TestToolLogWritesTextEditorPatchCalls(t *testing.T) {
 	logPath := t.TempDir() + "/tool-calls.jsonl"
-	t.Setenv(envToolLogPath, logPath)
+	t.Setenv(EnvToolLogPath, logPath)
 	entry := tools.Entry{
 		Descriptor:   adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindTextEditor, OriginalType: "custom"},
 		UpstreamName: "codex_text_editor",
@@ -71,7 +87,7 @@ func TestToolLogWritesTextEditorPatchCalls(t *testing.T) {
 
 func TestPatchToolOutputDeduplicatesReplayedOutputs(t *testing.T) {
 	logPath := t.TempDir() + "/tool-calls.jsonl"
-	t.Setenv(envToolLogPath, logPath)
+	t.Setenv(EnvToolLogPath, logPath)
 	descriptor := adapters.ToolDescriptor{Name: "apply_patch", Kind: tools.KindPatch}
 
 	PatchToolOutput("call_1", descriptor, "Failed to find context", "Failed to find context\n\nAPPLY_PATCH_CONTEXT_MISMATCH")

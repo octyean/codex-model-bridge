@@ -20,6 +20,7 @@ import (
 	"codex-bridge/internal/logging"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/server"
+	"codex-bridge/internal/toollog"
 )
 
 func main() {
@@ -134,6 +135,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("catalog_written", slog.String("path", cfg.Codex.ModelCatalogPath), slog.Int("models", len(cfg.Models)))
+	logToolLogStatus(logger)
 
 	handler := server.New(cfg, providerClients, logger)
 	httpServer := &http.Server{
@@ -168,6 +170,19 @@ func main() {
 		logger.Error("server_shutdown_failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+}
+
+func logToolLogStatus(logger *slog.Logger) {
+	path, err := toollog.CheckConfiguredPath()
+	if path == "" {
+		logger.Info("tool_log_configured", slog.Bool("enabled", false), slog.String("env", toollog.EnvToolLogPath))
+		return
+	}
+	if err != nil {
+		logger.Warn("tool_log_unavailable", slog.String("path", path), slog.String("error", err.Error()), slog.String("env", toollog.EnvToolLogPath))
+		return
+	}
+	logger.Info("tool_log_configured", slog.Bool("enabled", true), slog.String("path", path), slog.String("env", toollog.EnvToolLogPath))
 }
 
 func windowsDefaultConfigPath() string {

@@ -23,7 +23,7 @@ func TestResponseItemsFromApplyPatchToolCall(t *testing.T) {
 			ID: "call_1", Type: "function",
 			Function: providers.ChatCallFunction{Name: "apply_patch", Arguments: `{"input":"*** Begin Patch\n*** End Patch\n"}`},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if len(items) != 1 {
 		t.Fatalf("items len = %d", len(items))
 	}
@@ -51,7 +51,7 @@ func TestResponseItemsConvertsDeepSeekTextEditorToApplyPatchCall(t *testing.T) {
 				Arguments: `{"command":"str_replace","path":"a.java","old_str":"old","new_str":"new"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if len(items) != 1 {
 		t.Fatalf("items len = %d", len(items))
 	}
@@ -90,7 +90,7 @@ func TestResponseItemsTurnsAlreadyAppliedTextEditorIntoExecCommand(t *testing.T)
 				Arguments: string(arguments),
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if len(items) != 1 {
 		t.Fatalf("items len = %d", len(items))
 	}
@@ -119,7 +119,7 @@ func TestResponseItemsAllowsDifferentFilePatchAfterSuccess(t *testing.T) {
 				Arguments: `{"command":"str_replace","path":"b.vue","old_str":"old","new_str":"new"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if len(items) != 1 || items[0]["type"] != "custom_tool_call" {
 		t.Fatalf("items = %#v", items)
 	}
@@ -141,7 +141,7 @@ func TestResponseItemsAllowsSameFilePatchAfterSuccess(t *testing.T) {
 				Arguments: `{"command":"str_replace","path":"./a.java","old_str":"old","new_str":"new"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if len(items) != 1 || items[0]["type"] != "custom_tool_call" {
 		t.Fatalf("items = %#v", items)
 	}
@@ -159,7 +159,7 @@ func TestResponseItemsKeepsDeepSeekReasoningBeforeToolCall(t *testing.T) {
 			ID: "call_1", Type: "function",
 			Function: providers.ChatCallFunction{Name: "codex_text_editor", Arguments: `{"command":"str_replace","path":"a.java","old_str":"old","new_str":"new"}`},
 		}},
-	}, toolCtx, adapters.Get(adapters.DeepSeekName), "req_test", logger)
+	}, toolCtx, adapters.Get(adapters.DeepSeekName), "req_test", "", "", logger)
 	if len(items) != 2 {
 		t.Fatalf("items len = %d", len(items))
 	}
@@ -205,6 +205,45 @@ func TestTextEditorStreamProjectorStreamsStablePatchPrefix(t *testing.T) {
 	}
 }
 
+func TestTextEditorStreamProjectorStreamsMoveFile(t *testing.T) {
+	adapter := adapters.Get(adapters.KimiName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	entry := toolCtx.Entry("codex_text_editor")
+	projector := newTextEditorStreamProjector("call_1", entry)
+
+	events := projector.update(`{"command":"move_file","path":"old.md","destination_path":"new.md"}`, adapter)
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[0]["type"] != "response.output_item.added" {
+		t.Fatalf("added event = %#v", events[0])
+	}
+	delta := events[1]["delta"].(string)
+	for _, want := range []string{"*** Update File: old.md", "*** Move to: new.md", "*** End Patch"} {
+		if !strings.Contains(delta, want) {
+			t.Fatalf("delta missing %q: %s", want, delta)
+		}
+	}
+}
+
+func TestTextEditorStreamProjectorStreamsMoveFileWithReplace(t *testing.T) {
+	adapter := adapters.Get(adapters.KimiName)
+	_, toolCtx := tools.FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapter)
+	entry := toolCtx.Entry("codex_text_editor")
+	projector := newTextEditorStreamProjector("call_1", entry)
+
+	events := projector.update(`{"command":"move_file","path":"old.md","destination_path":"new.md","old_str":"# Old","new_str":"# New"}`, adapter)
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	delta := events[1]["delta"].(string)
+	for _, want := range []string{"*** Move to: new.md", "-# Old", "+# New", "*** End Patch"} {
+		if !strings.Contains(delta, want) {
+			t.Fatalf("delta missing %q: %s", want, delta)
+		}
+	}
+}
+
 func TestTextEditorStreamProjectorDoesNotPretendLocalResultIsApplyPatch(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/a.java"
@@ -240,7 +279,7 @@ func TestResponseItemsFromToolSearchCall(t *testing.T) {
 			ID: "call_1", Type: "function",
 			Function: providers.ChatCallFunction{Name: "tool_search", Arguments: `{"goal":"find shell"}`},
 		}},
-	}, toolCtx, adapters.Get(adapters.DefaultName), "req_test", logger)
+	}, toolCtx, adapters.Get(adapters.DefaultName), "req_test", "", "", logger)
 	if items[0]["type"] != "tool_search_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
@@ -254,7 +293,7 @@ func TestResponseItemsFromShellCall(t *testing.T) {
 			ID: "call_1", Type: "function",
 			Function: providers.ChatCallFunction{Name: "shell", Arguments: `{"command":"ls"}`},
 		}},
-	}, toolCtx, adapters.Get(adapters.DefaultName), "req_test", logger)
+	}, toolCtx, adapters.Get(adapters.DefaultName), "req_test", "", "", logger)
 	if items[0]["type"] != "shell_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
@@ -276,7 +315,7 @@ func TestResponseItemsBlocksDeepSeekManualShellWrites(t *testing.T) {
 				Arguments: `{"command":"cat > README.md <<'EOF'\nhello\nEOF"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if items[0]["type"] != "shell_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
@@ -299,7 +338,7 @@ func TestResponseItemsBlocksDeepSeekExecCommandFileWrites(t *testing.T) {
 				Arguments: `{"cmd":"cat > README.md << 'EOF'\nhello\nEOF","workdir":"/tmp/test"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if items[0]["type"] != "function_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
@@ -321,7 +360,7 @@ func TestResponseItemsAllowsDeepSeekExecCommandReadCommands(t *testing.T) {
 				Arguments: `{"cmd":"sed -n '1,80p' README.md","workdir":"/tmp/test"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "", "", logger)
 	if items[0]["type"] != "function_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
@@ -342,14 +381,14 @@ func TestResponseItemsLogsBlockedToolRewrite(t *testing.T) {
 				Arguments: `{"cmd":"rm README.md","workdir":"/tmp/test"}`,
 			},
 		}},
-	}, toolCtx, adapter, "req_test", logger)
+	}, toolCtx, adapter, "req_test", "gpt-5.3-codex", "kimi", logger)
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
 	logText := string(data)
-	for _, want := range []string{"tool_call_rewritten", "rm README.md", "SHELL_FILE_WRITE_BLOCKED"} {
+	for _, want := range []string{"tool_call_rewritten", "gpt-5.3-codex", "kimi", "rm README.md", "SHELL_FILE_WRITE_BLOCKED"} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("log missing %q: %s", want, logText)
 		}

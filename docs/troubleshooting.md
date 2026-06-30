@@ -112,6 +112,7 @@ codex-bridge catalog generate --config config/config.toml
 先看 bridge 配置里的 `profile`，以及生成模型目录里的 `apply_patch_tool_type`。
 
 - `profile = "deepseek"`：适合 DeepSeek。
+- `profile = "kimi"`：适合 Kimi for Coding，文件编辑会优先走 `codex_text_editor`。
 - `profile = "default"`：适合普通 OpenAI-compatible 模型。
 - `apply_patch_tool_type = "freeform"`：让 Codex 把 `apply_patch` 当成自由格式补丁来传。
 

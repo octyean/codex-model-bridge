@@ -30,7 +30,7 @@ const (
 
 var (
 	applyPatchParameters  = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
-	textEditorParameters  = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"One of create, str_replace, insert_after, or delete_file."},"path":{"type":"string"},"old_str":{"type":"string","description":"Exact existing text for str_replace, or exact anchor text for insert_after."},"new_str":{"type":"string","description":"Replacement text for str_replace, or inserted text for insert_after."},"insert_after":{"type":"string","description":"Exact existing anchor text after which new_str/text should be inserted."},"text":{"type":"string","description":"Inserted text, or file content for create."},"file_text":{"type":"string","description":"Full file content for create."}},"required":["command","path"],"additionalProperties":false}`)
+	textEditorParameters  = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"One of create, str_replace, insert_after, move_file, or delete_file."},"path":{"type":"string"},"destination_path":{"type":"string","description":"Destination path for move_file."},"new_path":{"type":"string","description":"Alias for destination_path when using move_file."},"old_str":{"type":"string","description":"Exact existing text for str_replace, insert_after anchor text, or optional exact text to replace while moving a file."},"new_str":{"type":"string","description":"Replacement text for str_replace, inserted text for insert_after, optional replacement text for move_file, or destination path for move_file when destination_path/new_path is absent."},"insert_after":{"type":"string","description":"Exact existing anchor text after which new_str/text should be inserted."},"text":{"type":"string","description":"Inserted text, or file content for create."},"file_text":{"type":"string","description":"Full file content for create."}},"required":["command","path"],"additionalProperties":false}`)
 	customParameters      = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
 	toolSearchParameters  = json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}}},"additionalProperties":true}`)
 	shellParameters       = json.RawMessage(`{"type":"object","properties":{"command":{"type":["string","array"],"items":{"type":"string"}},"workdir":{"type":"string"},"timeout_ms":{"type":"integer"},"max_output_length":{"type":"integer"}},"required":["command"],"additionalProperties":true}`)
@@ -291,7 +291,8 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 		entry := newEntry("tool_search", KindToolSearch, InputModeJSON, SideEffectRead, "tool_search", descriptionOrDefault(tool.Description, "Search for deferred tools to load before continuing."), tool.Raw)
 		return []convertedTool{chatFunction(entry, toolSearchParameters)}
 	case "local_shell", "shell":
-		entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, toolType, descriptionOrDefault(tool.Description, "Run a local shell command through Codex."), tool.Raw)
+		description := adapter.ToolPolicy().ToolDescription("shell", descriptionOrDefault(tool.Description, "Run a local shell command through Codex."))
+		entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, toolType, description, tool.Raw)
 		return []convertedTool{chatFunction(entry, shellParameters)}
 	default:
 		name := rawString(tool.Raw, "name", tool.Name)
@@ -331,7 +332,7 @@ func convertNamespace(tool codex.ResponseTool, adapter adapters.Adapter) []conve
 	return out
 }
 
-func convertFunction(tool codex.ResponseTool, _ adapters.Adapter, namespace string, kind string) []convertedTool {
+func convertFunction(tool codex.ResponseTool, adapter adapters.Adapter, namespace string, kind string) []convertedTool {
 	name := rawString(tool.Raw, "name", tool.Name)
 	if name == "" {
 		return nil
@@ -340,7 +341,8 @@ func convertFunction(tool codex.ResponseTool, _ adapters.Adapter, namespace stri
 	if len(params) == 0 {
 		params = objectParameters()
 	}
-	entry := newEntry(name, kind, InputModeJSON, SideEffectNone, "function", tool.Description, tool.Raw)
+	description := adapter.ToolPolicy().ToolDescription(name, tool.Description)
+	entry := newEntry(name, kind, InputModeJSON, SideEffectNone, "function", description, tool.Raw)
 	entry.Namespace = namespace
 	return []convertedTool{chatFunction(entry, params)}
 }

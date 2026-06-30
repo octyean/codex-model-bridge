@@ -43,7 +43,7 @@ func TestNonGPTApplyPatchDescription(t *testing.T) {
 			t.Fatalf("description should hide %q: %q", forbidden, description)
 		}
 	}
-	for _, want := range []string{"str_replace", "old_str", "insert_after", "delete_file"} {
+	for _, want := range []string{"str_replace", "old_str", "insert_after", "move_file", "delete_file"} {
 		if !strings.Contains(description, want) {
 			t.Fatalf("description missing %q: %q", want, description)
 		}
@@ -115,6 +115,30 @@ func TestNonGPTApplyPatchToolBecomesTextEditorButKeepsPatchSemantics(t *testing.
 	}
 	if !ctx.HasFileWriteTool() {
 		t.Fatalf("text editor should be classified as file write")
+	}
+}
+
+func TestKimiApplyPatchToolBecomesTextEditor(t *testing.T) {
+	chatTools, ctx := FromCodex([]codex.ResponseTool{{Type: "custom", Name: "apply_patch"}}, adapters.Get(adapters.KimiName))
+	if len(chatTools) != 1 || chatTools[0].Function.Name != "codex_text_editor" {
+		t.Fatalf("chat tools = %#v", chatTools)
+	}
+	entry := ctx.Entry("codex_text_editor")
+	if entry.Kind() != KindTextEditor || entry.OriginalName() != "apply_patch" {
+		t.Fatalf("entry = %#v", entry)
+	}
+}
+
+func TestKimiShellToolDescriptionCarriesFileWriteBoundary(t *testing.T) {
+	chatTools, _ := FromCodex([]codex.ResponseTool{{Type: "function", Name: "exec_command", Description: "Run a command."}}, adapters.Get(adapters.KimiName))
+	if len(chatTools) != 1 {
+		t.Fatalf("chat tools = %#v", chatTools)
+	}
+	description := chatTools[0].Function.Description
+	for _, want := range []string{"This shell is not a file editor", "sed -i", "rm", "mv", "Use the text editor tool"} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("description missing %q: %s", want, description)
+		}
 	}
 }
 
@@ -258,7 +282,7 @@ func TestTextEditorArgumentsFromPatchReplaysSimpleReplace(t *testing.T) {
 }
 
 func TestTextEditorArgumentsFromPatchRejectsComplexPatch(t *testing.T) {
-	got, ok := TextEditorArgumentsFromPatch("*** Begin Patch\n*** Update File: a.java\n*** Move to: b.java\n@@\n-old\n+new\n*** End Patch")
+	got, ok := TextEditorArgumentsFromPatch("*** Begin Patch\n*** Update File: a.java\n*** Move to: b.java\n@@\n existing\n+new\n*** End Patch")
 	if ok || got != "" {
 		t.Fatalf("complex patch should not be replayed as text editor arguments: %q", got)
 	}
@@ -302,6 +326,83 @@ func TestTextEditorInsertAfterBuildsApplyPatchInput(t *testing.T) {
 	want := "*** Begin Patch\n*** Update File: README.md\n@@\n ## Install\n+\n+## Usage\n+npm run dev\n*** End Patch"
 	if got != want {
 		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestTextEditorMoveFileBuildsApplyPatchInput(t *testing.T) {
+	got, err := TextEditorPatchInput(`{"command":"move_file","path":"src/old.js","destination_path":"src/new.js"}`)
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	want := "*** Begin Patch\n*** Update File: src/old.js\n*** Move to: src/new.js\n*** End Patch"
+	if got != want {
+		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestTextEditorMoveFileCanReplaceContent(t *testing.T) {
+	got, err := TextEditorPatchInput(`{"command":"move_file","path":"docs/old.md","destination_path":"docs/new.md","old_str":"# Old\n\nEndpoint: /v1","new_str":"# New\n\nEndpoint: /v2"}`)
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	want := "*** Begin Patch\n*** Update File: docs/old.md\n*** Move to: docs/new.md\n@@\n-# Old\n-\n-Endpoint: /v1\n+# New\n+\n+Endpoint: /v2\n*** End Patch"
+	if got != want {
+		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestTextEditorMoveFileAcceptsRenameAlias(t *testing.T) {
+	got, err := TextEditorPatchInput(`{"command":"rename_file","path":"./docs/old.md","new_path":"./docs/new.md"}`)
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	want := "*** Begin Patch\n*** Update File: docs/old.md\n*** Move to: docs/new.md\n*** End Patch"
+	if got != want {
+		t.Fatalf("input = %q, want %q", got, want)
+	}
+}
+
+func TestTextEditorMoveFileRejectsSamePathAsLocalResult(t *testing.T) {
+	got, err := TextEditorPatchInput(`{"command":"move_file","path":"scripts/readme.js","destination_path":"scripts/readme.js","old_str":"old","new_str":"new"}`)
+	if err != nil {
+		t.Fatalf("text editor patch: %v", err)
+	}
+	for _, want := range []string{
+		"TEXT_EDITOR_MOVE_TARGET_SAME_AS_SOURCE",
+		"path: scripts/readme.js",
+		"required_next_action: use_str_replace_for_same_file_content_edits",
+		"forbidden_next_action: retry_move_file_same_path",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("result missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "*** Move to:") {
+		t.Fatalf("same-path move must not become patch: %s", got)
+	}
+}
+
+func TestTextEditorArgumentsFromPatchReplaysMoveFile(t *testing.T) {
+	got, ok := TextEditorArgumentsFromPatch("*** Begin Patch\n*** Update File: old.md\n*** Move to: new.md\n*** End Patch")
+	if !ok {
+		t.Fatalf("expected move patch to be reversible")
+	}
+	for _, want := range []string{`"command":"move_file"`, `"path":"old.md"`, `"destination_path":"new.md"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("arguments missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestTextEditorArgumentsFromPatchReplaysMoveFileWithReplace(t *testing.T) {
+	got, ok := TextEditorArgumentsFromPatch("*** Begin Patch\n*** Update File: old.md\n*** Move to: new.md\n@@\n-# Old\n+# New\n*** End Patch")
+	if !ok {
+		t.Fatalf("expected move patch to be reversible")
+	}
+	for _, want := range []string{`"command":"move_file"`, `"path":"old.md"`, `"destination_path":"new.md"`, `"old_str":"# Old"`, `"new_str":"# New"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("arguments missing %q: %s", want, got)
+		}
 	}
 }
 
