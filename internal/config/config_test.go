@@ -105,6 +105,22 @@ func TestOpenAINativeModelDefaultsToImageInput(t *testing.T) {
 	}
 }
 
+func TestResponsesProtocolAdvertisesResponsesOptionsForThirdPartyModels(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "kimi", Protocol: "responses"}
+	cfg.Models["m"] = ModelConfig{
+		DisplayName: "Kimi", Provider: "p", UpstreamModel: "kimi-for-coding", Profile: "kimi",
+		ContextWindow: 256000, SupportsParallelToolCalls: true, ApplyPatchToolType: "freeform",
+	}
+	catalog := cfg.Catalog()
+	if !catalog.Models[0].SupportsReasoningSummaries {
+		t.Fatalf("expected responses protocol to advertise reasoning summaries")
+	}
+	if !catalog.Models[0].SupportVerbosity {
+		t.Fatalf("expected responses protocol to advertise verbosity")
+	}
+}
+
 func TestOpenAINativeModelProfileCanBeOverriddenAtModelLevel(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Providers["p"] = ProviderConfig{Type: "openai_compatible", BaseURL: "https://example.test/v1", APIKey: "sk-test", Profile: "default"}

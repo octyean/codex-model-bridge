@@ -34,6 +34,10 @@ func (defaultAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) pr
 	return prepareChatPatchRequest(req)
 }
 
+func (defaultAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
+	return req
+}
+
 func (defaultAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	if tool.Kind == "text_editor_patch" {
 		return textEditorToolDescription()

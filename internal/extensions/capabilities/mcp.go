@@ -84,7 +84,7 @@ func (p *MCPProvider) initialize(ctx context.Context) error {
 		"params": map[string]any{
 			"protocolVersion": "2025-03-26",
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "codex-bridge", "version": "0.2.5"},
+			"clientInfo":      map[string]any{"name": "codex-bridge", "version": "0.2.6"},
 		},
 	})
 	if err != nil {

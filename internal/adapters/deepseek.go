@@ -56,6 +56,10 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 	return req
 }
 
+func (deepSeekAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
+	return defaultAdapter{}.PrepareResponseRequest(req)
+}
+
 const deepSeekOpenVikingToolBoundaryNote = "OPENVIKING_READ_TOOL_BOUNDARY: OpenViking memory read tools only read viking:// URIs. Do not pass file:// URLs or local filesystem paths to OpenViking read. Read local files, skills, and repository sources with the available local file or shell tools instead."
 
 func (deepSeekAdapter) CustomToolDescription(tool ToolDescriptor) string {

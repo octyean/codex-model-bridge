@@ -141,6 +141,85 @@ func TestResponsesEndpointForwardsNativeResponsesForAutoGPTModel(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointPureForwardsNativeGPTResponses(t *testing.T) {
+	provider := &fakeResponsesProvider{}
+	cfg := testConfig()
+	cfg.Providers["fake"] = config.ProviderConfig{Profile: adapters.DefaultName, Protocol: "responses"}
+	cfg.Models["deepseek-v4-flash"] = config.ModelConfig{
+		Provider:           "fake",
+		Profile:            adapters.DefaultName,
+		UpstreamModel:      "gpt-5.4",
+		ApplyPatchToolType: "freeform",
+	}
+	handler := New(cfg, map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"instructions":"Keep native tools untouched.",
+		"input":"edit a file",
+		"tools":[{"type":"custom","name":"apply_patch","input_format":{"type":"text"}}],
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if provider.responseReq["model"] != "gpt-5.4" {
+		t.Fatalf("upstream model = %#v", provider.responseReq["model"])
+	}
+	if provider.responseReq["instructions"] != "Keep native tools untouched." {
+		t.Fatalf("instructions were changed: %#v", provider.responseReq["instructions"])
+	}
+	tools, ok := provider.responseReq["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v", provider.responseReq["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok || tool["type"] != "custom" || tool["name"] != "apply_patch" {
+		t.Fatalf("tool was changed: %#v", tools[0])
+	}
+}
+
+func TestResponsesEndpointPreparesNativeKimiResponses(t *testing.T) {
+	provider := &fakeResponsesProvider{}
+	cfg := testConfig()
+	cfg.Providers["fake"] = config.ProviderConfig{Profile: adapters.KimiName, Protocol: "responses"}
+	cfg.Models["deepseek-v4-flash"] = config.ModelConfig{
+		Provider:           "fake",
+		Profile:            adapters.KimiName,
+		UpstreamModel:      "kimi-for-coding",
+		ApplyPatchToolType: "freeform",
+	}
+	handler := New(cfg, map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"instructions":"Follow the user request.",
+		"input":"edit a file",
+		"tools":[{"type":"function","name":"codex_text_editor"}],
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	instructions, _ := provider.responseReq["instructions"].(string)
+	if !strings.Contains(instructions, "KIMI_CODEX_TOOL_DISCIPLINE") {
+		t.Fatalf("instructions = %q", instructions)
+	}
+	if !strings.Contains(instructions, "Follow the user request.") {
+		t.Fatalf("original instructions missing: %q", instructions)
+	}
+}
+
 func (p *fakeProvider) Stream(_ context.Context, req providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
 	p.streamReq = req
 	out := make(chan providers.StreamEvent, len(p.streamEvents)+1)

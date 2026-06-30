@@ -49,13 +49,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.5"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.6"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.5",
+		"version": "0.2.6",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -113,7 +113,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "provider does not support responses protocol: "+modelCfg.Provider)
 			return
 		}
-		s.forwardResponses(w, r, requestID, req, modelCfg, responsesProvider)
+		s.forwardResponses(w, r, requestID, req, modelCfg, responsesProvider, adapter)
 		return
 	}
 
@@ -187,9 +187,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider) {
+func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter) {
 	upstreamReq := cloneResponseRequest(req.Raw)
 	upstreamReq["model"] = modelCfg.UpstreamModel
+	upstreamReq = adapter.PrepareResponseRequest(upstreamReq)
 	if req.Stream {
 		stream, err := provider.StreamResponse(r.Context(), upstreamReq)
 		if err != nil {

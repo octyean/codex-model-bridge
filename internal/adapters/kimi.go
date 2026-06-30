@@ -69,6 +69,13 @@ func (kimiAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) provi
 	return req
 }
 
+func (kimiAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
+	if responseHasTool(req, "codex_text_editor") && !responseInstructionsContain(req, "KIMI_CODEX_TOOL_DISCIPLINE") {
+		prependResponseInstructions(req, kimiToolDisciplineNote)
+	}
+	return req
+}
+
 func (kimiAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	return defaultAdapter{}.CustomToolDescription(tool)
 }
@@ -95,6 +102,41 @@ func hasTool(tools []providers.ChatTool, name string) bool {
 		}
 	}
 	return false
+}
+
+func responseHasTool(req map[string]any, name string) bool {
+	rawTools, ok := req["tools"].([]any)
+	if !ok {
+		return false
+	}
+	for _, rawTool := range rawTools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		if toolName, _ := tool["name"].(string); toolName == name {
+			return true
+		}
+		if function, ok := tool["function"].(map[string]any); ok {
+			if toolName, _ := function["name"].(string); toolName == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func responseInstructionsContain(req map[string]any, marker string) bool {
+	text, _ := req["instructions"].(string)
+	return strings.Contains(text, marker)
+}
+
+func prependResponseInstructions(req map[string]any, note string) {
+	if text, _ := req["instructions"].(string); strings.TrimSpace(text) != "" {
+		req["instructions"] = note + "\n\n" + text
+		return
+	}
+	req["instructions"] = note
 }
 
 func hasKimiToolDisciplineNote(messages []providers.ChatMessage) bool {

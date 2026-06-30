@@ -47,6 +47,13 @@ func (mimoAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) provi
 	return defaultAdapter{}.PrepareChatRequest(req)
 }
 
+func (mimoAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
+	if responseHasTool(req, "codex_text_editor") && !responseInstructionsContain(req, "MIMO_CODEX_TOOL_DISCIPLINE") {
+		prependResponseInstructions(req, mimoToolDisciplineNote)
+	}
+	return req
+}
+
 func (mimoAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	return defaultAdapter{}.CustomToolDescription(tool)
 }

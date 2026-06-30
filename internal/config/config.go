@@ -506,14 +506,13 @@ func (cfg *Config) Catalog() ModelsResponse {
 		provider := cfg.Providers[model.Provider]
 		adapter := adapters.Get(cfg.ProfileName(model, provider))
 		caps := adapter.Capabilities()
-		isOpenAIModel := isOpenAINativeModel(model.UpstreamModel)
 		inputModalities := model.InputModalities
 		if len(inputModalities) == 0 {
 			inputModalities = caps.InputModalities
 		}
 		inputModalities = adapters.NormalizeInputModalities(inputModalities)
 		contextWindow := model.ContextWindow
-		supportsResponsesOptions := cfg.UpstreamProtocol(model, provider) == "responses" && isOpenAIModel
+		supportsResponsesOptions := cfg.UpstreamProtocol(model, provider) == "responses"
 		supportsSearchTool := cfg.Capabilities.Search.Enabled && caps.SupportsSearchTool
 		models = append(models, ModelInfo{
 			Slug:                       slug,

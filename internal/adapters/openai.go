@@ -32,6 +32,10 @@ func (openAIAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) pro
 	return defaultAdapter{}.PrepareChatRequest(req)
 }
 
+func (openAIAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
+	return defaultAdapter{}.PrepareResponseRequest(req)
+}
+
 func (openAIAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	return defaultAdapter{}.CustomToolDescription(tool)
 }
