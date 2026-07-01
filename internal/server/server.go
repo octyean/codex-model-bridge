@@ -16,6 +16,7 @@ import (
 	extcap "codex-bridge/internal/extensions/capabilities"
 	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
+	"codex-bridge/internal/requestdump"
 	"codex-bridge/internal/tools"
 	"codex-bridge/internal/transcript"
 )
@@ -49,13 +50,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.13"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.14"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.13",
+		"version": "0.2.14",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -139,6 +140,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	chatReq = adapter.PrepareChatRequest(chatReq)
 	shape := optimization.CaptureShape(chatReq)
+	stats := providers.ChatRequestStats(chatReq)
+	preparedRequest := providers.PreparedChatRequest(chatReq)
 
 	s.logger.Info("request_started",
 		slog.String("request_id", requestID),
@@ -146,6 +149,29 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		slog.String("profile", profileName),
 		slog.Bool("stream", req.Stream),
 	)
+	s.logger.Info("upstream_request_prepared",
+		slog.String("request_id", requestID),
+		slog.String("model", req.Model),
+		slog.String("profile", profileName),
+		slog.Int("message_count", stats.MessageCount),
+		slog.Int("tool_count", stats.ToolCount),
+		slog.Int("body_bytes", stats.BodyBytes),
+		slog.Int("estimated_tokens", stats.EstimatedTokens),
+		slog.String("prefix_hash", shape.PrefixHash),
+	)
+	if dumpPath, err := requestdump.Write(requestID, req.Model, profileName, preparedRequest); err != nil {
+		s.logger.Warn("upstream_request_dump_failed",
+			slog.String("request_id", requestID),
+			slog.String("error", err.Error()),
+			slog.String("env", requestdump.EnvPath),
+		)
+	} else if dumpPath != "" {
+		s.logger.Info("upstream_request_dumped",
+			slog.String("request_id", requestID),
+			slog.String("path", dumpPath),
+			slog.String("body_hash", requestdump.Hash(preparedRequest)),
+		)
+	}
 
 	if req.Stream {
 		if s.hasInternalTools(req) {
@@ -232,29 +258,92 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 }
 
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape) {
-	stream, err := provider.Stream(r.Context(), chatReq)
-	if err != nil {
-		s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID
+	startedAt := time.Now()
+	createdAt := time.Now().Unix()
+
+	type streamResult struct {
+		stream <-chan providers.StreamEvent
+		err    error
+	}
+	streamReady := make(chan streamResult, 1)
+	go func() {
+		stream, err := provider.Stream(r.Context(), chatReq)
+		streamReady <- streamResult{stream: stream, err: err}
+	}()
+	var stream <-chan providers.StreamEvent
+	heartbeat := time.NewTicker(3 * time.Second)
+	defer heartbeat.Stop()
+	select {
+	case result := <-streamReady:
+		if result.err != nil {
+			s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", result.err.Error()))
+			_ = writer.Event(map[string]any{
+				"type": "response.failed",
+				"response": map[string]any{
+					"id":    respID,
+					"error": map[string]any{"message": result.err.Error(), "type": "server_error"},
+				},
+			})
+			return
+		}
+		stream = result.stream
+		s.logger.Info("upstream_stream_opened",
+			slog.String("request_id", requestID),
+			slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+		)
+	case <-r.Context().Done():
+		s.logger.Warn("request_canceled_before_upstream_stream", slog.String("request_id", requestID), slog.String("error", r.Context().Err().Error()))
+		return
+	case <-heartbeat.C:
+		_ = writer.Comment("waiting for upstream stream")
+		for {
+			select {
+			case result := <-streamReady:
+				if result.err != nil {
+					s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", result.err.Error()))
+					_ = writer.Event(map[string]any{
+						"type": "response.failed",
+						"response": map[string]any{
+							"id":    respID,
+							"error": map[string]any{"message": result.err.Error(), "type": "server_error"},
+						},
+					})
+					return
+				}
+				stream = result.stream
+				s.logger.Info("upstream_stream_opened",
+					slog.String("request_id", requestID),
+					slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+				)
+				goto streamOpened
+			case <-r.Context().Done():
+				s.logger.Warn("request_canceled_before_upstream_stream", slog.String("request_id", requestID), slog.String("error", r.Context().Err().Error()))
+				return
+			case <-heartbeat.C:
+				_ = writer.Comment("waiting for upstream stream")
+			}
+		}
+	}
+
+streamOpened:
 	_ = writer.Event(map[string]any{
 		"type": "response.created",
 		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": time.Now().Unix(), "model": req.Model, "status": "in_progress", "output": []any{},
+			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
 		},
 	})
 	_ = writer.Event(map[string]any{
 		"type": "response.in_progress",
 		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": time.Now().Unix(), "model": req.Model, "status": "in_progress", "output": []any{},
+			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
 		},
 	})
 
 	state := newStreamState(toolCtx, adapter, requestID, req.Model, profile, s.logger)
 	var usage providers.NormalizedUsage
+	firstChunk := true
 	for event := range stream {
 		if event.Err != nil {
 			_ = writer.Event(map[string]any{
@@ -269,6 +358,13 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 		if event.Done {
 			break
 		}
+		if firstChunk {
+			firstChunk = false
+			s.logger.Info("upstream_stream_first_chunk",
+				slog.String("request_id", requestID),
+				slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+			)
+		}
 		if event.Chunk.Usage != nil {
 			usage = providers.NormalizeUsage(event.Chunk.Usage)
 		}
@@ -277,8 +373,9 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 		}
 	}
 	items := state.Done()
-	for _, item := range items {
-		for _, event := range toolDoneEvents(item) {
+	for i, item := range items {
+		alreadyAdded := (item["id"] == "msg_0" && state.textAdded) || (item["id"] == "rs_0" && state.reasoningAdded)
+		for _, event := range outputDoneEvents(item, i, alreadyAdded) {
 			_ = writer.Event(event)
 		}
 	}

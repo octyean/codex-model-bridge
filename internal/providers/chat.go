@@ -38,6 +38,13 @@ type OpenAIChatClient struct {
 	client    *http.Client
 }
 
+type PreparedChatRequestStats struct {
+	BodyBytes       int
+	EstimatedTokens int
+	MessageCount    int
+	ToolCount       int
+}
+
 func NewOpenAIChatClient(baseURL string, apiKey string) *OpenAIChatClient {
 	baseURL = strings.TrimRight(baseURL, "/")
 	return &OpenAIChatClient{
@@ -312,6 +319,27 @@ func (c *OpenAIChatClient) Stream(ctx context.Context, req ChatCompletionRequest
 		}
 	}()
 	return out, nil
+}
+
+func ChatRequestStats(req ChatCompletionRequest) PreparedChatRequestStats {
+	body, _ := json.Marshal(prepareRequest(req))
+	return PreparedChatRequestStats{
+		BodyBytes:       len(body),
+		EstimatedTokens: estimateWireTokens(body),
+		MessageCount:    len(req.Messages),
+		ToolCount:       len(req.Tools),
+	}
+}
+
+func PreparedChatRequest(req ChatCompletionRequest) any {
+	return prepareRequest(req)
+}
+
+func estimateWireTokens(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	return len(data) / 4
 }
 
 func chatChunkFinished(chunk ChatCompletionChunk) bool {

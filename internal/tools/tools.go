@@ -314,8 +314,7 @@ func convertExecCommand(tool codex.ResponseTool, adapter adapters.Adapter) []con
 		params = objectParameters()
 	}
 	description := adapter.ToolPolicy().ToolDescription(name, tool.Description)
-	entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, "exec_command", description, tool.Raw)
-	entry.UpstreamName = name
+	entry := newEntry(name, KindFunction, InputModeJSON, SideEffectExecute, "function", description, tool.Raw)
 	return []convertedTool{chatFunction(entry, params)}
 }
 

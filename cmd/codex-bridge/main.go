@@ -20,6 +20,7 @@ import (
 	"codex-bridge/internal/config"
 	"codex-bridge/internal/logging"
 	"codex-bridge/internal/providers"
+	"codex-bridge/internal/requestdump"
 	"codex-bridge/internal/server"
 	bridgesetup "codex-bridge/internal/setup"
 	"codex-bridge/internal/toollog"
@@ -174,6 +175,7 @@ func main() {
 	}
 	logger.Info("catalog_written", slog.String("path", cfg.Codex.ModelCatalogPath), slog.Int("models", len(cfg.Models)))
 	logToolLogStatus(logger)
+	logRequestDumpStatus(logger)
 
 	handler := server.New(cfg, providerClients, logger)
 	httpServer := &http.Server{
@@ -208,6 +210,19 @@ func main() {
 		logger.Error("server_shutdown_failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+}
+
+func logRequestDumpStatus(logger *slog.Logger) {
+	path, err := requestdump.CheckConfiguredPath()
+	if path == "" {
+		logger.Info("upstream_request_dump_configured", slog.Bool("enabled", false), slog.String("env", requestdump.EnvPath))
+		return
+	}
+	if err != nil {
+		logger.Warn("upstream_request_dump_unavailable", slog.String("path", path), slog.String("error", err.Error()), slog.String("env", requestdump.EnvPath))
+		return
+	}
+	logger.Info("upstream_request_dump_configured", slog.Bool("enabled", true), slog.String("path", path), slog.String("env", requestdump.EnvPath))
 }
 
 func logToolLogStatus(logger *slog.Logger) {

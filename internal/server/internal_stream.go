@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -28,12 +29,18 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		},
 	})
 
-	final, finalShape, err := s.streamInternalToolRounds(r, writer, chatReq, provider, toolCtx, adapter, requestID, req.Model, profile, shape)
+	finalState, finalShape, err := s.streamInternalToolRounds(r, writer, chatReq, provider, toolCtx, adapter, requestID, req.Model, profile, shape)
 	if err != nil {
 		_ = writer.Event(map[string]any{"type": "response.failed", "response": map[string]any{"id": respID, "error": map[string]any{"message": err.Error(), "type": "server_error"}}})
 		return
 	}
-	items := responseItemsFromMessage(final, toolCtx, adapter, requestID, req.Model, profile, s.logger)
+	items := finalState.Done()
+	for i, item := range items {
+		alreadyAdded := (item["id"] == "msg_0" && finalState.textAdded) || (item["id"] == "rs_0" && finalState.reasoningAdded)
+		for _, event := range outputDoneEvents(item, i, alreadyAdded) {
+			_ = writer.Event(event)
+		}
+	}
 	_ = writer.Event(map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
@@ -41,41 +48,55 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		},
 	})
 	s.logUsage(requestID, req.Model, profile, adapter, finalShape, providers.NormalizedUsage{})
+	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", finalState.ToolCallCount()))
 }
 
-func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, shape optimization.Shape) (providers.ChatMessage, optimization.Shape, error) {
+func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, shape optimization.Shape) (*streamState, optimization.Shape, error) {
 	currentReq := chatReq
-	final, err := s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true)
+	finalState, err := s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true)
 	if err != nil {
-		return providers.ChatMessage{}, shape, err
+		return nil, shape, err
 	}
 	for {
-		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, final)
+		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState))
 		if !ok {
-			return final, shape, nil
+			return finalState, shape, nil
 		}
 		shape = optimization.CaptureShape(followUpReq)
 		currentReq = followUpReq
-		final, err = s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true)
+		finalState, err = s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true)
 		if err != nil {
-			return providers.ChatMessage{}, shape, err
+			return nil, shape, err
 		}
 	}
-	return final, shape, nil
+	return finalState, shape, nil
 }
 
-func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool) (providers.ChatMessage, error) {
+func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool) (*streamState, error) {
+	startedAt := time.Now()
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
-		return providers.ChatMessage{}, err
+		return nil, err
 	}
+	s.logger.Info("upstream_stream_opened",
+		slog.String("request_id", requestID),
+		slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+	)
 	state := newStreamState(toolCtx, adapter, requestID, model, profile, s.logger)
+	firstChunk := true
 	for event := range stream {
 		if event.Err != nil {
-			return providers.ChatMessage{}, event.Err
+			return nil, event.Err
 		}
 		if event.Done {
 			break
+		}
+		if firstChunk {
+			firstChunk = false
+			s.logger.Info("upstream_stream_first_chunk",
+				slog.String("request_id", requestID),
+				slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+			)
 		}
 		for _, out := range state.AddChunk(event.Chunk) {
 			if hideInternalTools && isInternalToolEvent(out) {
@@ -84,7 +105,7 @@ func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, 
 			_ = writer.Event(out)
 		}
 	}
-	return chatMessageFromStreamState(state), nil
+	return state, nil
 }
 
 func isInternalToolEvent(event map[string]any) bool {

@@ -455,13 +455,13 @@ func TestToolSearchAndLocalShellBecomeChatFunctions(t *testing.T) {
 	}
 }
 
-func TestExecCommandFunctionBecomesShellTool(t *testing.T) {
+func TestExecCommandFunctionStaysFunctionTool(t *testing.T) {
 	params := json.RawMessage(`{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}`)
 	chatTools, ctx := FromCodex([]codex.ResponseTool{{Type: "function", Name: "exec_command", Parameters: params}}, adapters.Get(adapters.DefaultName))
 	if len(chatTools) != 1 || chatTools[0].Function.Name != "exec_command" {
 		t.Fatalf("chat tools = %#v", chatTools)
 	}
-	if ctx.Entry("exec_command").Kind() != KindShell {
+	if ctx.Entry("exec_command").Kind() != KindFunction {
 		t.Fatalf("exec_command entry = %#v", ctx.Entry("exec_command"))
 	}
 	if !strings.Contains(string(chatTools[0].Function.Parameters), `"cmd"`) {

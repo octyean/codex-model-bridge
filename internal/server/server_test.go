@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/capabilities"
@@ -26,6 +29,9 @@ type fakeProvider struct {
 	streamReqs    []providers.ChatCompletionRequest
 	streamEvents  []providers.StreamEvent
 	streamBatches [][]providers.StreamEvent
+	streamDelay   time.Duration
+	streamStarted chan struct{}
+	startOnce     sync.Once
 	responses     []providers.ChatCompletionResponse
 }
 
@@ -247,6 +253,14 @@ func TestResponsesEndpointPreparesNativeKimiResponses(t *testing.T) {
 func (p *fakeProvider) Stream(_ context.Context, req providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
 	p.streamReq = req
 	p.streamReqs = append(p.streamReqs, req)
+	p.startOnce.Do(func() {
+		if p.streamStarted != nil {
+			close(p.streamStarted)
+		}
+	})
+	if p.streamDelay > 0 {
+		time.Sleep(p.streamDelay)
+	}
 	events := p.streamEvents
 	if len(p.streamBatches) > 0 {
 		events = p.streamBatches[0]
@@ -903,6 +917,69 @@ func TestResponsesEndpointStreamsInternalWebSearchDirectTextDeltas(t *testing.T)
 	}
 }
 
+func TestResponsesEndpointStreamsClientToolCallWhenInternalWebSearchIsAvailable(t *testing.T) {
+	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_shell","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"sed -n '1,40p' /home/yean/.codex/skills/git-tools/SKILL.md\"}"}}]}}]}`)},
+	}}
+	cfg := testConfig()
+	cfg.Capabilities.Search.Enabled = true
+	cfg.Capabilities.Search.Providers = []string{"static"}
+	handler := NewWithRuntime(cfg, map[string]providers.ChatProvider{"fake": provider}, capabilities.Runtime{
+		Search: capabilities.StaticSearchProvider{Result: capabilities.SearchResult{RawText: "unused"}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"[$git-tools](/home/yean/.codex/skills/git-tools/SKILL.md)",
+		"tools":[{"type":"web_search_preview"},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	events := sseEvents(t, rec.Body.String())
+	eventTypes := make([]string, 0, len(events))
+	for _, event := range events {
+		eventTypes = append(eventTypes, event["type"].(string))
+	}
+	wantTypes := []string{
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.function_call_arguments.done",
+		"response.output_item.done",
+		"response.completed",
+	}
+	if strings.Join(eventTypes, ",") != strings.Join(wantTypes, ",") {
+		t.Fatalf("event types = %v, events = %#v", eventTypes, events)
+	}
+	addedItem := events[2]["item"].(map[string]any)
+	if addedItem["id"] != "fc_call_shell" || addedItem["call_id"] != "call_shell" {
+		t.Fatalf("added item ids = %#v", addedItem)
+	}
+	argsDone := events[3]
+	if argsDone["item_id"] != "fc_call_shell" || argsDone["call_id"] != "call_shell" {
+		t.Fatalf("arguments done = %#v", argsDone)
+	}
+	doneItem := events[4]["item"].(map[string]any)
+	if doneItem["type"] != "function_call" || doneItem["name"] != "exec_command" || doneItem["status"] != "completed" {
+		t.Fatalf("done item = %#v", doneItem)
+	}
+	if doneItem["id"] != "fc_call_shell" || doneItem["call_id"] != "call_shell" {
+		t.Fatalf("done item ids = %#v", doneItem)
+	}
+	completed := events[5]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	if output[0].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("completed output = %#v", output)
+	}
+}
+
 func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
 		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"reasoning_content":"think "}}]}`)},
@@ -938,8 +1015,9 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 		"response.created",
 		"response.in_progress",
 		"response.output_item.added",
-		"response.custom_tool_call_input.delta",
 		"response.output_item.done",
+		"response.output_item.added",
+		"response.custom_tool_call_input.delta",
 		"response.custom_tool_call_input.done",
 		"response.output_item.done",
 		"response.completed",
@@ -947,21 +1025,31 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	if strings.Join(eventTypes, ",") != strings.Join(wantTypes, ",") {
 		t.Fatalf("event types = %v", eventTypes)
 	}
-	addedItem := events[2]["item"].(map[string]any)
+	reasoningDone := events[3]["item"].(map[string]any)
+	if reasoningDone["type"] != "reasoning" || reasoningDone["reasoning_content"] != "think more" || events[3]["output_index"] != float64(0) {
+		t.Fatalf("reasoning done = %#v", events[3])
+	}
+	addedItem := events[4]["item"].(map[string]any)
 	if addedItem["type"] != "custom_tool_call" || addedItem["name"] != "apply_patch" || addedItem["status"] != "in_progress" {
 		t.Fatalf("added item = %#v", addedItem)
 	}
-	if !strings.Contains(events[3]["delta"].(string), "*** Begin Patch") {
-		t.Fatalf("delta = %#v", events[3])
+	if events[4]["output_index"] != float64(1) {
+		t.Fatalf("tool added index = %#v", events[4])
 	}
-	doneItem := events[6]["item"].(map[string]any)
+	if !strings.Contains(events[5]["delta"].(string), "*** Begin Patch") {
+		t.Fatalf("delta = %#v", events[5])
+	}
+	doneItem := events[7]["item"].(map[string]any)
 	if doneItem["type"] != "custom_tool_call" || doneItem["name"] != "apply_patch" {
 		t.Fatalf("done item = %#v", doneItem)
+	}
+	if events[7]["output_index"] != float64(1) {
+		t.Fatalf("tool done index = %#v", events[7])
 	}
 	if doneItem["input"] != "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch" {
 		t.Fatalf("input = %q", doneItem["input"])
 	}
-	completed := events[7]["response"].(map[string]any)
+	completed := events[8]["response"].(map[string]any)
 	output := completed["output"].([]any)
 	reasoningItem := output[0].(map[string]any)
 	if reasoningItem["type"] != "reasoning" || reasoningItem["reasoning_content"] != "think more" {
@@ -978,6 +1066,78 @@ func TestResponsesEndpointStreamsApplyPatchAndUsage(t *testing.T) {
 	outputDetails := usage["output_tokens_details"].(map[string]any)
 	if outputDetails["reasoning_tokens"] != float64(5) {
 		t.Fatalf("output details = %#v", outputDetails)
+	}
+}
+
+func TestResponsesEndpointStreamsReasoningShellCallWithStableOutputIndexes(t *testing.T) {
+	provider := &fakeProvider{streamEvents: []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"reasoning_content":"need inspect "}}]}`)},
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"reasoning_content":"skill","tool_calls":[{"index":0,"id":"call_shell","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"sed -n '1,40p' /home/yean/.codex/skills/git-tools/SKILL.md\"}"}}]}}]}`)},
+	}}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"[$git-tools](/home/yean/.codex/skills/git-tools/SKILL.md)",
+		"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	events := sseEvents(t, rec.Body.String())
+	eventTypes := make([]string, 0, len(events))
+	for _, event := range events {
+		eventTypes = append(eventTypes, event["type"].(string))
+	}
+	wantTypes := []string{
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.output_item.done",
+		"response.output_item.added",
+		"response.function_call_arguments.done",
+		"response.output_item.done",
+		"response.completed",
+	}
+	if strings.Join(eventTypes, ",") != strings.Join(wantTypes, ",") {
+		t.Fatalf("event types = %v", eventTypes)
+	}
+	reasoning := events[3]["item"].(map[string]any)
+	if reasoning["type"] != "reasoning" || reasoning["reasoning_content"] != "need inspect skill" || events[3]["output_index"] != float64(0) {
+		t.Fatalf("reasoning event = %#v", events[3])
+	}
+	shellAdded := events[4]["item"].(map[string]any)
+	if shellAdded["type"] != "function_call" || shellAdded["name"] != "exec_command" || shellAdded["status"] != "in_progress" || events[4]["output_index"] != float64(1) {
+		t.Fatalf("shell added = %#v", events[4])
+	}
+	if shellAdded["id"] != "fc_call_shell" || shellAdded["call_id"] != "call_shell" {
+		t.Fatalf("shell added ids = %#v", shellAdded)
+	}
+	argsDone := events[5]
+	if argsDone["item_id"] != "fc_call_shell" || argsDone["call_id"] != "call_shell" {
+		t.Fatalf("arguments done = %#v", argsDone)
+	}
+	shellDone := events[6]["item"].(map[string]any)
+	if shellDone["type"] != "function_call" || shellDone["name"] != "exec_command" || shellDone["status"] != "completed" || events[6]["output_index"] != float64(1) {
+		t.Fatalf("shell done = %#v", events[6])
+	}
+	if shellDone["id"] != "fc_call_shell" || shellDone["call_id"] != "call_shell" {
+		t.Fatalf("shell done ids = %#v", shellDone)
+	}
+	arguments := shellDone["arguments"].(string)
+	if !strings.Contains(arguments, "git-tools") {
+		t.Fatalf("function arguments = %#v", arguments)
+	}
+	completed := events[7]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	if output[0].(map[string]any)["type"] != "reasoning" || output[1].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("completed output = %#v", output)
 	}
 }
 
@@ -1266,13 +1426,66 @@ func TestResponsesEndpointStreamsBlockedDeepSeekExecCommand(t *testing.T) {
 	completed := events[len(events)-1]["response"].(map[string]any)
 	output := completed["output"].([]any)
 	item := output[0].(map[string]any)
-	if item["type"] != "shell_call" {
+	if item["type"] != "function_call" || item["name"] != "exec_command" {
 		t.Fatalf("item = %#v", item)
 	}
-	action := item["action"].(map[string]any)
-	commands := action["commands"].([]any)
-	if !strings.Contains(commands[0].(string), "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(commands[0].(string), "cat > README.md") {
+	arguments := item["arguments"].(string)
+	if !strings.Contains(arguments, "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(arguments, "cat > README.md") {
 		t.Fatalf("item = %#v", item)
+	}
+}
+
+func TestResponsesEndpointFlushesLifecycleBeforeSlowUpstreamStream(t *testing.T) {
+	provider := &fakeProvider{
+		streamDelay:   150 * time.Millisecond,
+		streamStarted: make(chan struct{}),
+		streamEvents: []providers.StreamEvent{
+			{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"content":"done"}}]}`)},
+		},
+	}
+	handler := New(testConfig(), map[string]providers.ChatProvider{"fake": provider}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"slow stream",
+		"stream":true
+	}`)
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	<-provider.streamStarted
+	reader := bufio.NewReader(resp.Body)
+	first, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read first event: %v", err)
+	}
+	if !strings.Contains(first, `"type":"response.created"`) {
+		t.Fatalf("first event = %q", first)
+	}
+	second, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read separator: %v", err)
+	}
+	if strings.TrimSpace(second) != "" {
+		t.Fatalf("missing first event separator: %q", second)
+	}
+	third, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read second event: %v", err)
+	}
+	if !strings.Contains(third, `"type":"response.in_progress"`) {
+		t.Fatalf("second event = %q", third)
 	}
 }
 

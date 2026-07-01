@@ -184,17 +184,7 @@ func profileForModel(model string) string {
 }
 
 func contextWindowForModel(model string) int64 {
-	value := strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case strings.Contains(value, "kimi"):
-		return 256000
-	case strings.Contains(value, "mimo"):
-		return 1000000
-	case strings.Contains(value, "deepseek"):
-		return 64000
-	default:
-		return 64000
-	}
+	return config.DefaultContextWindowForModel(model)
 }
 
 func inputModalitiesForModel(model string) []string {

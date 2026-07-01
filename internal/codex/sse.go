@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 type SSEWriter struct {
@@ -23,6 +24,17 @@ func (s *SSEWriter) Event(event map[string]any) error {
 		return err
 	}
 	if _, err := fmt.Fprintf(s.w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	if flusher, ok := s.w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
+func (s *SSEWriter) Comment(text string) error {
+	text = strings.NewReplacer("\r", " ", "\n", " ").Replace(text)
+	if _, err := fmt.Fprintf(s.w, ": %s\n\n", text); err != nil {
 		return err
 	}
 	if flusher, ok := s.w.(http.Flusher); ok {

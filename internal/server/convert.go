@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -45,35 +46,40 @@ func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Conte
 }
 
 type streamState struct {
-	toolCtx   tools.Context
-	adapter   adapters.Adapter
-	requestID string
-	model     string
-	profile   string
-	logger    *slog.Logger
-	textAdded bool
-	text      string
-	reasoning string
-	toolCalls map[int]*streamToolCall
+	toolCtx         tools.Context
+	adapter         adapters.Adapter
+	requestID       string
+	model           string
+	profile         string
+	logger          *slog.Logger
+	textAdded       bool
+	textIndex       int
+	text            string
+	reasoning       string
+	reasoningAdded  bool
+	reasoningIndex  int
+	toolCalls       map[int]*streamToolCall
+	nextOutputIndex int
 }
 
 type streamToolCall struct {
-	id        string
-	name      string
-	arguments string
-	added     bool
-	projector *textEditorStreamProjector
+	id          string
+	name        string
+	arguments   string
+	outputIndex int
 }
 
 func newStreamState(toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) *streamState {
 	return &streamState{
-		toolCtx:   toolCtx,
-		adapter:   adapter,
-		requestID: requestID,
-		model:     model,
-		profile:   profile,
-		logger:    logger,
-		toolCalls: map[int]*streamToolCall{},
+		toolCtx:        toolCtx,
+		adapter:        adapter,
+		requestID:      requestID,
+		model:          model,
+		profile:        profile,
+		logger:         logger,
+		textIndex:      -1,
+		reasoningIndex: -1,
+		toolCalls:      map[int]*streamToolCall{},
 	}
 }
 
@@ -81,15 +87,27 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 	var events []map[string]any
 	for _, choice := range chunk.Choices {
 		if choice.Delta.ReasoningContent != "" {
+			if !s.reasoningAdded {
+				s.reasoningAdded = true
+				s.reasoningIndex = s.nextOutputIndex
+				s.nextOutputIndex++
+				events = append(events, map[string]any{
+					"type":         "response.output_item.added",
+					"item":         map[string]any{"id": "rs_0", "type": "reasoning", "status": "in_progress"},
+					"output_index": s.reasoningIndex,
+				})
+			}
 			s.reasoning += choice.Delta.ReasoningContent
 		}
 		if choice.Delta.Content != "" {
 			if !s.textAdded {
 				s.textAdded = true
+				s.textIndex = s.nextOutputIndex
+				s.nextOutputIndex++
 				events = append(events, map[string]any{
 					"type":         "response.output_item.added",
 					"item":         map[string]any{"id": "msg_0", "type": "message", "role": "assistant", "content": []any{}},
-					"output_index": 0,
+					"output_index": s.textIndex,
 				})
 			}
 			s.text += choice.Delta.Content
@@ -102,7 +120,7 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 		for _, delta := range choice.Delta.ToolCalls {
 			call := s.toolCalls[delta.Index]
 			if call == nil {
-				call = &streamToolCall{}
+				call = &streamToolCall{outputIndex: -1}
 				s.toolCalls[delta.Index] = call
 			}
 			if delta.ID != "" {
@@ -110,28 +128,13 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 			}
 			if delta.Function.Name != "" {
 				call.name = delta.Function.Name
-			}
-			if !call.added && call.name != "" {
-				entry := s.toolCtx.Entry(call.name)
-				call.added = true
-				if entry.Kind() == tools.KindTextEditor {
-					call.projector = newTextEditorStreamProjector(call.id, entry)
-				} else {
-					events = append(events, map[string]any{
-						"type":         "response.output_item.added",
-						"item":         inProgressItem(call.id, entry),
-						"output_index": 0,
-					})
+				if call.outputIndex < 0 {
+					call.outputIndex = s.nextOutputIndex
+					s.nextOutputIndex++
 				}
 			}
 			if delta.Function.Arguments != "" {
 				call.arguments += delta.Function.Arguments
-				entry := s.toolCtx.Entry(call.name)
-				if call.projector != nil {
-					events = append(events, call.projector.update(call.arguments, s.adapter)...)
-				} else if event := argumentDeltaEvent(call.id, entry, delta.Function.Arguments); event != nil {
-					events = append(events, event)
-				}
 			}
 		}
 	}
@@ -139,10 +142,13 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 }
 
 func (s *streamState) Done() []codex.ResponseItem {
+	var items []indexedResponseItem
 	if len(s.toolCalls) > 0 {
-		items := make([]codex.ResponseItem, 0, len(s.toolCalls))
 		if item := reasoningItem(s.reasoning); item != nil {
-			items = append(items, item)
+			if s.reasoningAdded {
+				item["id"] = "rs_0"
+			}
+			items = append(items, indexedResponseItem{index: s.itemIndex(s.reasoningIndex), item: item})
 		}
 		for i := 0; i < len(s.toolCalls); i++ {
 			call, ok := s.toolCalls[i]
@@ -151,27 +157,52 @@ func (s *streamState) Done() []codex.ResponseItem {
 			}
 			entry := s.toolCtx.Entry(call.name)
 			item := responseItemFromToolCall(call.id, entry, call.arguments, s.adapter, s.requestID, s.model, s.profile, s.logger)
-			item["id"] = call.id
-			if call.projector != nil {
-				item["_streamed_text_editor_projector"] = call.projector
-			}
-			items = append(items, item)
+			items = append(items, indexedResponseItem{index: s.itemIndex(call.outputIndex), item: item})
 			logToolTranslation(s.logger, s.requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(s.requestID, call.id, entry, call.arguments, item)
 		}
-		return items
+		return sortedResponseItems(items)
 	}
-	items := make([]codex.ResponseItem, 0, 2)
 	if item := reasoningItem(s.reasoning); item != nil {
-		items = append(items, item)
+		if s.reasoningAdded {
+			item["id"] = "rs_0"
+		}
+		items = append(items, indexedResponseItem{index: s.itemIndex(s.reasoningIndex), item: item})
 	}
-	items = append(items, codex.ResponseItem{
-		"id":      "msg_0",
-		"type":    "message",
-		"role":    "assistant",
-		"content": []map[string]string{{"type": "output_text", "text": s.text}},
+	if s.textAdded || s.text != "" {
+		items = append(items, indexedResponseItem{index: s.itemIndex(s.textIndex), item: codex.ResponseItem{
+			"id":      "msg_0",
+			"type":    "message",
+			"role":    "assistant",
+			"content": []map[string]string{{"type": "output_text", "text": s.text}},
+		}})
+	}
+	return sortedResponseItems(items)
+}
+
+type indexedResponseItem struct {
+	index int
+	item  codex.ResponseItem
+}
+
+func (s *streamState) itemIndex(index int) int {
+	if index >= 0 {
+		return index
+	}
+	out := s.nextOutputIndex
+	s.nextOutputIndex++
+	return out
+}
+
+func sortedResponseItems(items []indexedResponseItem) []codex.ResponseItem {
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].index < items[j].index
 	})
-	return items
+	out := make([]codex.ResponseItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.item)
+	}
+	return out
 }
 
 func (s *streamState) ToolCallCount() int {
@@ -202,6 +233,7 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 			}
 		}
 		return codex.ResponseItem{
+			"id":      toolItemID("custom_tool_call", callID),
 			"type":    "custom_tool_call",
 			"call_id": callID,
 			"name":    entry.OriginalName(),
@@ -210,6 +242,7 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 		}
 	case tools.KindToolSearch:
 		return codex.ResponseItem{
+			"id":        toolItemID("tool_search_call", callID),
 			"type":      "tool_search_call",
 			"execution": "client",
 			"call_id":   callID,
@@ -218,6 +251,7 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 		}
 	case tools.KindShell:
 		return codex.ResponseItem{
+			"id":      toolItemID("shell_call", callID),
 			"type":    "shell_call",
 			"call_id": callID,
 			"action":  shellAction(arguments),
@@ -225,6 +259,7 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 		}
 	default:
 		item := codex.ResponseItem{
+			"id":        toolItemID("function_call", callID),
 			"type":      "function_call",
 			"call_id":   callID,
 			"name":      entry.OriginalName(),
@@ -241,11 +276,30 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 func textEditorLocalResultExecCommandCall(callID string, input string) codex.ResponseItem {
 	arguments, _ := json.Marshal(map[string]string{"cmd": textEditorLocalResultCommand(input)})
 	return codex.ResponseItem{
-		"type":      "shell_call",
-		"call_id":   callID,
-		"action":    shellAction(string(arguments)),
-		"status":    "completed",
+		"id":      toolItemID("shell_call", callID),
+		"type":    "shell_call",
+		"call_id": callID,
+		"action":  shellAction(string(arguments)),
+		"status":  "completed",
 	}
+}
+
+func toolItemID(itemType string, callID string) string {
+	if callID == "" {
+		callID = "unknown"
+	}
+	prefix := "fc"
+	switch itemType {
+	case "custom_tool_call":
+		prefix = "ctc"
+	case "tool_search_call":
+		prefix = "tsc"
+	case "shell_call", "local_shell_call":
+		prefix = "sc"
+	case "function_call":
+		prefix = "fc"
+	}
+	return prefix + "_" + strings.TrimPrefix(callID, prefix+"_")
 }
 
 type textEditorStreamProjector struct {
@@ -388,7 +442,7 @@ func (p *textEditorStreamProjector) appendPatchInput(input string) []map[string]
 	p.input = input
 	return append(events, map[string]any{
 		"type":    "response.custom_tool_call_input.delta",
-		"item_id": p.callID,
+		"item_id": toolItemID("custom_tool_call", p.callID),
 		"call_id": p.callID,
 		"delta":   delta,
 	})
@@ -401,7 +455,6 @@ func (p *textEditorStreamProjector) startLocal(input string) []map[string]any {
 	}
 	p.added = true
 	item := textEditorLocalResultExecCommandCall(p.callID, input)
-	item["id"] = p.callID
 	item["status"] = "in_progress"
 	delete(item, "arguments")
 	return []map[string]any{{
@@ -696,18 +749,9 @@ func logPatchWriteToolCall(requestID string, callID string, entry tools.Entry, a
 	}
 }
 
-func inProgressItem(callID string, entry tools.Entry) map[string]any {
-	item := responseItemFromToolCall(callID, entry, "{}", adapters.Get(adapters.DefaultName), "", "", "", nil)
-	item["id"] = callID
-	item["status"] = "in_progress"
-	delete(item, "input")
-	delete(item, "arguments")
-	return item
-}
-
 func inProgressTextEditorPatchItem(callID string, entry tools.Entry) map[string]any {
 	return map[string]any{
-		"id":      callID,
+		"id":      toolItemID("custom_tool_call", callID),
 		"type":    "custom_tool_call",
 		"call_id": callID,
 		"name":    entry.OriginalName(),
@@ -715,21 +759,7 @@ func inProgressTextEditorPatchItem(callID string, entry tools.Entry) map[string]
 	}
 }
 
-func argumentDeltaEvent(callID string, entry tools.Entry, delta string) map[string]any {
-	switch entry.Kind() {
-	case tools.KindFunction:
-		return map[string]any{
-			"type":    "response.function_call_arguments.delta",
-			"item_id": callID,
-			"call_id": callID,
-			"delta":   delta,
-		}
-	default:
-		return nil
-	}
-}
-
-func toolDoneEvents(item codex.ResponseItem) []map[string]any {
+func outputDoneEvents(item codex.ResponseItem, outputIndex int, alreadyAdded bool) []map[string]any {
 	if projector, _ := item["_streamed_text_editor_projector"].(*textEditorStreamProjector); projector != nil {
 		delete(item, "_streamed_text_editor_projector")
 		events := projector.doneEvents(item)
@@ -744,11 +774,18 @@ func toolDoneEvents(item codex.ResponseItem) []map[string]any {
 		events = append(events, map[string]any{
 			"type":         "response.output_item.done",
 			"item":         item,
-			"output_index": 0,
+			"output_index": outputIndex,
 		})
 		return events
 	}
 	events := []map[string]any{}
+	if !alreadyAdded {
+		events = append(events, map[string]any{
+			"type":         "response.output_item.added",
+			"item":         inProgressOutputItem(item),
+			"output_index": outputIndex,
+		})
+	}
 	itemType, _ := item["type"].(string)
 	switch itemType {
 	case "custom_tool_call":
@@ -775,9 +812,20 @@ func toolDoneEvents(item codex.ResponseItem) []map[string]any {
 	events = append(events, map[string]any{
 		"type":         "response.output_item.done",
 		"item":         item,
-		"output_index": 0,
+		"output_index": outputIndex,
 	})
 	return events
+}
+
+func inProgressOutputItem(item codex.ResponseItem) codex.ResponseItem {
+	out := make(codex.ResponseItem, len(item)+1)
+	for key, value := range item {
+		out[key] = value
+	}
+	out["status"] = "in_progress"
+	delete(out, "input")
+	delete(out, "arguments")
+	return out
 }
 
 func shellAction(arguments string) map[string]any {

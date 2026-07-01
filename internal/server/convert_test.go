@@ -358,12 +358,11 @@ func TestResponseItemsBlocksDeepSeekExecCommandFileWrites(t *testing.T) {
 			},
 		}},
 	}, toolCtx, adapter, "req_test", "", "", logger)
-	if items[0]["type"] != "shell_call" {
+	if items[0]["type"] != "function_call" || items[0]["name"] != "exec_command" {
 		t.Fatalf("item = %#v", items[0])
 	}
-	action := items[0]["action"].(map[string]any)
-	commands := action["commands"].([]any)
-	if !strings.Contains(commands[0].(string), "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(commands[0].(string), "cat > README.md") {
+	arguments := items[0]["arguments"].(string)
+	if !strings.Contains(arguments, "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(arguments, "cat > README.md") {
 		t.Fatalf("item = %#v", items[0])
 	}
 }
@@ -381,7 +380,7 @@ func TestResponseItemsAllowsDeepSeekExecCommandReadCommands(t *testing.T) {
 			},
 		}},
 	}, toolCtx, adapter, "req_test", "", "", logger)
-	if items[0]["type"] != "shell_call" {
+	if items[0]["type"] != "function_call" || items[0]["name"] != "exec_command" {
 		t.Fatalf("item = %#v", items[0])
 	}
 }

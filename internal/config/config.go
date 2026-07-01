@@ -390,7 +390,7 @@ func (cfg *Config) AddDiscoveredModels(providerName string, ids []string) int {
 			Provider:                  providerName,
 			Profile:                   cfg.Providers[providerName].Profile,
 			UpstreamModel:             id,
-			ContextWindow:             64000,
+			ContextWindow:             DefaultContextWindowForModel(id),
 			SupportsParallelToolCalls: true,
 			ApplyPatchToolType:        "freeform",
 		}
@@ -398,6 +398,20 @@ func (cfg *Config) AddDiscoveredModels(providerName string, ids []string) int {
 	}
 	cfg.ensureDefaultModel()
 	return added
+}
+
+func DefaultContextWindowForModel(model string) int64 {
+	value := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.Contains(value, "kimi"):
+		return 192000
+	case strings.Contains(value, "mimo"):
+		return 1000000
+	case strings.Contains(value, "deepseek"):
+		return 64000
+	default:
+		return 64000
+	}
 }
 
 var desktopModelSlots = []string{"gpt-5.3-codex", "gpt-5.2", "gpt-5.4-mini"}

@@ -38,7 +38,7 @@ func TestRunCreatesResponsesConfig(t *testing.T) {
 		t.Fatalf("provider = %#v", provider)
 	}
 	model := cfg.Models["gpt-5.3-codex"]
-	if model.Profile != "kimi" || model.ContextWindow != 256000 {
+	if model.Profile != "kimi" || model.ContextWindow != 192000 {
 		t.Fatalf("model = %#v", model)
 	}
 }
