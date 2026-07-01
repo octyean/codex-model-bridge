@@ -1,8 +1,12 @@
 package providers
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestChatCompletionsURL(t *testing.T) {
@@ -41,6 +45,52 @@ func TestResponsesURL(t *testing.T) {
 				t.Fatalf("url = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStreamStopsOnFinishReasonWithoutDoneSentinel(t *testing.T) {
+	flushed := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"date\"}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		flushed <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := NewOpenAIChatClient(server.URL, "test-key")
+	stream, err := client.Stream(context.Background(), ChatCompletionRequest{Model: "kimi-for-coding"})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	select {
+	case <-flushed:
+	case <-time.After(time.Second):
+		t.Fatal("server did not flush event")
+	}
+	gotChunk := false
+	for {
+		select {
+		case event, ok := <-stream:
+			if !ok {
+				t.Fatal("stream closed before done")
+			}
+			if event.Err != nil {
+				t.Fatalf("stream event error: %v", event.Err)
+			}
+			if event.Done {
+				if !gotChunk {
+					t.Fatal("done before chunk")
+				}
+				return
+			}
+			gotChunk = true
+		case <-time.After(time.Second):
+			t.Fatal("stream did not stop after finish_reason")
+		}
 	}
 }
 
