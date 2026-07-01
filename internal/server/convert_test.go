@@ -94,16 +94,15 @@ func TestResponseItemsTurnsAlreadyAppliedTextEditorIntoExecCommand(t *testing.T)
 	if len(items) != 1 {
 		t.Fatalf("items len = %d", len(items))
 	}
-	if items[0]["type"] != "shell_call" {
+	if items[0]["type"] != "function_call" || items[0]["name"] != "exec_command" {
 		t.Fatalf("item = %#v", items[0])
 	}
-	action := items[0]["action"].(map[string]any)
-	commands := action["commands"].([]any)
-	if !strings.Contains(commands[0].(string), "TEXT_EDITOR_ALREADY_APPLIED") || !strings.Contains(commands[0].(string), "sed -n") {
-		t.Fatalf("action = %#v", action)
+	toolArgs := items[0]["arguments"].(string)
+	if !strings.Contains(toolArgs, "TEXT_EDITOR_ALREADY_APPLIED") || !strings.Contains(toolArgs, "sed -n") {
+		t.Fatalf("arguments = %#v", toolArgs)
 	}
-	if strings.Contains(commands[0].(string), "exit 1") || !strings.Contains(commands[0].(string), "exit 0") {
-		t.Fatalf("local result should be a non-failing status command: %#v", action)
+	if strings.Contains(toolArgs, "exit 1") || !strings.Contains(toolArgs, "exit 0") {
+		t.Fatalf("local result should be a non-failing status command: %#v", toolArgs)
 	}
 }
 
@@ -285,7 +284,7 @@ func TestTextEditorStreamProjectorDoesNotPretendLocalResultIsApplyPatch(t *testi
 		t.Fatalf("events = %#v", events)
 	}
 	item := events[0]["item"].(codex.ResponseItem)
-	if item["type"] != "shell_call" {
+	if item["type"] != "function_call" || item["name"] != "exec_command" {
 		t.Fatalf("item = %#v", item)
 	}
 }

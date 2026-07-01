@@ -276,11 +276,12 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 func textEditorLocalResultExecCommandCall(callID string, input string) codex.ResponseItem {
 	arguments, _ := json.Marshal(map[string]string{"cmd": textEditorLocalResultCommand(input)})
 	return codex.ResponseItem{
-		"id":      toolItemID("shell_call", callID),
-		"type":    "shell_call",
-		"call_id": callID,
-		"action":  shellAction(string(arguments)),
-		"status":  "completed",
+		"id":        toolItemID("function_call", callID),
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      "exec_command",
+		"arguments": string(arguments),
+		"status":    "completed",
 	}
 }
 

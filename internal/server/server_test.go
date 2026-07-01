@@ -1344,12 +1344,11 @@ func TestResponsesEndpointTurnsAlreadyAppliedTextEditorIntoExecCommand(t *testin
 	}
 	output := resp["output"].([]any)
 	item := output[0].(map[string]any)
-	if item["type"] != "shell_call" {
+	if item["type"] != "function_call" || item["name"] != "exec_command" {
 		t.Fatalf("output item = %#v", item)
 	}
-	action := item["action"].(map[string]any)
-	commands := action["commands"].([]any)
-	if !strings.Contains(commands[0].(string), "TEXT_EDITOR_ALREADY_APPLIED") {
+	toolArgs := item["arguments"].(string)
+	if !strings.Contains(toolArgs, "TEXT_EDITOR_ALREADY_APPLIED") {
 		t.Fatalf("output item = %#v", item)
 	}
 }
@@ -1390,12 +1389,11 @@ func TestResponsesEndpointStreamsAlreadyAppliedTextEditorAsExecCommand(t *testin
 	completed := events[len(events)-1]["response"].(map[string]any)
 	output := completed["output"].([]any)
 	item := output[0].(map[string]any)
-	if item["type"] != "shell_call" {
+	if item["type"] != "function_call" || item["name"] != "exec_command" {
 		t.Fatalf("output item = %#v", item)
 	}
-	action := item["action"].(map[string]any)
-	commands := action["commands"].([]any)
-	if !strings.Contains(commands[0].(string), "TEXT_EDITOR_ALREADY_APPLIED") {
+	toolArgs := item["arguments"].(string)
+	if !strings.Contains(toolArgs, "TEXT_EDITOR_ALREADY_APPLIED") {
 		t.Fatalf("output item = %#v", item)
 	}
 }
