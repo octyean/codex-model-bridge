@@ -241,10 +241,9 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 func textEditorLocalResultExecCommandCall(callID string, input string) codex.ResponseItem {
 	arguments, _ := json.Marshal(map[string]string{"cmd": textEditorLocalResultCommand(input)})
 	return codex.ResponseItem{
-		"type":      "function_call",
+		"type":      "shell_call",
 		"call_id":   callID,
-		"name":      "exec_command",
-		"arguments": string(arguments),
+		"action":    shellAction(string(arguments)),
 		"status":    "completed",
 	}
 }
@@ -788,6 +787,9 @@ func shellAction(arguments string) map[string]any {
 	} else if command, ok := obj["command"]; ok {
 		obj["commands"] = []any{command}
 		delete(obj, "command")
+	} else if command, ok := obj["cmd"]; ok {
+		obj["commands"] = []any{command}
+		delete(obj, "cmd")
 	}
 	return obj
 }

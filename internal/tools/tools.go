@@ -281,6 +281,9 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 	case "namespace":
 		return convertNamespace(tool, adapter)
 	case "function":
+		if rawString(tool.Raw, "name", tool.Name) == "exec_command" {
+			return convertExecCommand(tool, adapter)
+		}
 		return convertFunction(tool, adapter, "", KindFunction)
 	case "custom":
 		return convertCustom(tool, adapter)
@@ -291,9 +294,7 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 		entry := newEntry("tool_search", KindToolSearch, InputModeJSON, SideEffectRead, "tool_search", descriptionOrDefault(tool.Description, "Search for deferred tools to load before continuing."), tool.Raw)
 		return []convertedTool{chatFunction(entry, toolSearchParameters)}
 	case "local_shell", "shell":
-		description := adapter.ToolPolicy().ToolDescription("shell", descriptionOrDefault(tool.Description, "Run a local shell command through Codex."))
-		entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, toolType, description, tool.Raw)
-		return []convertedTool{chatFunction(entry, shellParameters)}
+		return convertShell(tool, adapter, toolType)
 	default:
 		name := rawString(tool.Raw, "name", tool.Name)
 		if name == "" {
@@ -304,6 +305,27 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 		}
 		return convertFunction(tool, adapter, "", KindFunction)
 	}
+}
+
+func convertExecCommand(tool codex.ResponseTool, adapter adapters.Adapter) []convertedTool {
+	name := rawString(tool.Raw, "name", tool.Name)
+	params := tool.Parameters
+	if len(params) == 0 {
+		params = objectParameters()
+	}
+	description := adapter.ToolPolicy().ToolDescription(name, tool.Description)
+	entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, "exec_command", description, tool.Raw)
+	entry.UpstreamName = name
+	return []convertedTool{chatFunction(entry, params)}
+}
+
+func convertShell(tool codex.ResponseTool, adapter adapters.Adapter, originalType string) []convertedTool {
+	description := adapter.ToolPolicy().ToolDescription("shell", descriptionOrDefault(tool.Description, "Run a local shell command through Codex."))
+	entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, originalType, description, tool.Raw)
+	if originalType == "exec_command" {
+		entry.UpstreamName = "exec_command"
+	}
+	return []convertedTool{chatFunction(entry, shellParameters)}
 }
 
 func convertNamespace(tool codex.ResponseTool, adapter adapters.Adapter) []convertedTool {

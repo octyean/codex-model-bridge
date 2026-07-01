@@ -1063,10 +1063,12 @@ func TestResponsesEndpointTurnsAlreadyAppliedTextEditorIntoExecCommand(t *testin
 	}
 	output := resp["output"].([]any)
 	item := output[0].(map[string]any)
-	if item["type"] != "function_call" || item["name"] != "exec_command" {
+	if item["type"] != "shell_call" {
 		t.Fatalf("output item = %#v", item)
 	}
-	if !strings.Contains(item["arguments"].(string), "TEXT_EDITOR_ALREADY_APPLIED") {
+	action := item["action"].(map[string]any)
+	commands := action["commands"].([]any)
+	if !strings.Contains(commands[0].(string), "TEXT_EDITOR_ALREADY_APPLIED") {
 		t.Fatalf("output item = %#v", item)
 	}
 }
@@ -1107,10 +1109,12 @@ func TestResponsesEndpointStreamsAlreadyAppliedTextEditorAsExecCommand(t *testin
 	completed := events[len(events)-1]["response"].(map[string]any)
 	output := completed["output"].([]any)
 	item := output[0].(map[string]any)
-	if item["type"] != "function_call" || item["name"] != "exec_command" {
+	if item["type"] != "shell_call" {
 		t.Fatalf("output item = %#v", item)
 	}
-	if !strings.Contains(item["arguments"].(string), "TEXT_EDITOR_ALREADY_APPLIED") {
+	action := item["action"].(map[string]any)
+	commands := action["commands"].([]any)
+	if !strings.Contains(commands[0].(string), "TEXT_EDITOR_ALREADY_APPLIED") {
 		t.Fatalf("output item = %#v", item)
 	}
 }
@@ -1141,11 +1145,12 @@ func TestResponsesEndpointStreamsBlockedDeepSeekExecCommand(t *testing.T) {
 	completed := events[len(events)-1]["response"].(map[string]any)
 	output := completed["output"].([]any)
 	item := output[0].(map[string]any)
-	if item["type"] != "function_call" {
+	if item["type"] != "shell_call" {
 		t.Fatalf("item = %#v", item)
 	}
-	arguments, _ := item["arguments"].(string)
-	if !strings.Contains(arguments, "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(arguments, "cat > README.md") {
+	action := item["action"].(map[string]any)
+	commands := action["commands"].([]any)
+	if !strings.Contains(commands[0].(string), "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(commands[0].(string), "cat > README.md") {
 		t.Fatalf("item = %#v", item)
 	}
 }

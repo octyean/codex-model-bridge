@@ -94,15 +94,16 @@ func TestResponseItemsTurnsAlreadyAppliedTextEditorIntoExecCommand(t *testing.T)
 	if len(items) != 1 {
 		t.Fatalf("items len = %d", len(items))
 	}
-	if items[0]["type"] != "function_call" || items[0]["name"] != "exec_command" {
+	if items[0]["type"] != "shell_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
-	callArguments := items[0]["arguments"].(string)
-	if !strings.Contains(callArguments, "TEXT_EDITOR_ALREADY_APPLIED") || !strings.Contains(callArguments, "sed -n") {
-		t.Fatalf("arguments = %#v", callArguments)
+	action := items[0]["action"].(map[string]any)
+	commands := action["commands"].([]any)
+	if !strings.Contains(commands[0].(string), "TEXT_EDITOR_ALREADY_APPLIED") || !strings.Contains(commands[0].(string), "sed -n") {
+		t.Fatalf("action = %#v", action)
 	}
-	if strings.Contains(callArguments, "exit 1") || !strings.Contains(callArguments, "exit 0") {
-		t.Fatalf("local result should be a non-failing status command: %#v", callArguments)
+	if strings.Contains(commands[0].(string), "exit 1") || !strings.Contains(commands[0].(string), "exit 0") {
+		t.Fatalf("local result should be a non-failing status command: %#v", action)
 	}
 }
 
@@ -284,7 +285,7 @@ func TestTextEditorStreamProjectorDoesNotPretendLocalResultIsApplyPatch(t *testi
 		t.Fatalf("events = %#v", events)
 	}
 	item := events[0]["item"].(codex.ResponseItem)
-	if item["type"] != "function_call" || item["name"] != "exec_command" {
+	if item["type"] != "shell_call" {
 		t.Fatalf("item = %#v", item)
 	}
 }
@@ -357,11 +358,12 @@ func TestResponseItemsBlocksDeepSeekExecCommandFileWrites(t *testing.T) {
 			},
 		}},
 	}, toolCtx, adapter, "req_test", "", "", logger)
-	if items[0]["type"] != "function_call" {
+	if items[0]["type"] != "shell_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
-	arguments, _ := items[0]["arguments"].(string)
-	if !strings.Contains(arguments, "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(arguments, "cat > README.md") {
+	action := items[0]["action"].(map[string]any)
+	commands := action["commands"].([]any)
+	if !strings.Contains(commands[0].(string), "SHELL_FILE_WRITE_BLOCKED") || strings.Contains(commands[0].(string), "cat > README.md") {
 		t.Fatalf("item = %#v", items[0])
 	}
 }
@@ -379,7 +381,7 @@ func TestResponseItemsAllowsDeepSeekExecCommandReadCommands(t *testing.T) {
 			},
 		}},
 	}, toolCtx, adapter, "req_test", "", "", logger)
-	if items[0]["type"] != "function_call" {
+	if items[0]["type"] != "shell_call" {
 		t.Fatalf("item = %#v", items[0])
 	}
 }
