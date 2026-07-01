@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -698,6 +699,75 @@ func TestResponsesEndpointResolvesInternalWebSearch(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointResolvesMultipleInternalWebSearchRounds(t *testing.T) {
+	const internalSearchRounds = 5
+	responses := make([]providers.ChatCompletionResponse, 0, internalSearchRounds+1)
+	for i := 1; i <= internalSearchRounds; i++ {
+		responses = append(responses, providers.ChatCompletionResponse{
+			ID: fmt.Sprintf("search_%d", i),
+			Choices: []struct {
+				Index        int                   `json:"index"`
+				Message      providers.ChatMessage `json:"message"`
+				FinishReason string                `json:"finish_reason"`
+			}{{
+				Message: providers.ChatMessage{ToolCalls: []providers.ChatToolCall{{
+					ID:   fmt.Sprintf("call_search_%d", i),
+					Type: "function",
+					Function: providers.ChatCallFunction{
+						Name:      "web_search",
+						Arguments: fmt.Sprintf(`{"query":"round-%d"}`, i),
+					},
+				}}},
+			}},
+		})
+	}
+	responses = append(responses, providers.ChatCompletionResponse{
+		ID: "final",
+		Choices: []struct {
+			Index        int                   `json:"index"`
+			Message      providers.ChatMessage `json:"message"`
+			FinishReason string                `json:"finish_reason"`
+		}{{
+			Message: providers.ChatMessage{Role: "assistant", Content: "multi search result"},
+		}},
+	})
+	provider := &fakeProvider{responses: responses}
+	cfg := testConfig()
+	cfg.Capabilities.Search.Enabled = true
+	cfg.Capabilities.Search.Providers = []string{"static"}
+	handler := NewWithRuntime(cfg, map[string]providers.ChatProvider{"fake": provider}, capabilities.Runtime{
+		Search: capabilities.StaticSearchProvider{Result: capabilities.SearchResult{RawText: "static search result"}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"search web twice",
+		"tools":[{"type":"web_search_preview"}],
+		"stream":false
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(provider.reqs) != internalSearchRounds+1 {
+		t.Fatalf("request count = %d", len(provider.reqs))
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	output := resp["output"].([]any)
+	message := output[0].(map[string]any)
+	content := message["content"].([]any)[0].(map[string]any)
+	if content["text"] != "multi search result" {
+		t.Fatalf("response = %#v", resp)
+	}
+}
+
 func TestResponsesEndpointStreamsInternalWebSearchAsFinalMessage(t *testing.T) {
 	provider := &fakeProvider{streamBatches: [][]providers.StreamEvent{
 		{
@@ -741,6 +811,57 @@ func TestResponsesEndpointStreamsInternalWebSearchAsFinalMessage(t *testing.T) {
 	item := output[0].(map[string]any)
 	content := item["content"].([]any)[0].(map[string]any)
 	if content["text"] != "stream search result used" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestResponsesEndpointStreamsMultipleInternalWebSearchRounds(t *testing.T) {
+	const internalSearchRounds = 5
+	streamBatches := make([][]providers.StreamEvent, 0, internalSearchRounds+1)
+	for i := 1; i <= internalSearchRounds; i++ {
+		streamBatches = append(streamBatches, []providers.StreamEvent{
+			{Chunk: chatChunk(t, fmt.Sprintf(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_search_%d","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"round-%d\"}"}}]}}]}`, i, i))},
+		})
+	}
+	streamBatches = append(streamBatches, []providers.StreamEvent{
+		{Chunk: chatChunk(t, `{"choices":[{"index":0,"delta":{"content":"multi search result"}}]}`)},
+	})
+	provider := &fakeProvider{streamBatches: streamBatches}
+	cfg := testConfig()
+	cfg.Capabilities.Search.Enabled = true
+	cfg.Capabilities.Search.Providers = []string{"static"}
+	handler := NewWithRuntime(cfg, map[string]providers.ChatProvider{"fake": provider}, capabilities.Runtime{
+		Search: capabilities.StaticSearchProvider{Result: capabilities.SearchResult{RawText: "static search result"}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":"search web twice",
+		"tools":[{"type":"web_search_preview"}],
+		"stream":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-token")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(provider.streamReqs) != internalSearchRounds+1 {
+		t.Fatalf("stream request count = %d", len(provider.streamReqs))
+	}
+	events := sseEvents(t, rec.Body.String())
+	for _, event := range events {
+		if item, _ := event["item"].(map[string]any); item["name"] == "web_search" {
+			t.Fatalf("internal search leaked to client: %#v", events)
+		}
+	}
+	completed := events[len(events)-1]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	item := output[0].(map[string]any)
+	content := item["content"].([]any)[0].(map[string]any)
+	if content["text"] != "multi search result" {
 		t.Fatalf("events = %#v", events)
 	}
 }

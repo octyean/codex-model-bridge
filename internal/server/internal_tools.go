@@ -48,16 +48,32 @@ func requestHasWebSearch(tools []codex.ResponseTool) bool {
 }
 
 func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
-	followUp, ok := s.internalToolFollowUpRequest(ctx, req, message)
-	if !ok {
+	current := message
+	currentReq := req
+	var resp *providers.ChatCompletionResponse
+	handled := false
+	for {
+		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current)
+		if !ok {
+			break
+		}
+		next, err := provider.Create(ctx, followUp)
+		if err != nil {
+			s.logger.Error("internal_tool_followup_failed", "error", err.Error())
+			return nil, providers.ChatCompletionRequest{}, false
+		}
+		if len(next.Choices) == 0 {
+			return next, followUp, true
+		}
+		resp = next
+		currentReq = followUp
+		current = next.Choices[0].Message
+		handled = true
+	}
+	if !handled {
 		return nil, providers.ChatCompletionRequest{}, false
 	}
-	resp, err := provider.Create(ctx, followUp)
-	if err != nil {
-		s.logger.Error("internal_tool_followup_failed", "error", err.Error())
-		return nil, providers.ChatCompletionRequest{}, false
-	}
-	return resp, followUp, true
+	return resp, currentReq, true
 }
 
 func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage) (providers.ChatCompletionRequest, bool) {

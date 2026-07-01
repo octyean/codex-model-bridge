@@ -33,7 +33,7 @@ func (p *WikipediaProvider) Search(ctx context.Context, query string, maxResults
 			} `json:"search"`
 		} `json:"query"`
 	}
-	if err := p.client.get(ctx, targetURL, map[string]string{"User-Agent": "codex-bridge/0.2.11"}, &resp); err != nil {
+	if err := p.client.get(ctx, targetURL, map[string]string{"User-Agent": "codex-bridge/0.2.12"}, &resp); err != nil {
 		return base.SearchResult{}, err
 	}
 	items := make([]base.SearchItem, 0, count)
@@ -55,7 +55,7 @@ func (p *WikipediaProvider) Read(ctx context.Context, targetURL string) (string,
 		Title   string `json:"title"`
 		Extract string `json:"extract"`
 	}
-	if err := p.client.get(ctx, targetURL, map[string]string{"User-Agent": "codex-bridge/0.2.11"}, &resp); err != nil {
+	if err := p.client.get(ctx, targetURL, map[string]string{"User-Agent": "codex-bridge/0.2.12"}, &resp); err != nil {
 		return "", err
 	}
 	return trimText(resp.Title+"\n"+resp.Extract, 12000), nil
