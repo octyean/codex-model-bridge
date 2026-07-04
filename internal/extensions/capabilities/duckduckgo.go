@@ -2,8 +2,10 @@ package capabilities
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	base "codex-bridge/internal/capabilities"
 )
@@ -49,4 +51,8 @@ func (p *DuckDuckGoInstantAnswerProvider) Search(ctx context.Context, query stri
 
 func (p *DuckDuckGoInstantAnswerProvider) Read(_ context.Context, _ string) (string, error) {
 	return "", nil
+}
+
+func httpStatusError(provider string, statusCode int, data []byte) error {
+	return fmt.Errorf("%s status %d: %s", provider, statusCode, strings.TrimSpace(string(data)))
 }

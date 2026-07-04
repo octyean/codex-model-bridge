@@ -23,6 +23,8 @@ func NewSearchProvider(provider config.SearchProvider, client *http.Client) base
 		return NewSerperProvider(provider.APIKey, client)
 	case "duckduckgo_instant_answer":
 		return NewDuckDuckGoInstantAnswerProvider(client)
+	case "duckduckgo_html":
+		return NewDuckDuckGoHTMLProvider(client)
 	case "firecrawl":
 		return NewFirecrawlProvider(provider.APIKey, provider.BaseURL, client)
 	case "wikipedia":

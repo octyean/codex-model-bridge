@@ -189,15 +189,18 @@ input_modalities = ["text", "image"]
 ```toml
 [capabilities.search]
 enabled = true
-providers = ["jina"]
+providers = ["duckduckgo_html", "jina"]
 max_results = 5
 read_top_k = 3
+
+[search_providers.duckduckgo_html]
+type = "duckduckgo_html"
 
 [search_providers.jina]
 type = "jina"
 search_base_url = "https://s.jina.ai"
 reader_base_url = "https://r.jina.ai"
-api_key = "jina_xxx"
+api_key = ""
 ```
 
 可用搜索 provider：
@@ -221,6 +224,9 @@ api_key = "serper_xxx"
 
 [search_providers.duckduckgo_ia]
 type = "duckduckgo_instant_answer"
+
+[search_providers.duckduckgo_html]
+type = "duckduckgo_html"
 
 [search_providers.firecrawl]
 type = "firecrawl"
@@ -249,17 +255,17 @@ read_tool = "read_url"
 
 ## 视觉配置
 
-Codex 是否允许上传图片，先看模型目录里的 `input_modalities`。如果模型只声明 `["text"]`，图片会在 Codex CLI / App 侧被拦住，bridge 收不到请求，第三方视觉 provider 也不会触发。
+Codex 是否允许上传图片，先看模型目录里的 `input_modalities`。如果模型只声明 `["text"]`，图片会在 Codex CLI / App 侧被拦住，bridge 收不到请求。
 
-上游模型支持 image input 时，bridge 会按 Chat Completions `image_url` 传递。
-
-上游是 text-only 模型时，也可以显式声明：
+上游模型支持 image input 时，在对应 `[models.*]` 里显式声明：
 
 ```toml
 input_modalities = ["text", "image"]
 ```
 
-这表示“这个 bridge 模型入口能接图片”，不表示上游模型原生能看图。请求进入 bridge 后，会使用 `[capabilities.vision]` 配置的视觉 provider 先把图片转成文本，再把 `[image analysis]` 内容交给 text-only 模型。
+声明后，bridge 会按 Chat Completions `image_url` 把图片传给上游模型。不要给不支持图片的上游模型声明 `image`；否则上游会直接报错。
+
+上游是 text-only 模型时，不声明 `image`。后续如需“图片转文本再交给文本模型”，再启用 `[capabilities.vision]` 这类兜底能力。
 
 ```toml
 [capabilities.vision]

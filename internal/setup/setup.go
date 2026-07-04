@@ -141,7 +141,6 @@ func buildConfig(options Options, probe upstreamprobe.Result) config.Config {
 			ContextWindow:             contextWindowForModel(id),
 			SupportsParallelToolCalls: true,
 			ApplyPatchToolType:        "freeform",
-			InputModalities:           inputModalitiesForModel(id),
 		}
 	}
 	if _, ok := cfg.Models[defaultModel]; !ok {
@@ -185,14 +184,6 @@ func profileForModel(model string) string {
 
 func contextWindowForModel(model string) int64 {
 	return config.DefaultContextWindowForModel(model)
-}
-
-func inputModalitiesForModel(model string) []string {
-	value := strings.ToLower(strings.TrimSpace(model))
-	if strings.Contains(value, "mimo") {
-		return []string{"text", "image"}
-	}
-	return nil
 }
 
 func randomToken() string {

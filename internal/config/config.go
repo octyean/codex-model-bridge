@@ -284,7 +284,7 @@ func (cfg *Config) validateCapabilities() error {
 				return fmt.Errorf("search_providers.%s.type is required", providerName)
 			}
 			switch provider.Type {
-			case "jina", "searxng", "brave", "tavily", "serper", "duckduckgo_instant_answer", "firecrawl", "wikipedia", "semantic_scholar":
+			case "jina", "searxng", "brave", "tavily", "serper", "duckduckgo_instant_answer", "duckduckgo_html", "firecrawl", "wikipedia", "semantic_scholar":
 			case "mcp":
 				if provider.ServerURL == "" {
 					return fmt.Errorf("search_providers.%s.server_url is required for mcp", providerName)

@@ -2,7 +2,6 @@ package capabilities
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -44,24 +43,40 @@ func (p *JinaSearchProvider) Read(ctx context.Context, targetURL string) (string
 }
 
 func (p *JinaSearchProvider) getText(ctx context.Context, targetURL string) (string, error) {
+	text, statusCode, data, err := p.getTextWithAuth(ctx, targetURL, strings.TrimSpace(p.APIKey) != "")
+	if err == nil {
+		return text, nil
+	}
+	if strings.TrimSpace(p.APIKey) != "" && (statusCode == http.StatusUnauthorized || statusCode == http.StatusPaymentRequired) {
+		if text, _, _, retryErr := p.getTextWithAuth(ctx, targetURL, false); retryErr == nil {
+			return text, nil
+		}
+	}
+	if statusCode != 0 {
+		return "", httpStatusError("jina", statusCode, data)
+	}
+	return "", err
+}
+
+func (p *JinaSearchProvider) getTextWithAuth(ctx context.Context, targetURL string, withAuth bool) (string, int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
-		return "", err
+		return "", 0, nil, err
 	}
 	req.Header.Set("Accept", "text/plain")
-	if strings.TrimSpace(p.APIKey) != "" {
+	if withAuth {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", 0, nil, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("jina status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return "", resp.StatusCode, data, httpStatusError("jina", resp.StatusCode, data)
 	}
-	return string(data), nil
+	return string(data), resp.StatusCode, data, nil
 }
 
 func parseJinaItems(body string, maxResults int) []base.SearchItem {

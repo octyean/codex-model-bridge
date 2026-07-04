@@ -53,13 +53,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.16"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.17"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.16",
+		"version": "0.2.17",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -126,10 +126,11 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	transcriptResult, err := transcript.ToChatMessagesWithRuntime(r.Context(), req, adapter, s.runtime, transcript.LogContext{
-		RequestID:     requestID,
-		Model:         req.Model,
-		UpstreamModel: modelCfg.UpstreamModel,
-		Profile:       profileName,
+		RequestID:       requestID,
+		Model:           req.Model,
+		UpstreamModel:   modelCfg.UpstreamModel,
+		Profile:         profileName,
+		InputModalities: effectiveInputModalities(modelCfg, adapter),
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -243,6 +244,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Output:    items,
 		Usage:     codexUsage(usage),
 	})
+}
+
+func effectiveInputModalities(modelCfg config.ModelConfig, adapter adapters.Adapter) []string {
+	if len(modelCfg.InputModalities) > 0 {
+		return adapters.NormalizeInputModalities(modelCfg.InputModalities)
+	}
+	return adapters.NormalizeInputModalities(adapter.Capabilities().InputModalities)
 }
 
 func shouldForwardResponses(protocol string, adapter adapters.Adapter) bool {

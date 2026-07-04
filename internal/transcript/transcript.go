@@ -21,10 +21,11 @@ type Result struct {
 }
 
 type LogContext struct {
-	RequestID     string
-	Model         string
-	UpstreamModel string
-	Profile       string
+	RequestID       string
+	Model           string
+	UpstreamModel   string
+	Profile         string
+	InputModalities []string
 }
 
 type hiddenFileEditCall struct {
@@ -73,9 +74,13 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			if role == "" {
 				role = "user"
 			}
+			allowImage := adapters.HasImageInput(adapter.Capabilities())
+			if len(logContext.InputModalities) > 0 {
+				allowImage = adapters.HasImageInput(adapters.Capabilities{InputModalities: logContext.InputModalities})
+			}
 			messages = append(messages, providers.ChatMessage{
 				Role:    normalizeRole(role),
-				Content: contentParts(ctx, item["content"], adapters.HasImageInput(adapter.Capabilities()), runtime),
+				Content: contentParts(ctx, item["content"], allowImage, runtime),
 			})
 		case "function_call":
 			call := functionToolCall(item)

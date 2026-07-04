@@ -24,9 +24,12 @@ proxy_url = ""
 
 [capabilities.search]
 enabled = false
-providers = ["jina"]
+providers = ["duckduckgo_html", "jina"]
 max_results = 5
 read_top_k = 3
+
+[search_providers.duckduckgo_html]
+type = "duckduckgo_html"
 
 [capabilities.vision]
 enabled = false
@@ -37,7 +40,7 @@ mode = "describe"
 type = "jina"
 search_base_url = "https://s.jina.ai"
 reader_base_url = "https://r.jina.ai"
-api_key = "jina_xxx"
+api_key = ""
 
 [vision_providers.jina_vlm]
 type = "openai_chat_compatible_vision"
