@@ -12,6 +12,8 @@ import (
 
 const maxTextEditorReadBytes = 4 * 1024 * 1024
 
+var textEditorParameters = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"One of create, str_replace, insert_after, move_file, or delete_file."},"path":{"type":"string"},"destination_path":{"type":"string","description":"Destination path for move_file."},"new_path":{"type":"string","description":"Alias for destination_path when using move_file."},"old_str":{"type":"string","description":"Exact existing text for str_replace, insert_after anchor text, or optional exact text to replace while moving a file."},"new_str":{"type":"string","description":"Replacement text for str_replace, inserted text for insert_after, optional replacement text for move_file, or destination path for move_file when destination_path/new_path is absent."},"insert_after":{"type":"string","description":"Exact existing anchor text after which new_str/text should be inserted."},"text":{"type":"string","description":"Inserted text, or file content for create."},"file_text":{"type":"string","description":"Full file content for create."}},"required":["command","path"],"additionalProperties":false}`)
+
 type textEditorCommand struct {
 	Command     string `json:"command"`
 	Path        string `json:"path"`
@@ -64,9 +66,13 @@ func TextEditorPatchInput(arguments string) (string, error) {
 		}
 		return insertAfterPatch(path, anchor, text), nil
 	case "move_file":
-		destPath := normalizeEditorPath(firstNonEmpty(command.DestPath, command.NewPath, command.NewStr))
+		rawDestPath := firstNonEmpty(command.DestPath, command.NewPath, command.NewStr)
+		destPath := normalizeEditorPath(rawDestPath)
 		if destPath == "" {
 			return "", fmt.Errorf("move_file requires destination_path or new_path")
+		}
+		if isEditorDirectoryTarget(rawDestPath, destPath) {
+			return directoryTargetMoveResult(path, destPath), nil
 		}
 		if destPath == path {
 			return samePathMoveResult(path), nil
@@ -315,6 +321,32 @@ func samePathMoveResult(path string) string {
 		"forbidden_next_action: retry_move_file_same_path",
 		"recovery: source and destination are the same file. Do not use move_file for same-path edits; use str_replace or insert_after on the existing path.",
 	}, "\n")
+}
+
+func directoryTargetMoveResult(path string, destPath string) string {
+	examplePath := destPath + "/<target-file-name" + filepath.Ext(path) + ">"
+	return strings.Join([]string{
+		"TEXT_EDITOR_MOVE_TARGET_IS_DIRECTORY",
+		"path: " + path,
+		"destination_path: " + destPath,
+		"rejected_field: destination_path",
+		"rejected_value: " + destPath,
+		"file_edit_state: not_modified",
+		"required_next_action: retry_move_file_with_complete_destination_file_path",
+		"forbidden_next_action: retry_move_file_to_directory",
+		"same_call_will_repeat_this_error: true",
+		"required_destination_path_shape: " + examplePath,
+		"next_call_template: {\"command\":\"move_file\",\"path\":\"" + path + "\",\"destination_path\":\"" + examplePath + "\"}",
+		"recovery: destination_path must be changed to a complete destination file path including the target file name. Do not pass only a directory; choose the final file path from the user request, then retry move_file if the move is still needed.",
+	}, "\n")
+}
+
+func isEditorDirectoryTarget(rawPath string, path string) bool {
+	if rawPath != "" && strings.HasSuffix(strings.TrimSpace(rawPath), "/") {
+		return true
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func replacePatch(path string, oldText string, newText string) string {

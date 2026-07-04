@@ -9,6 +9,7 @@ import (
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/capabilities"
 	"codex-bridge/internal/codex"
+	"codex-bridge/internal/incidentlog"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/tools"
@@ -17,6 +18,13 @@ import (
 type Result struct {
 	Messages []providers.ChatMessage
 	Items    []map[string]any
+}
+
+type LogContext struct {
+	RequestID     string
+	Model         string
+	UpstreamModel string
+	Profile       string
 }
 
 type hiddenFileEditCall struct {
@@ -28,7 +36,11 @@ func ToChatMessages(req codex.ResponsesRequest, adapter adapters.Adapter) (Resul
 	return ToChatMessagesWithRuntime(context.Background(), req, adapter, capabilities.Runtime{})
 }
 
-func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, adapter adapters.Adapter, runtime capabilities.Runtime) (Result, error) {
+func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, adapter adapters.Adapter, runtime capabilities.Runtime, logContexts ...LogContext) (Result, error) {
+	logContext := LogContext{}
+	if len(logContexts) > 0 {
+		logContext = logContexts[0]
+	}
 	var messages []providers.ChatMessage
 	if strings.TrimSpace(req.Instructions) != "" {
 		messages = append(messages, providers.ChatMessage{
@@ -143,8 +155,26 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			}
 			descriptor = adapterOutputToolDescriptor(adapter, descriptor)
 			rawOutput := outputText(item)
-			formattedOutput := adapter.FormatToolOutput(descriptor, rawOutput)
-			toollog.PatchToolOutput(callID, descriptor, rawOutput, formattedOutput)
+			rawArguments := ""
+			if call, ok := toolCallsByID[callID]; ok {
+				rawArguments = call.Function.Arguments
+			}
+			formattedOutput := adapters.FormatToolOutputWithArguments(adapter, descriptor, rawArguments, rawOutput)
+			logModel := req.Model
+			if logContext.Model != "" {
+				logModel = logContext.Model
+			}
+			logProfile := adapter.Name()
+			if logContext.Profile != "" {
+				logProfile = logContext.Profile
+			}
+			toollog.ToolOutput(toollog.OutputContext{
+				RequestID:      logContext.RequestID,
+				Model:          logModel,
+				UpstreamModel:  logContext.UpstreamModel,
+				Profile:        logProfile,
+				RequestSummary: incidentlog.RequestSummary(req.Raw),
+			}, callID, descriptor, rawArguments, rawOutput, formattedOutput)
 			messages = append(messages, providers.ChatMessage{
 				Role:       "tool",
 				ToolCallID: callID,

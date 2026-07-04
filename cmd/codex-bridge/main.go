@@ -18,6 +18,7 @@ import (
 
 	"codex-bridge/internal/codexconfig"
 	"codex-bridge/internal/config"
+	"codex-bridge/internal/incidentlog"
 	"codex-bridge/internal/logging"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/requestdump"
@@ -176,6 +177,7 @@ func main() {
 	logger.Info("catalog_written", slog.String("path", cfg.Codex.ModelCatalogPath), slog.Int("models", len(cfg.Models)))
 	logToolLogStatus(logger)
 	logRequestDumpStatus(logger)
+	logIncidentLogStatus(logger)
 
 	handler := server.New(cfg, providerClients, logger)
 	httpServer := &http.Server{
@@ -236,6 +238,19 @@ func logToolLogStatus(logger *slog.Logger) {
 		return
 	}
 	logger.Info("tool_log_configured", slog.Bool("enabled", true), slog.String("path", path), slog.String("env", toollog.EnvToolLogPath))
+}
+
+func logIncidentLogStatus(logger *slog.Logger) {
+	path, err := incidentlog.CheckConfiguredPath()
+	if path == "" {
+		logger.Info("incident_log_configured", slog.Bool("enabled", false), slog.String("env", incidentlog.EnvPath))
+		return
+	}
+	if err != nil {
+		logger.Warn("incident_log_unavailable", slog.String("path", path), slog.String("error", err.Error()), slog.String("env", incidentlog.EnvPath))
+		return
+	}
+	logger.Info("incident_log_configured", slog.Bool("enabled", true), slog.String("path", path), slog.String("env", incidentlog.EnvPath))
 }
 
 func windowsDefaultConfigPath() string {

@@ -76,6 +76,7 @@ type ChatCompletionRequest struct {
 	Messages                 []ChatMessage  `json:"messages"`
 	Tools                    []ChatTool     `json:"tools,omitempty"`
 	ToolChoice               any            `json:"tool_choice,omitempty"`
+	ResponseFormat           any            `json:"response_format,omitempty"`
 	Stream                   bool           `json:"stream"`
 	StreamOptions            *StreamOptions `json:"stream_options,omitempty"`
 	ParallelToolCalls        *bool          `json:"parallel_tool_calls,omitempty"`
@@ -445,6 +446,7 @@ type chatCompletionWireRequest struct {
 	Messages          []chatWireMessage `json:"messages"`
 	Tools             []ChatTool        `json:"tools,omitempty"`
 	ToolChoice        any               `json:"tool_choice,omitempty"`
+	ResponseFormat    any               `json:"response_format,omitempty"`
 	Stream            bool              `json:"stream"`
 	StreamOptions     *StreamOptions    `json:"stream_options,omitempty"`
 	ParallelToolCalls *bool             `json:"parallel_tool_calls,omitempty"`
@@ -464,6 +466,7 @@ func prepareRequest(req ChatCompletionRequest) chatCompletionWireRequest {
 		Messages:          wireMessages(req.Messages, req.AssistantToolContentNull),
 		Tools:             req.Tools,
 		ToolChoice:        req.ToolChoice,
+		ResponseFormat:    req.ResponseFormat,
 		Stream:            req.Stream,
 		StreamOptions:     req.StreamOptions,
 		ParallelToolCalls: req.ParallelToolCalls,

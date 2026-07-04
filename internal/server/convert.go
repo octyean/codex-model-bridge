@@ -26,7 +26,8 @@ func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Conte
 		}
 		for _, call := range message.ToolCalls {
 			entry := toolCtx.Entry(call.Function.Name)
-			item := responseItemFromToolCall(call.ID, entry, call.Function.Arguments, adapter, requestID, model, profile, logger)
+			toollog.ToolCall(requestID, model, profile, call.ID, entry, call.Function.Arguments, message.ReasoningContent)
+			item := responseItemFromToolCall(call.ID, entry, call.Function.Arguments, toolCtx, adapter, requestID, model, profile, logger)
 			items = append(items, item)
 			logToolTranslation(logger, requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(requestID, call.ID, entry, call.Function.Arguments, item)
@@ -109,12 +110,15 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 					"item":         map[string]any{"id": "msg_0", "type": "message", "role": "assistant", "content": []any{}},
 					"output_index": s.textIndex,
 				})
+				events = append(events, contentPartAddedEvent("msg_0", s.textIndex))
 			}
 			s.text += choice.Delta.Content
 			events = append(events, map[string]any{
-				"type":    "response.output_text.delta",
-				"item_id": "msg_0",
-				"delta":   choice.Delta.Content,
+				"type":          "response.output_text.delta",
+				"item_id":       "msg_0",
+				"output_index":  s.textIndex,
+				"content_index": 0,
+				"delta":         choice.Delta.Content,
 			})
 		}
 		for _, delta := range choice.Delta.ToolCalls {
@@ -156,7 +160,8 @@ func (s *streamState) Done() []codex.ResponseItem {
 				continue
 			}
 			entry := s.toolCtx.Entry(call.name)
-			item := responseItemFromToolCall(call.id, entry, call.arguments, s.adapter, s.requestID, s.model, s.profile, s.logger)
+			toollog.ToolCall(s.requestID, s.model, s.profile, call.id, entry, call.arguments, s.reasoning)
+			item := responseItemFromToolCall(call.id, entry, call.arguments, s.toolCtx, s.adapter, s.requestID, s.model, s.profile, s.logger)
 			items = append(items, indexedResponseItem{index: s.itemIndex(call.outputIndex), item: item})
 			logToolTranslation(s.logger, s.requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(s.requestID, call.id, entry, call.arguments, item)
@@ -209,7 +214,7 @@ func (s *streamState) ToolCallCount() int {
 	return len(s.toolCalls)
 }
 
-func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) codex.ResponseItem {
+func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) codex.ResponseItem {
 	if rewritten, ok := adapter.ToolPolicy().RewriteBlockedToolCall(entry.Name(), arguments); ok {
 		toollog.BlockedToolRewrite(requestID, model, profile, callID, entry, arguments, rewritten)
 		if logger != nil {
@@ -228,6 +233,9 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 	case tools.KindCustom, tools.KindPatch, tools.KindTextEditor:
 		input := tools.ExtractCustomToolInput(entry, arguments, adapter)
 		if entry.Kind() == tools.KindTextEditor {
+			if strings.TrimSpace(input) == "" {
+				return textEditorLocalResultExecCommandCall(callID, textEditorInvalidArgumentsResult())
+			}
 			if strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_") {
 				return textEditorLocalResultExecCommandCall(callID, input)
 			}
@@ -241,6 +249,17 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 			"status":  "completed",
 		}
 	case tools.KindToolSearch:
+		if name, nativeArguments, ok := tools.ToolSearchCallWithContext(arguments, toolCtx); ok {
+			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, arguments, name, nativeArguments, "local_tool_search_resource")
+			return codex.ResponseItem{
+				"id":        toolItemID("function_call", callID),
+				"type":      "function_call",
+				"call_id":   callID,
+				"name":      name,
+				"arguments": nativeArguments,
+				"status":    "completed",
+			}
+		}
 		return codex.ResponseItem{
 			"id":        toolItemID("tool_search_call", callID),
 			"type":      "tool_search_call",
@@ -248,6 +267,19 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 			"call_id":   callID,
 			"status":    "completed",
 			"arguments": tools.ToolSearchArguments(arguments),
+		}
+	case tools.KindMCPResource:
+		name, nativeArguments := tools.MCPResourceCallForTool(entry.Name(), arguments, toolCtx)
+		if name != "read_mcp_resource" && name != "list_mcp_resources" && name != "list_mcp_resource_templates" {
+			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, arguments, name, nativeArguments, "local_context_resource")
+		}
+		return codex.ResponseItem{
+			"id":        toolItemID("function_call", callID),
+			"type":      "function_call",
+			"call_id":   callID,
+			"name":      name,
+			"arguments": nativeArguments,
+			"status":    "completed",
 		}
 	case tools.KindShell:
 		return codex.ResponseItem{
@@ -507,6 +539,15 @@ func textEditorLocalResultCommand(input string) string {
 		command += "; printf '%s\\n' '--- current file ---'; sed -n '1,200p' " + shellSingleQuote(path)
 	}
 	return command + "; exit 0"
+}
+
+func textEditorInvalidArgumentsResult() string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_INVALID_ARGUMENTS",
+		"file_edit_state: rejected",
+		"required_next_action: call codex_text_editor with command=create, str_replace, insert_after, move_file, or delete_file and the required fields for that command",
+		"forbidden_next_action: retry_invalid_text_editor_command_or_send_empty_patch",
+	}, "\n")
 }
 
 func textEditorLocalResultPath(input string) string {
@@ -789,6 +830,26 @@ func outputDoneEvents(item codex.ResponseItem, outputIndex int, alreadyAdded boo
 	}
 	itemType, _ := item["type"].(string)
 	switch itemType {
+	case "message":
+		if !alreadyAdded {
+			itemID, _ := item["id"].(string)
+			events = append(events, contentPartAddedEvent(itemID, outputIndex))
+		}
+		text := messageOutputText(item)
+		events = append(events, map[string]any{
+			"type":          "response.output_text.done",
+			"item_id":       item["id"],
+			"output_index":  outputIndex,
+			"content_index": 0,
+			"text":          text,
+		})
+		events = append(events, map[string]any{
+			"type":          "response.content_part.done",
+			"item_id":       item["id"],
+			"output_index":  outputIndex,
+			"content_index": 0,
+			"part":          outputTextPart(text),
+		})
 	case "custom_tool_call":
 		events = append(events, map[string]any{
 			"type":    "response.custom_tool_call_input.delta",
@@ -816,6 +877,28 @@ func outputDoneEvents(item codex.ResponseItem, outputIndex int, alreadyAdded boo
 		"output_index": outputIndex,
 	})
 	return events
+}
+
+func contentPartAddedEvent(itemID string, outputIndex int) map[string]any {
+	return map[string]any{
+		"type":          "response.content_part.added",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": 0,
+		"part":          outputTextPart(""),
+	}
+}
+
+func outputTextPart(text string) map[string]any {
+	return map[string]any{"type": "output_text", "text": text, "annotations": []any{}}
+}
+
+func messageOutputText(item codex.ResponseItem) string {
+	content, _ := item["content"].([]map[string]string)
+	if len(content) == 0 {
+		return ""
+	}
+	return content[0]["text"]
 }
 
 func inProgressOutputItem(item codex.ResponseItem) codex.ResponseItem {

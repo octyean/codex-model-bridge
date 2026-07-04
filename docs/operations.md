@@ -2,6 +2,8 @@
 
 下面的 `codex-bridge` 可以替换成实际二进制路径，例如 `~/.codex-bridge/bin/codex-bridge`。
 
+本地调试、替换正在运行的二进制、按 Codex 会话 ID 反查日志，见 [诊断日志与本地调试](diagnostics-and-local-debug.md)。
+
 ## 配置检查
 
 ```bash

@@ -3,57 +3,25 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
+	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/providers"
+	"codex-bridge/internal/toollog"
+	"codex-bridge/internal/tools"
 )
 
-const bridgeWebSearchTool = "web_search"
-
-var bridgeWebSearchParameters = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"url":{"type":"string"}},"required":["query"],"additionalProperties":false}`)
-
-func (s *Server) addInternalTools(req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	if !s.hasInternalTools(req) {
-		return chatReq
-	}
-	chatReq.Tools = append(chatReq.Tools, providers.ChatTool{
-		Type: "function",
-		Function: providers.ChatFunction{
-			Name:        bridgeWebSearchTool,
-			Description: "Search the web through the bridge search capability. Use this when the user asks for current web information.",
-			Parameters:  bridgeWebSearchParameters,
-		},
-	})
-	return chatReq
-}
-
 func (s *Server) hasInternalTools(req codex.ResponsesRequest) bool {
-	return s.runtime.HasSearch() && requestHasWebSearch(req.Tools)
+	return s.runtime.HasSearch() && tools.HasWebSearch(req.Tools)
 }
 
-func requestHasWebSearch(tools []codex.ResponseTool) bool {
-	for _, tool := range tools {
-		toolType := tool.Type
-		if tool.Raw != nil {
-			if rawType, ok := tool.Raw["type"].(string); ok {
-				toolType = rawType
-			}
-		}
-		if strings.HasPrefix(toolType, "web_search") {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
+func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
 	current := message
 	currentReq := req
 	var resp *providers.ChatCompletionResponse
 	handled := false
 	for {
-		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current)
+		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current, logCtx)
 		if !ok {
 			break
 		}
@@ -76,42 +44,43 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 	return resp, currentReq, true
 }
 
-func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage) (providers.ChatCompletionRequest, bool) {
+func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage, logCtx toollog.OutputContext) (providers.ChatCompletionRequest, bool) {
 	if len(message.ToolCalls) == 0 {
 		return providers.ChatCompletionRequest{}, false
 	}
 	var outputs []providers.ChatMessage
 	for _, call := range message.ToolCalls {
-		if call.Function.Name != bridgeWebSearchTool {
+		if call.Function.Name != tools.WebSearchProxyToolName {
 			return providers.ChatCompletionRequest{}, false
 		}
+		output := s.searchToolOutput(ctx, call.Function.Arguments)
+		toollog.ToolOutput(logCtx, call.ID, adapters.ToolDescriptor{
+			Name:         tools.WebSearchProxyToolName,
+			Kind:         tools.KindWebSearch,
+			OriginalType: "web_search_preview",
+		}, call.Function.Arguments, output, output)
 		outputs = append(outputs, providers.ChatMessage{
 			Role:       "tool",
 			ToolCallID: call.ID,
-			Content:    s.searchToolOutput(ctx, call.Function.Arguments),
+			Content:    output,
 		})
 	}
 	followUp := req
-	followUp.ToolChoice = "none"
+	followUp.ToolChoice = "auto"
 	followUp.Messages = append(append(followUp.Messages, message), outputs...)
-	followUp.Tools = nil
 	return followUp, true
 }
 
 func (s *Server) searchToolOutput(ctx context.Context, arguments string) string {
-	var args struct {
-		Query string `json:"query"`
-		URL   string `json:"url"`
-	}
-	_ = json.Unmarshal([]byte(arguments), &args)
-	if args.URL != "" {
-		text, err := s.runtime.Search.Read(ctx, args.URL)
+	query, url := tools.WebSearchArguments(arguments)
+	if url != "" {
+		text, err := s.runtime.Search.Read(ctx, url)
 		if err != nil {
 			return "Search read failed: " + err.Error()
 		}
 		return text
 	}
-	result, err := s.runtime.Search.Search(ctx, args.Query, s.cfg.Capabilities.Search.MaxResults)
+	result, err := s.runtime.Search.Search(ctx, query, s.cfg.Capabilities.Search.MaxResults)
 	if err != nil {
 		return "Search failed: " + err.Error()
 	}

@@ -26,6 +26,8 @@ After apply_patch succeeds for a file, do not repeat an already-completed edit. 
 
 type PatchFailureKind string
 
+type ToolFailureKind string
+
 const (
 	PatchFailureNone                PatchFailureKind = ""
 	PatchFailureContextMismatch     PatchFailureKind = "context_mismatch"
@@ -36,6 +38,16 @@ const (
 	PatchFailurePathError           PatchFailureKind = "path_error"
 	PatchFailurePermissionOrSandbox PatchFailureKind = "permission_or_sandbox"
 	PatchFailureUnknown             PatchFailureKind = "unknown"
+)
+
+const (
+	ToolFailureNone                     ToolFailureKind = ""
+	ToolFailureMCPResourceLocalID       ToolFailureKind = "mcp_resource_local_identifier"
+	ToolFailureMCPResourceServerUnknown ToolFailureKind = "mcp_resource_server_unknown"
+	ToolFailureMCPResourceUnlistedID    ToolFailureKind = "mcp_resource_unlisted_identifier"
+	ToolFailureMCPResourceReadFailed    ToolFailureKind = "mcp_resource_read_failed"
+	ToolFailureMCPResourcesEmpty        ToolFailureKind = "mcp_resources_empty"
+	ToolFailureToolSearchEmpty          ToolFailureKind = "tool_search_empty"
 )
 
 func NormalizePatchInput(input string) string {
@@ -54,6 +66,10 @@ func NormalizePatchInput(input string) string {
 func ClassifyPatchFailure(output string) PatchFailureKind {
 	text := strings.ToLower(output)
 	switch {
+	case strings.Contains(text, "apply_patch_succeeded"),
+		strings.Contains(text, "text_editor_edit_succeeded"),
+		strings.Contains(text, "file_edit_state: completed"):
+		return PatchFailureNone
 	case strings.Contains(text, "*** read file:"):
 		return PatchFailureReadFileOperation
 	case strings.Contains(text, "text_editor_already_applied"):
@@ -87,6 +103,98 @@ func ClassifyPatchFailure(output string) PatchFailureKind {
 	default:
 		return PatchFailureNone
 	}
+}
+
+func ClassifyToolFailure(tool ToolDescriptor, output string) ToolFailureKind {
+	return ClassifyToolFailureWithArguments(tool, "", output)
+}
+
+func ClassifyToolFailureWithArguments(tool ToolDescriptor, arguments string, output string) ToolFailureKind {
+	trimmed := strings.TrimSpace(output)
+	lower := strings.ToLower(trimmed)
+	switch tool.Name {
+	case "read_mcp_resource":
+		switch {
+		case mcpResourceUsesLocalIdentifier(arguments):
+			return ToolFailureMCPResourceLocalID
+		case strings.Contains(lower, "unknown mcp server"):
+			return ToolFailureMCPResourceServerUnknown
+		case mcpResourceIdentifierNotListed(lower):
+			return ToolFailureMCPResourceUnlistedID
+		case strings.Contains(lower, "resources/read failed"):
+			return ToolFailureMCPResourceReadFailed
+		}
+	case "list_mcp_resources", "list_mcp_resource_templates":
+		if mcpResourceListEmpty(trimmed, tool.Name) {
+			return ToolFailureMCPResourcesEmpty
+		}
+	case "tool_search":
+		if trimmed == "[]" {
+			return ToolFailureToolSearchEmpty
+		}
+	}
+	return ToolFailureNone
+}
+
+func FormatToolOutputWithArguments(adapter Adapter, tool ToolDescriptor, arguments string, output string) string {
+	if recovery := ToolRecoveryText(ClassifyToolFailureWithArguments(tool, arguments, output)); recovery != "" {
+		return output + "\n\n" + recovery
+	}
+	return adapter.FormatToolOutput(tool, output)
+}
+
+func ToolRecoveryText(kind ToolFailureKind) string {
+	switch kind {
+	case ToolFailureMCPResourceLocalID:
+		return "MCP_RESOURCE_LOCAL_IDENTIFIER\nrequired_next_action: treat_skill_paths_and_local_file_paths_as_local_files_not_mcp_resources\nforbidden_next_action: use_skill_names_local_paths_or_file_uris_as_mcp_resource_server_or_uri\nrecovery: read local skill files and repository files with available filesystem/read-only shell tools when allowed. Use read_mcp_resource only with exact server and URI values returned by list_mcp_resources or list_mcp_resource_templates."
+	case ToolFailureMCPResourceServerUnknown:
+		return "MCP_RESOURCE_SERVER_UNKNOWN\nrequired_next_action: use_only_server_and_uri_values_returned_by_list_mcp_resources_or_list_mcp_resource_templates\nforbidden_next_action: retry_same_server_uri_or_invent_mcp_resource_identifiers\nrecovery: if no MCP resource list entry is available for the needed content, stop MCP resource reading and use another available tool or explain that no readable MCP resource is available."
+	case ToolFailureMCPResourceUnlistedID:
+		return "MCP_RESOURCE_UNLISTED_IDENTIFIER\nrequired_next_action: list_mcp_resources_or_list_mcp_resource_templates_before_any_resource_read_retry\nforbidden_next_action: retry_or_invent_resource_uri_from_prompt_text_skill_names_tool_names_or_url_like_strings\nrecovery: read_mcp_resource only accepts exact server and URI values returned by MCP resource listing. If the needed content came from prompt text, a local skill, a repository file, or a callable MCP tool, use the matching non-resource path instead."
+	case ToolFailureMCPResourceReadFailed:
+		return "MCP_RESOURCE_READ_FAILED\nrequired_next_action: inspect_listed_mcp_resources_before_any_retry\nforbidden_next_action: retry_same_server_uri_without_new_list_result\nrecovery: retry only when list_mcp_resources or list_mcp_resource_templates returned the exact server and URI in this turn."
+	case ToolFailureMCPResourcesEmpty:
+		return "MCP_RESOURCES_EMPTY\nrequired_next_action: stop_mcp_resource_reading_or_use_non_resource_tools\nforbidden_next_action: guess_server_names_or_resource_uris\nrecovery: there are no listed MCP resources in this result. MCP tools may still exist; discover callable MCP tools with tool_search, not read_mcp_resource."
+	case ToolFailureToolSearchEmpty:
+		return "TOOL_SEARCH_EMPTY\nrequired_next_action: revise_tool_search_query_or_use_existing_visible_tools\nforbidden_next_action: use_mcp_resources_as_tool_discovery_or_invent_tool_names\nrecovery: tool_search found no matching callable tools for this query. Do not switch to list_mcp_resources/read_mcp_resource to discover tools; use already visible tools, narrow/broaden the tool_search query, or proceed with shell/read-only inspection when appropriate."
+	default:
+		return ""
+	}
+}
+
+func mcpResourceUsesLocalIdentifier(arguments string) bool {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(arguments), &obj); err != nil {
+		return false
+	}
+	uri, _ := obj["uri"].(string)
+	uri = strings.TrimSpace(uri)
+	return strings.HasPrefix(uri, "file://") || filepath.IsAbs(uri)
+}
+
+func mcpResourceIdentifierNotListed(output string) bool {
+	return strings.Contains(output, "unknown resource") ||
+		strings.Contains(output, "resource not found") ||
+		strings.Contains(output, "no such resource")
+}
+
+func mcpResourceListEmpty(output string, toolName string) bool {
+	if strings.TrimSpace(output) == "[]" {
+		return true
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(output), &obj); err != nil {
+		return false
+	}
+	key := "resources"
+	if toolName == "list_mcp_resource_templates" {
+		key = "resourceTemplates"
+		if _, ok := obj[key]; !ok {
+			key = "resource_templates"
+		}
+	}
+	values, ok := obj[key].([]any)
+	return ok && len(values) == 0
 }
 
 func PatchSucceeded(output string) bool {

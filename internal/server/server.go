@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,9 +15,11 @@ import (
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/config"
 	extcap "codex-bridge/internal/extensions/capabilities"
+	"codex-bridge/internal/incidentlog"
 	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/requestdump"
+	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/tools"
 	"codex-bridge/internal/transcript"
 )
@@ -50,13 +53,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.15"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.16"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.15",
+		"version": "0.2.16",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -108,32 +111,48 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "provider is not available: "+modelCfg.Provider)
 		return
 	}
+	requestSummary := incidentlog.RequestSummary(req.Raw)
+	toollog.RememberRequestSession(requestID, incidentlog.CodexSessionID(req.Raw, r.Header), req.Model, modelCfg.UpstreamModel, profileName, requestSummary)
+	defer toollog.ForgetRequestSession(requestID)
+	dumpPath := ""
 	if shouldForwardResponses(s.cfg.UpstreamProtocol(modelCfg, providerCfg), adapter) {
 		responsesProvider, ok := provider.(providers.ResponsesProvider)
 		if !ok {
 			writeError(w, http.StatusInternalServerError, "provider does not support responses protocol: "+modelCfg.Provider)
 			return
 		}
-		s.forwardResponses(w, r, requestID, req, modelCfg, responsesProvider, adapter)
+		s.forwardResponses(w, r, requestID, req, modelCfg, responsesProvider, adapter, dumpPath)
 		return
 	}
 
-	transcriptResult, err := transcript.ToChatMessagesWithRuntime(r.Context(), req, adapter, s.runtime)
+	transcriptResult, err := transcript.ToChatMessagesWithRuntime(r.Context(), req, adapter, s.runtime, transcript.LogContext{
+		RequestID:     requestID,
+		Model:         req.Model,
+		UpstreamModel: modelCfg.UpstreamModel,
+		Profile:       profileName,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	chatTools, toolCtx := tools.FromCodex(req.Tools, adapter)
 	chatTools = append(chatTools, tools.FromAdditionalTools(transcriptResult.Items, adapter, &toolCtx)...)
-	toolChoice := tools.ToolChoice(req.ToolChoice, toolCtx)
-	chatReq := providers.ChatCompletionRequest{
-		Model:      modelCfg.UpstreamModel,
-		Messages:   transcriptResult.Messages,
-		Tools:      chatTools,
-		ToolChoice: toolChoice,
-		Stream:     req.Stream,
+	if s.hasInternalTools(req) {
+		chatTools = tools.AddWebSearchProxy(chatTools, &toolCtx)
 	}
-	chatReq = s.addInternalTools(req, chatReq)
+	if s.writeForcedLocalToolChoice(w, requestID, req, toolCtx, adapter) {
+		return
+	}
+	toolChoice := tools.ToolChoice(req.ToolChoice, toolCtx)
+	chatTools, toolChoice = tools.ApplyToolChoice(chatTools, toolChoice, adapter.ToolPolicy().RequiredToolChoice)
+	chatReq := providers.ChatCompletionRequest{
+		Model:          modelCfg.UpstreamModel,
+		Messages:       transcriptResult.Messages,
+		Tools:          chatTools,
+		ToolChoice:     toolChoice,
+		ResponseFormat: responseFormatFromText(req.Raw),
+		Stream:         req.Stream,
+	}
 	if req.ParallelToolCalls && !toolCtx.IsEmpty() {
 		enabled := !toolCtx.HasFileWriteTool()
 		chatReq.ParallelToolCalls = &enabled
@@ -159,48 +178,61 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		slog.Int("estimated_tokens", stats.EstimatedTokens),
 		slog.String("prefix_hash", shape.PrefixHash),
 	)
-	if dumpPath, err := requestdump.Write(requestID, req.Model, profileName, preparedRequest); err != nil {
+	if path, err := requestdump.Write(requestID, req.Model, profileName, preparedRequest); err != nil {
 		s.logger.Warn("upstream_request_dump_failed",
 			slog.String("request_id", requestID),
 			slog.String("error", err.Error()),
 			slog.String("env", requestdump.EnvPath),
 		)
-	} else if dumpPath != "" {
+	} else if path != "" {
+		dumpPath = path
 		s.logger.Info("upstream_request_dumped",
 			slog.String("request_id", requestID),
-			slog.String("path", dumpPath),
+			slog.String("path", path),
 			slog.String("body_hash", requestdump.Hash(preparedRequest)),
 		)
 	}
 
 	if req.Stream {
 		if s.hasInternalTools(req) {
-			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape)
+			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape, dumpPath)
 			return
 		}
-		s.streamResponses(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape)
+		s.streamResponses(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape, dumpPath)
 		return
 	}
 	resp, err := provider.Create(r.Context(), chatReq)
 	if err != nil {
 		s.logger.Error("upstream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+		incidentlog.Write("upstream_error", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"error": err.Error(), "stream": false}))
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if len(resp.Choices) == 0 {
+		incidentlog.Write("empty_chat_choices", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false}))
 		writeError(w, http.StatusBadGateway, "upstream returned no choices")
 		return
 	}
-	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message); ok {
+	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message, toollog.OutputContext{
+		RequestID:      requestID,
+		Model:          req.Model,
+		UpstreamModel:  modelCfg.UpstreamModel,
+		Profile:        profileName,
+		RequestSummary: requestSummary,
+	}); ok {
 		resp = followUp
 		shape = optimization.CaptureShape(followUpReq)
 		if len(resp.Choices) == 0 {
+			incidentlog.Write("empty_chat_choices", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "after_internal_tool": true}))
 			writeError(w, http.StatusBadGateway, "upstream returned no choices")
 			return
 		}
 	}
 	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger)
 	usage := providers.NormalizeUsage(resp.Usage)
+	if emptyOutput(items) {
+		incidentlog.Write("empty_chat_response", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "output": outputSummary(items, usage)}))
+	}
 	s.logUsage(requestID, req.Model, profileName, adapter, shape, usage)
 	writeJSON(w, http.StatusOK, codex.ResponseObject{
 		ID:        responseID(resp.ID),
@@ -217,20 +249,42 @@ func shouldForwardResponses(protocol string, adapter adapters.Adapter) bool {
 	return protocol == "responses" && adapter.Name() == adapters.OpenAIName
 }
 
-func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter) {
+func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter, dumpPath string) {
 	upstreamReq := cloneResponseRequest(req.Raw)
 	upstreamReq["model"] = modelCfg.UpstreamModel
 	upstreamReq = adapter.PrepareResponseRequest(upstreamReq)
+	if path, err := requestdump.Write(requestID, req.Model, adapter.Name(), upstreamReq); err != nil {
+		s.logger.Warn("upstream_request_dump_failed",
+			slog.String("request_id", requestID),
+			slog.String("error", err.Error()),
+			slog.String("env", requestdump.EnvPath),
+		)
+	} else if path != "" {
+		dumpPath = path
+		s.logger.Info("upstream_request_dumped",
+			slog.String("request_id", requestID),
+			slog.String("path", path),
+			slog.String("body_hash", requestdump.Hash(upstreamReq)),
+		)
+	}
 	if req.Stream {
 		stream, err := provider.StreamResponse(r.Context(), upstreamReq)
 		if err != nil {
+			if requestCanceled(r, err) {
+				return
+			}
 			s.logger.Error("upstream_response_stream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+			incidentlog.Write("upstream_response_stream_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": err.Error(), "stream": true}))
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		writer := codex.NewSSEWriter(w)
 		for event := range stream {
 			if event.Err != nil {
+				if requestCanceled(r, event.Err) {
+					return
+				}
+				incidentlog.Write("upstream_response_stream_event_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": event.Err.Error(), "stream": true}))
 				_ = writer.Event(map[string]any{
 					"type": "response.failed",
 					"response": map[string]any{
@@ -250,14 +304,18 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 	resp, err := provider.CreateResponse(r.Context(), upstreamReq)
 	if err != nil {
 		s.logger.Error("upstream_response_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+		incidentlog.Write("upstream_response_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": err.Error(), "stream": false}))
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	replaceResponseModel(resp, req.Model)
+	if nativeResponseEmpty(resp) {
+		incidentlog.Write("empty_native_response", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"stream": false}))
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape) {
+func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape, dumpPath string) {
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID
 	startedAt := time.Now()
@@ -278,7 +336,11 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 	select {
 	case result := <-streamReady:
 		if result.err != nil {
+			if requestCanceled(r, result.err) {
+				return
+			}
 			s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", result.err.Error()))
+			incidentlog.Write("upstream_stream_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": result.err.Error(), "stream": true}))
 			_ = writer.Event(map[string]any{
 				"type": "response.failed",
 				"response": map[string]any{
@@ -302,7 +364,11 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 			select {
 			case result := <-streamReady:
 				if result.err != nil {
+					if requestCanceled(r, result.err) {
+						return
+					}
 					s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", result.err.Error()))
+					incidentlog.Write("upstream_stream_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": result.err.Error(), "stream": true}))
 					_ = writer.Event(map[string]any{
 						"type": "response.failed",
 						"response": map[string]any{
@@ -346,6 +412,10 @@ streamOpened:
 	firstChunk := true
 	for event := range stream {
 		if event.Err != nil {
+			if requestCanceled(r, event.Err) {
+				return
+			}
+			incidentlog.Write("upstream_stream_event_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": event.Err.Error(), "stream": true}))
 			_ = writer.Event(map[string]any{
 				"type": "response.failed",
 				"response": map[string]any{
@@ -373,6 +443,9 @@ streamOpened:
 		}
 	}
 	items := state.Done()
+	if emptyOutput(items) {
+		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "output": outputSummary(items, usage)}))
+	}
 	for i, item := range items {
 		alreadyAdded := (item["id"] == "msg_0" && state.textAdded) || (item["id"] == "rs_0" && state.reasoningAdded)
 		for _, event := range outputDoneEvents(item, i, alreadyAdded) {
@@ -388,6 +461,105 @@ streamOpened:
 	})
 	s.logUsage(requestID, req.Model, profile, adapter, shape, usage)
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", state.ToolCallCount()))
+}
+
+func requestCanceled(r *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	ctxErr := r.Context().Err()
+	return ctxErr != nil && (errors.Is(err, ctxErr) || errors.Is(ctxErr, context.Canceled) || errors.Is(ctxErr, context.DeadlineExceeded))
+}
+
+func (s *Server) incidentRecord(r *http.Request, req codex.ResponsesRequest, requestID string, profile string, dumpPath string, extra map[string]any) map[string]any {
+	record := map[string]any{
+		"request_id":      requestID,
+		"model":           req.Model,
+		"profile":         profile,
+		"headers":         incidentlog.Headers(r.Header),
+		"request_summary": incidentlog.RequestSummary(req.Raw),
+		"tool_names":      responseToolNames(req.Tools),
+		"tool_choice":     req.ToolChoice,
+	}
+	if dumpPath != "" {
+		record["upstream_request_dump"] = dumpPath
+	}
+	for key, value := range extra {
+		record[key] = value
+	}
+	return record
+}
+
+func responseToolNames(responseTools []codex.ResponseTool) []string {
+	names := make([]string, 0, len(responseTools))
+	for _, tool := range responseTools {
+		if tool.Name != "" {
+			names = append(names, tool.Name)
+			continue
+		}
+		if tool.Raw != nil {
+			if name, ok := tool.Raw["name"].(string); ok && name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+func emptyOutput(items []codex.ResponseItem) bool {
+	if len(items) == 0 {
+		return true
+	}
+	for _, item := range items {
+		switch item["type"] {
+		case "message":
+			if strings.TrimSpace(messageOutputText(item)) != "" {
+				return false
+			}
+		case "reasoning":
+			if text, _ := item["reasoning_content"].(string); strings.TrimSpace(text) != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func outputSummary(items []codex.ResponseItem, usage providers.NormalizedUsage) map[string]any {
+	summary := map[string]any{
+		"item_count":      len(items),
+		"has_text":        false,
+		"text_chars":      0,
+		"reasoning_chars": 0,
+		"tool_call_count": 0,
+		"usage":           usage,
+	}
+	for _, item := range items {
+		switch item["type"] {
+		case "message":
+			text := messageOutputText(item)
+			if text != "" {
+				summary["has_text"] = true
+				summary["text_chars"] = summary["text_chars"].(int) + len([]rune(text))
+			}
+		case "reasoning":
+			text, _ := item["reasoning_content"].(string)
+			summary["reasoning_chars"] = summary["reasoning_chars"].(int) + len([]rune(text))
+		default:
+			summary["tool_call_count"] = summary["tool_call_count"].(int) + 1
+		}
+	}
+	return summary
+}
+
+func nativeResponseEmpty(resp map[string]any) bool {
+	output, ok := resp["output"].([]any)
+	return ok && len(output) == 0
 }
 
 func (s *Server) authorized(r *http.Request) bool {
@@ -424,6 +596,32 @@ func cloneResponseRequest(raw map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func responseFormatFromText(raw map[string]any) any {
+	text, ok := raw["text"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	format, ok := text["format"].(map[string]any)
+	if !ok || format["type"] != "json_schema" || format["schema"] == nil {
+		return nil
+	}
+	name, _ := format["name"].(string)
+	if name == "" {
+		name = "codex_output_schema"
+	}
+	jsonSchema := map[string]any{
+		"name":   name,
+		"schema": format["schema"],
+	}
+	if strict, ok := format["strict"]; ok {
+		jsonSchema["strict"] = strict
+	}
+	return map[string]any{
+		"type":        "json_schema",
+		"json_schema": jsonSchema,
+	}
 }
 
 func replaceResponseModel(value map[string]any, model string) {

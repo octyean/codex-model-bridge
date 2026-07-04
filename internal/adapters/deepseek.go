@@ -1,8 +1,6 @@
 package adapters
 
 import (
-	"strings"
-
 	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 )
@@ -33,19 +31,6 @@ func (deepSeekAdapter) Optimization() optimization.Options {
 }
 
 func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	if hasOpenVikingReadTool(req.Tools) && !hasDeepSeekToolBoundaryNote(req.Messages) {
-		req.Messages = append([]providers.ChatMessage{{
-			Role:    "system",
-			Content: deepSeekOpenVikingToolBoundaryNote,
-		}}, req.Messages...)
-	}
-	if name := ForcedToolName(req.ToolChoice); name != "" {
-		req.Messages = append([]providers.ChatMessage{{
-			Role:    "system",
-			Content: "The upstream DeepSeek thinking mode does not accept forced tool_choice. You must call the " + name + " tool in this turn unless the tool is unavailable.",
-		}}, req.Messages...)
-		req.ToolChoice = "auto"
-	}
 	req.Messages = repairToolPairing(req.Messages)
 	req = optimization.PrepareRequest(req, deepSeekAdapter{}.Optimization())
 	req = prepareChatPatchRequest(req)
@@ -59,8 +44,6 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 func (deepSeekAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
 	return defaultAdapter{}.PrepareResponseRequest(req)
 }
-
-const deepSeekOpenVikingToolBoundaryNote = "OPENVIKING_READ_TOOL_BOUNDARY: OpenViking memory read tools only read viking:// URIs. Do not pass file:// URLs or local filesystem paths to OpenViking read. Read local files, skills, and repository sources with the available local file or shell tools instead."
 
 func (deepSeekAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	return defaultAdapter{}.CustomToolDescription(tool)
@@ -79,38 +62,6 @@ func (deepSeekAdapter) NormalizePatchInput(input string) string {
 
 func (deepSeekAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
 	return defaultAdapter{}.FormatToolOutput(tool, output)
-}
-
-func hasOpenVikingReadTool(tools []providers.ChatTool) bool {
-	for _, tool := range tools {
-		name := strings.ToLower(tool.Function.Name)
-		description := strings.ToLower(tool.Function.Description)
-		if strings.Contains(name, "openviking") && name == "read" {
-			return true
-		}
-		if strings.Contains(name, "openviking") && strings.Contains(name, "read") {
-			return true
-		}
-		if strings.Contains(description, "openviking") && strings.Contains(name, "read") {
-			return true
-		}
-		if strings.Contains(description, "viking://") && strings.Contains(name, "read") {
-			return true
-		}
-	}
-	return false
-}
-
-func hasDeepSeekToolBoundaryNote(messages []providers.ChatMessage) bool {
-	for _, message := range messages {
-		if message.Role != "system" {
-			continue
-		}
-		if text, ok := message.Content.(string); ok && strings.Contains(text, "OPENVIKING_READ_TOOL_BOUNDARY") {
-			return true
-		}
-	}
-	return false
 }
 
 func repairToolPairing(messages []providers.ChatMessage) []providers.ChatMessage {

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"codex-bridge/internal/diagnostics"
 )
 
 const EnvPath = "CODEX_BRIDGE_DUMP_UPSTREAM_REQUEST"
@@ -39,7 +41,7 @@ func Write(requestID string, model string, profile string, body any) (string, er
 	if err != nil {
 		return "", err
 	}
-	name := safeName(time.Now().Format("20060102-150405.000") + "-" + requestID + "-" + model + "-" + profile + ".json")
+	name := diagnostics.SafeName(time.Now().Format("20060102-150405.000") + "-" + requestID + "-" + model + "-" + profile + ".json")
 	path := filepath.Join(dir, name)
 	return path, os.WriteFile(path, data, 0o600)
 }
@@ -51,16 +53,4 @@ func Hash(body any) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])
-}
-
-func safeName(name string) string {
-	var b strings.Builder
-	for _, r := range name {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
-			b.WriteRune(r)
-			continue
-		}
-		b.WriteByte('_')
-	}
-	return b.String()
 }

@@ -1,5 +1,7 @@
 # 排障
 
+诊断日志、会话级反查、本地构建和替换二进制的完整流程见 [诊断日志与本地调试](diagnostics-and-local-debug.md)。
+
 ## Codex 里看不到 bridge 模型
 
 启动 bridge：

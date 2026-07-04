@@ -12,6 +12,7 @@ Create, edit, move, and delete files only with codex_text_editor.
 For renames and moves, use codex_text_editor command=move_file. If the moved file also needs a small content edit, include exact old_str and new_str in that same move_file call.
 Never call shell for file mutations. Do not use shell commands, redirects, tee, sed -i, perl -pi, Python file writes, Node fs writes, rm, mv, or cp for source, document, or config file changes.
 Use shell only for reading files, searching, building, testing, formatting, and real project generators.
+Do not create temporary helper scripts or scratch files for read-only inspection. If the user says not to modify files, do not use codex_text_editor.
 If a file edit fails, inspect the current target lines with read-only shell commands, then send a smaller exact codex_text_editor edit.`
 
 type kimiAdapter struct{}
@@ -40,24 +41,11 @@ func (kimiAdapter) Optimization() optimization.Options {
 }
 
 func (kimiAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	if hasOpenVikingReadTool(req.Tools) && !hasDeepSeekToolBoundaryNote(req.Messages) {
-		req.Messages = append([]providers.ChatMessage{{
-			Role:    "system",
-			Content: deepSeekOpenVikingToolBoundaryNote,
-		}}, req.Messages...)
-	}
 	if hasTool(req.Tools, "codex_text_editor") && !hasKimiToolDisciplineNote(req.Messages) {
 		req.Messages = append([]providers.ChatMessage{{
 			Role:    "system",
 			Content: kimiToolDisciplineNote,
 		}}, req.Messages...)
-	}
-	if name := ForcedToolName(req.ToolChoice); name != "" {
-		req.Messages = append([]providers.ChatMessage{{
-			Role:    "system",
-			Content: "You must call the " + name + " tool in this turn unless the tool is unavailable.",
-		}}, req.Messages...)
-		req.ToolChoice = "auto"
 	}
 	req.Messages = repairToolPairing(req.Messages)
 	req = optimization.PrepareRequest(req, kimiAdapter{}.Optimization())

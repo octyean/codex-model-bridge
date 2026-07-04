@@ -39,6 +39,7 @@ type Adapter interface {
 
 type ToolPolicy struct {
 	BlockShellFileWrites bool
+	RequiredToolChoice   bool
 }
 
 type ToolDescriptor struct {
@@ -53,26 +54,6 @@ type ToolDescriptor struct {
 
 func DefaultToolOutput(_ ToolDescriptor, output string) string {
 	return output
-}
-
-func ForcedToolName(toolChoice any) string {
-	obj, ok := toolChoice.(map[string]any)
-	if !ok {
-		return ""
-	}
-	toolType, _ := obj["type"].(string)
-	if toolType != "function" {
-		return ""
-	}
-	if name, _ := obj["name"].(string); name != "" {
-		return name
-	}
-	function, ok := obj["function"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	name, _ := function["name"].(string)
-	return name
 }
 
 func Normalize(name string) string {
@@ -96,6 +77,10 @@ func Get(name string) Adapter {
 }
 
 func UseTextEditorForApplyPatch(adapter Adapter) bool {
+	return adapter.Name() != OpenAIName
+}
+
+func UseMCPResourceProxy(adapter Adapter) bool {
 	return adapter.Name() != OpenAIName
 }
 
