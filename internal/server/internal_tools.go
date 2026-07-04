@@ -76,17 +76,26 @@ func (s *Server) searchToolOutput(ctx context.Context, arguments string) string 
 	if url != "" {
 		text, err := s.runtime.Search.Read(ctx, url)
 		if err != nil {
-			return "Search read failed: " + err.Error()
+			return searchFailureOutput("search_read_failed", err)
 		}
 		return text
 	}
 	result, err := s.runtime.Search.Search(ctx, query, s.cfg.Capabilities.Search.MaxResults)
 	if err != nil {
-		return "Search failed: " + err.Error()
+		return searchFailureOutput("search_failed", err)
 	}
 	if result.RawText != "" {
 		return result.RawText
 	}
 	data, _ := json.Marshal(result.Items)
+	return string(data)
+}
+
+func searchFailureOutput(kind string, err error) string {
+	data, _ := json.Marshal(map[string]any{
+		"ok":      false,
+		"error":   kind,
+		"message": err.Error(),
+	})
 	return string(data)
 }

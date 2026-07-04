@@ -66,6 +66,39 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 
 排查模型映射问题时，重点对比 `model` 和 `upstream_model`。例如 Codex 侧选择 `gpt-5.3-codex`，实际发给上游可能是 `kimi-for-coding`。
 
+## Tool Runtime Broker
+
+`internal/toolruntime` 负责工具运行时治理。它不按工具名写黑名单，也不靠不断追加错误字符串挡问题，而是在 bridge 可控边界做三件事：
+
+- 对工具名、副作用和参数做能力画像，形成稳定的工具签名：`tool_key + capability + arguments_hash`。
+- `tool_key` 会归一 MCP 暴露名和短工具名，例如 `mcp_xxx__browser_navigate` 与 `browser_navigate` 会落到同一个工具身份。
+- 记录同一 Codex 会话内每次工具输出的签名、结果 hash、是否成功、是否产生进展。
+- 在模型下一次工具调用投射给 Codex 前判断：默认允许；同一签名已经失败且无进展，或同一响应内重复提交同一签名时，才停止重复调用。
+
+这个 Broker 不限制 MCP 的能力边界。未知工具默认允许，所有工具都走同一套签名账本。它不判断用户“该用哪个工具”，只阻止同一工具签名在没有进展后继续原样重放。停止时会通过本地 `exec_command` 回传结构化提示，要求模型换一个实质不同的动作。
+
+新增日志事件：
+
+| 事件 | 含义 |
+| --- | --- |
+| `tool_broker_decision` | Broker 对模型工具调用的运行时决策，包含 `action`、`reason`、`profiled_tool`、`progress_key` |
+| `runtime_outcome` | 工具输出观察结果，挂在 `tool_output` 中，包含 `ok`、`category`、`progress`、`output_hash` |
+
+排查工具重复调用时，优先看：
+
+```bash
+SESSION_ID="019fxxxx"
+LOG_DIR="$HOME/.codex-bridge/logs/sessions/$SESSION_ID"
+rg 'tool_broker_decision|runtime_outcome|TOOL_RUNTIME_NO_PROGRESS|progress_key|arguments_hash' "$LOG_DIR/tool-calls.jsonl"
+```
+
+判断口径：
+
+- `action=allow`：本次工具调用没有命中复用或无进展停止条件。
+- `action=stop`：同一工具签名已经失败且没有进展，继续重复会扩大循环。
+- `reason=same_tool_signature_failed_without_progress`：停止原因来自同一签名的历史失败，不来自工具名黑名单。
+- `reason=same_tool_signature_already_requested_in_response`：模型在同一响应里重复提交了相同工具签名，后续重复调用会被本地结果替代。
+
 ## 排查顺序
 
 拿到 Codex 会话 ID 后：

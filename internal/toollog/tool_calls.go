@@ -12,6 +12,7 @@ import (
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/diagnostics"
 	"codex-bridge/internal/incidentlog"
+	"codex-bridge/internal/toolruntime"
 	"codex-bridge/internal/tools"
 )
 
@@ -63,6 +64,14 @@ func RememberRequestSession(requestID string, sessionID string, model string, up
 		return
 	}
 	requestContexts.Store(requestID, requestContext{SessionID: sessionID, Model: model, UpstreamModel: upstreamModel})
+	toolruntime.RememberRequest(toolruntime.RequestContext{
+		RequestID:      requestID,
+		SessionID:      sessionID,
+		Model:          model,
+		UpstreamModel:  upstreamModel,
+		Profile:        profile,
+		RequestSummary: requestSummary,
+	})
 	path := ConfiguredPath()
 	if path == "" || sessionID == "" {
 		return
@@ -85,6 +94,7 @@ func RememberRequestSession(requestID string, sessionID string, model string, up
 
 func ForgetRequestSession(requestID string) {
 	requestContexts.Delete(requestID)
+	toolruntime.ForgetRequest(requestID)
 }
 
 func PatchToolCall(requestID string, callID string, entry tools.Entry, rawArguments string, item codex.ResponseItem) {
@@ -159,11 +169,36 @@ func ToolCallRerouted(requestID string, model string, profile string, callID str
 	appendRecord(record)
 }
 
+func BrokerDecision(requestID string, model string, profile string, callID string, entry tools.Entry, rawArguments string, decision toolruntime.Decision) {
+	record := map[string]any{
+		"time":          time.Now().Format(time.RFC3339Nano),
+		"event":         "tool_broker_decision",
+		"request_id":    requestID,
+		"model":         model,
+		"profile":       profile,
+		"call_id":       callID,
+		"tool":          entry.Name(),
+		"kind":          entry.Kind(),
+		"original_type": entry.OriginalType(),
+		"raw_arguments": rawArguments,
+		"action":        decision.Action,
+		"reason":        decision.Reason,
+		"profiled_tool": decision.Profile,
+	}
+	if decision.ProgressKey != "" {
+		record["progress_key"] = decision.ProgressKey
+	}
+	if decision.RetryCount > 0 {
+		record["retry_count"] = decision.RetryCount
+	}
+	if modelCall := rememberedToolCall(callID); modelCall != nil {
+		record["model_call"] = modelCall
+	}
+	appendRecord(record)
+}
+
 func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescriptor, rawArguments string, rawOutput string, formattedOutput string) {
 	modelCall := takeRememberedToolCall(callID)
-	if !shouldLogToolOutput(descriptor, rawArguments, rawOutput) {
-		return
-	}
 	if seenToolOutput(callID, rawOutput) {
 		return
 	}
@@ -171,8 +206,24 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 	if failureKind == adapters.PatchFailureNone {
 		failureKind = adapters.PatchFailureKind(adapters.ClassifyToolFailureWithArguments(descriptor, rawArguments, rawOutput))
 	}
-	if failureKind == adapters.PatchFailureNone && descriptor.Kind == tools.KindWebSearch && isWebSearchFailure(rawOutput) {
-		failureKind = adapters.PatchFailureKind("web_search_failed")
+	outcome := toolruntime.ObserveOutput(toolruntime.OutputContext{
+		RequestID: ctx.RequestID,
+		CallID:    callID,
+		Tool: toolruntime.ToolInfo{
+			Name:         descriptor.Name,
+			Kind:         descriptor.Kind,
+			OriginalType: descriptor.OriginalType,
+			Description:  descriptor.Description,
+			SideEffect:   descriptor.SideEffect,
+			Arguments:    rawArguments,
+		},
+		ModelCallTool: modelCallToolName(modelCall),
+		RawOutput:     rawOutput,
+		ToolFailed:    failureKind != adapters.PatchFailureNone,
+		FailureKind:   string(failureKind),
+	})
+	if !shouldLogToolOutput(descriptor, rawArguments, rawOutput, outcome) {
+		return
 	}
 	record := map[string]any{
 		"time":             time.Now().Format(time.RFC3339Nano),
@@ -185,6 +236,7 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 		"failure_kind":     failureKind,
 		"raw_output":       rawOutput,
 		"formatted_output": formattedOutput,
+		"runtime_outcome":  outcome,
 	}
 	if modelCall != nil {
 		record["model_call"] = modelCall
@@ -214,8 +266,11 @@ func shouldWriteIncident(failureKind adapters.PatchFailureKind) bool {
 	return failureKind != "" && failureKind != adapters.PatchFailureKind(adapters.ToolFailureMCPResourcesEmpty)
 }
 
-func shouldLogToolOutput(descriptor adapters.ToolDescriptor, rawArguments string, rawOutput string) bool {
-	return isPatchWriteKind(descriptor.Kind) || descriptor.Kind == tools.KindWebSearch || adapters.ClassifyToolFailureWithArguments(descriptor, rawArguments, rawOutput) != adapters.ToolFailureNone
+func shouldLogToolOutput(descriptor adapters.ToolDescriptor, rawArguments string, rawOutput string, outcome toolruntime.Outcome) bool {
+	return isPatchWriteKind(descriptor.Kind) ||
+		descriptor.Kind == tools.KindWebSearch ||
+		!outcome.OK ||
+		adapters.ClassifyToolFailureWithArguments(descriptor, rawArguments, rawOutput) != adapters.ToolFailureNone
 }
 
 func isPatchWriteKind(kind string) bool {
@@ -253,6 +308,16 @@ func takeRememberedToolCall(callID string) map[string]any {
 	return cloneRecord(record)
 }
 
+func modelCallToolName(record map[string]any) string {
+	if record == nil {
+		return ""
+	}
+	if value, _ := record["tool"].(string); strings.TrimSpace(value) != "" {
+		return value
+	}
+	return ""
+}
+
 func cloneRecord(record map[string]any) map[string]any {
 	if record == nil {
 		return nil
@@ -262,11 +327,6 @@ func cloneRecord(record map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
-}
-
-func isWebSearchFailure(output string) bool {
-	text := strings.TrimSpace(output)
-	return strings.HasPrefix(text, "Search failed:") || strings.HasPrefix(text, "Search read failed:")
 }
 
 func appendRecord(record map[string]any) {

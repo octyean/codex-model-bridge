@@ -15,6 +15,7 @@ import (
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/toollog"
+	"codex-bridge/internal/toolruntime"
 	"codex-bridge/internal/tools"
 )
 
@@ -229,6 +230,19 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 		}
 		arguments = rewritten
 	}
+	if decision := toolruntime.Decide(toolruntime.CallContext{
+		RequestID:          requestID,
+		Model:              model,
+		Profile:            profile,
+		CallID:             callID,
+		Tool:               runtimeToolInfo(entry, arguments),
+		CanReturnLocalText: toolCtx.Has("exec_command"),
+	}); decision.ShouldRecord {
+		toollog.BrokerDecision(requestID, model, profile, callID, entry, arguments, decision)
+		if decision.Action == toolruntime.DecisionStop {
+			return toolRuntimeLocalResultExecCommandCall(callID, decision.LocalText)
+		}
+	}
 	switch entry.Kind() {
 	case tools.KindCustom, tools.KindPatch, tools.KindTextEditor:
 		input := tools.ExtractCustomToolInput(entry, arguments, adapter)
@@ -314,6 +328,29 @@ func textEditorLocalResultExecCommandCall(callID string, input string) codex.Res
 		"name":      "exec_command",
 		"arguments": string(arguments),
 		"status":    "completed",
+	}
+}
+
+func toolRuntimeLocalResultExecCommandCall(callID string, input string) codex.ResponseItem {
+	arguments, _ := json.Marshal(map[string]string{"cmd": "printf '%s\\n' " + shellSingleQuote(input)})
+	return codex.ResponseItem{
+		"id":        toolItemID("function_call", callID),
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      "exec_command",
+		"arguments": string(arguments),
+		"status":    "completed",
+	}
+}
+
+func runtimeToolInfo(entry tools.Entry, arguments string) toolruntime.ToolInfo {
+	return toolruntime.ToolInfo{
+		Name:         entry.Name(),
+		Kind:         entry.Kind(),
+		OriginalType: entry.OriginalType(),
+		Description:  entry.Descriptor.Description,
+		SideEffect:   entry.Descriptor.SideEffect,
+		Arguments:    arguments,
 	}
 }
 

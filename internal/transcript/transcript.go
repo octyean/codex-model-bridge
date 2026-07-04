@@ -571,11 +571,16 @@ func outputToolDescriptorForCall(item map[string]any, call providers.ChatToolCal
 		descriptor.Kind = tools.KindToolSearch
 		descriptor.InputMode = tools.InputModeJSON
 		descriptor.SideEffect = tools.SideEffectRead
-	case "shell":
+	case "shell", "exec_command":
 		descriptor.Name = "shell"
 		descriptor.Kind = tools.KindShell
 		descriptor.InputMode = tools.InputModeAction
 		descriptor.SideEffect = tools.SideEffectExecute
+		if call.Function.Name == "exec_command" {
+			descriptor.Name = "exec_command"
+			descriptor.Kind = tools.KindFunction
+			descriptor.InputMode = tools.InputModeJSON
+		}
 	default:
 		if call.Function.Name != "" {
 			descriptor.Name = call.Function.Name
