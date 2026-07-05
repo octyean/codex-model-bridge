@@ -115,16 +115,14 @@ func hasPatchSystemInstruction(messages []providers.ChatMessage) bool {
 
 func textEditorToolDescription() string {
 	return strings.Join([]string{
-		"Edit files with the text editor tool.",
-		"Use command=create to create a new file with path and file_text/text.",
-		"Use command=str_replace to replace exact old_str with new_str in path. old_str must be copied exactly from the current file.",
-		"Use command=insert_after to insert text/new_str immediately after an exact insert_after anchor.",
-		"Use command=move_file to rename or move path to destination_path/new_path. destination_path must be the complete target file path including the file name, not only a directory. When the moved file content also needs a small edit, include exact old_str and replacement new_str in the same call.",
-		"Use command=delete_file to delete path.",
-		"Do not invent command names. Use only create, str_replace, insert_after, move_file, or delete_file.",
-		"Do not use this tool for temporary helper scripts, scratch files, or read-only inspection. If the user says not to modify files, do not call this tool.",
-		"Before str_replace or insert_after, inspect the target lines with read-only shell commands unless the current turn already contains the exact text.",
-		"If old_str or insert_after is not exact and unique, the edit will fail. Do not retry blindly; read the current file and send a smaller exact edit.",
+		"Claude-compatible text editor for reading and editing files.",
+		"Use command=view with path and optional view_range to inspect files before editing.",
+		"Use command=create with path and file_text to create a new file.",
+		"Use command=str_replace with path, old_str, and new_str to replace exact existing text. old_str must be copied exactly from the current file.",
+		"Use command=insert with path, insert_line, and insert_text to insert text after a line number; insert_line=0 inserts at the beginning.",
+		"Do not invent command names. Use only view, create, str_replace, or insert.",
+		"Do not use this tool for temporary helper scripts or scratch files. If the user says not to modify files, only use view.",
+		"If old_str is not exact and unique, the edit will fail. Do not retry blindly; view the current file and send a smaller exact edit.",
 		"If the result says TEXT_EDITOR_ALREADY_APPLIED, do not repeat that same edit; verify current file content, then edit a different missing change or summarize.",
 		"Use this editor tool for file writes.",
 	}, "\n")

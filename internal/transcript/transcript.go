@@ -57,6 +57,8 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	if err != nil {
 		return Result{}, err
 	}
+	_, toolCtx := tools.FromCodex(req.Tools, adapter)
+	tools.FromAdditionalTools(items, adapter, &toolCtx)
 	var pendingToolCalls []providers.ChatToolCall
 	pendingReasoning := ""
 	toolCallsByID := map[string]providers.ChatToolCall{}
@@ -83,7 +85,7 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				Content: contentParts(ctx, item["content"], allowImage, runtime),
 			})
 		case "function_call":
-			call := functionToolCall(item)
+			call := functionToolCall(item, toolCtx)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "custom_tool_call":
@@ -143,14 +145,28 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output", "shell_call_output", "local_shell_call_output":
+			callID, _ := item["call_id"].(string)
+			rawOutput := outputText(item)
+			if toolName, toolArguments, output, ok := tools.ParseRuntimeLocalResultEnvelope(rawOutput); ok {
+				entry := toolCtx.Entry(toolName)
+				call := providers.ChatToolCall{
+					ID:   callID,
+					Type: "function",
+					Function: providers.ChatCallFunction{
+						Name:      toolName,
+						Arguments: tools.ModelHistoryArguments(entry, toolArguments),
+					},
+				}
+				toolCallsByID[callID] = call
+				replacePendingToolCall(pendingToolCalls, call)
+				rawOutput = output
+			}
 			if len(pendingToolCalls) > 0 {
 				messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
 				pendingToolCalls = nil
 				pendingReasoning = ""
 			}
-			callID, _ := item["call_id"].(string)
 			if call, ok := hiddenFileEditCalls[callID]; ok {
-				rawOutput := outputText(item)
 				messages = append(messages, providers.ChatMessage{Role: "system", Content: hiddenTextEditorHistoryOutputSummary(rawOutput, call)})
 				continue
 			}
@@ -159,7 +175,6 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				descriptor = outputToolDescriptorForCall(item, call)
 			}
 			descriptor = adapterOutputToolDescriptor(adapter, descriptor)
-			rawOutput := outputText(item)
 			rawArguments := ""
 			if call, ok := toolCallsByID[callID]; ok {
 				rawArguments = call.Function.Arguments
@@ -202,9 +217,18 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	return Result{Messages: messages, Items: items}, nil
 }
 
+func replacePendingToolCall(calls []providers.ChatToolCall, replacement providers.ChatToolCall) {
+	for i := range calls {
+		if calls[i].ID == replacement.ID {
+			calls[i] = replacement
+			return
+		}
+	}
+}
+
 func adapterOutputToolDescriptor(adapter adapters.Adapter, descriptor adapters.ToolDescriptor) adapters.ToolDescriptor {
 	if adapters.UseTextEditorForApplyPatch(adapter) && descriptor.Name == "apply_patch" && descriptor.Kind == tools.KindPatch {
-		descriptor.Name = "codex_text_editor"
+		descriptor.Name = tools.TextEditorToolName
 		descriptor.Kind = tools.KindTextEditor
 		descriptor.InputMode = tools.InputModeJSON
 	}
@@ -355,10 +379,12 @@ func imageAnalysisText(ctx context.Context, obj map[string]any, runtime capabili
 	return strings.TrimSpace(result.Text)
 }
 
-func functionToolCall(item map[string]any) providers.ChatToolCall {
+func functionToolCall(item map[string]any, toolCtx tools.Context) providers.ChatToolCall {
 	name, _ := item["name"].(string)
+	namespace, _ := item["namespace"].(string)
 	callID, _ := item["call_id"].(string)
 	arguments, _ := item["arguments"].(string)
+	name, arguments = tools.NativeHistoryFunctionCall(name, namespace, arguments, toolCtx)
 	return providers.ChatToolCall{
 		ID:   callID,
 		Type: "function",
@@ -413,7 +439,7 @@ func textEditorHistoryToolCall(callID string, input string) (providers.ChatToolC
 		ID:   callID,
 		Type: "function",
 		Function: providers.ChatCallFunction{
-			Name:      "codex_text_editor",
+			Name:      tools.TextEditorToolName,
 			Arguments: arguments,
 		},
 	}, true
@@ -561,8 +587,8 @@ func outputToolDescriptorForCall(item map[string]any, call providers.ChatToolCal
 		descriptor.Kind = tools.KindPatch
 		descriptor.InputMode = tools.InputModeFreeform
 		descriptor.SideEffect = tools.SideEffectWriteFiles
-	case "codex_text_editor":
-		descriptor.Name = "codex_text_editor"
+	case tools.TextEditorToolName, "codex_text_editor":
+		descriptor.Name = tools.TextEditorToolName
 		descriptor.Kind = tools.KindTextEditor
 		descriptor.InputMode = tools.InputModeJSON
 		descriptor.SideEffect = tools.SideEffectWriteFiles

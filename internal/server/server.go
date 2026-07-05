@@ -53,13 +53,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.19"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.20"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.19",
+		"version": "0.2.20",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -112,6 +112,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestSummary := incidentlog.RequestSummary(req.Raw)
+	workspace := incidentlog.CodexWorkspace(req.Raw, r.Header)
 	toollog.RememberRequestSession(requestID, incidentlog.CodexSessionID(req.Raw, r.Header), req.Model, modelCfg.UpstreamModel, profileName, requestSummary)
 	defer toollog.ForgetRequestSession(requestID)
 	dumpPath := ""
@@ -137,6 +138,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chatTools, toolCtx := tools.FromCodex(req.Tools, adapter)
+	toolCtx.Workspace = workspace
 	chatTools = append(chatTools, tools.FromAdditionalTools(transcriptResult.Items, adapter, &toolCtx)...)
 	if s.hasInternalTools(req) {
 		chatTools = tools.AddWebSearchProxy(chatTools, &toolCtx)
@@ -155,7 +157,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Stream:         req.Stream,
 	}
 	if req.ParallelToolCalls && !toolCtx.IsEmpty() {
-		enabled := !toolCtx.HasFileWriteTool()
+		enabled := !toolCtx.HasFileWriteTool() && !s.hasInternalTools(req)
 		chatReq.ParallelToolCalls = &enabled
 	}
 	chatReq = adapter.PrepareChatRequest(chatReq)
@@ -229,7 +231,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items := responseItemsFromMessage(resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger)
+	items := responseItemsFromMessage(r.Context(), resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger, s.localToolResultResolver(toollog.OutputContext{
+		RequestID:      requestID,
+		Model:          req.Model,
+		UpstreamModel:  modelCfg.UpstreamModel,
+		Profile:        profileName,
+		RequestSummary: requestSummary,
+	}, toolCtx))
 	usage := providers.NormalizeUsage(resp.Usage)
 	if emptyOutput(items) {
 		incidentlog.Write("empty_chat_response", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "output": outputSummary(items, usage)}))
@@ -415,7 +423,13 @@ streamOpened:
 		},
 	})
 
-	state := newStreamState(toolCtx, adapter, requestID, req.Model, profile, s.logger)
+	state := newStreamState(r.Context(), toolCtx, adapter, requestID, req.Model, profile, s.logger, s.localToolResultResolver(toollog.OutputContext{
+		RequestID:      requestID,
+		Model:          req.Model,
+		UpstreamModel:  chatReq.Model,
+		Profile:        profile,
+		RequestSummary: incidentlog.RequestSummary(req.Raw),
+	}, toolCtx))
 	var usage providers.NormalizedUsage
 	firstChunk := true
 	for event := range stream {

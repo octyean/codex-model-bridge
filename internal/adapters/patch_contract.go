@@ -48,6 +48,10 @@ const (
 	ToolFailureMCPResourceReadFailed    ToolFailureKind = "mcp_resource_read_failed"
 	ToolFailureMCPResourcesEmpty        ToolFailureKind = "mcp_resources_empty"
 	ToolFailureToolSearchEmpty          ToolFailureKind = "tool_search_empty"
+	ToolFailureRuntimeNoProgress        ToolFailureKind = "runtime_no_progress"
+	ToolFailureSchemaValidation         ToolFailureKind = "schema_validation_error"
+	ToolFailureExecutionError           ToolFailureKind = "tool_execution_error"
+	ToolFailureStructuredFailure        ToolFailureKind = "structured_failure"
 )
 
 func NormalizePatchInput(input string) string {
@@ -64,8 +68,15 @@ func NormalizePatchInput(input string) string {
 }
 
 func ClassifyPatchFailure(output string) PatchFailureKind {
+	if textEditorViewSucceeded(output) {
+		return PatchFailureNone
+	}
 	text := strings.ToLower(output)
 	switch {
+	case strings.Contains(text, "text_editor_view_path_missing"):
+		return PatchFailurePathError
+	case strings.Contains(text, "text_editor_view_invalid_range"), strings.Contains(text, "text_editor_view_failed"):
+		return PatchFailureUnknown
 	case strings.Contains(text, "apply_patch_succeeded"),
 		strings.Contains(text, "text_editor_edit_succeeded"),
 		strings.Contains(text, "file_edit_state: completed"):
@@ -105,6 +116,10 @@ func ClassifyPatchFailure(output string) PatchFailureKind {
 	}
 }
 
+func textEditorViewSucceeded(output string) bool {
+	return strings.Contains(output, "TEXT_EDITOR_VIEW_RESULT")
+}
+
 func ClassifyToolFailure(tool ToolDescriptor, output string) ToolFailureKind {
 	return ClassifyToolFailureWithArguments(tool, "", output)
 }
@@ -112,6 +127,16 @@ func ClassifyToolFailure(tool ToolDescriptor, output string) ToolFailureKind {
 func ClassifyToolFailureWithArguments(tool ToolDescriptor, arguments string, output string) ToolFailureKind {
 	trimmed := strings.TrimSpace(output)
 	lower := strings.ToLower(trimmed)
+	switch {
+	case diagnosticMarkerLine(trimmed, "TOOL_RUNTIME_NO_PROGRESS"):
+		return ToolFailureRuntimeNoProgress
+	case toolSchemaValidationFailure(trimmed):
+		return ToolFailureSchemaValidation
+	case toolExecutionFailure(trimmed):
+		return ToolFailureExecutionError
+	case structuredToolFailure(trimmed):
+		return ToolFailureStructuredFailure
+	}
 	switch tool.Name {
 	case "read_mcp_resource":
 		switch {
@@ -136,6 +161,99 @@ func ClassifyToolFailureWithArguments(tool ToolDescriptor, arguments string, out
 	return ToolFailureNone
 }
 
+func diagnosticMarkerLine(output string, marker string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		text := strings.TrimSpace(line)
+		if text == marker || strings.HasPrefix(text, marker+"_") {
+			return true
+		}
+	}
+	return false
+}
+
+func toolSchemaValidationFailure(output string) bool {
+	text := strings.ToLower(toolFailureText(output))
+	return strings.Contains(text, "validation error for ") ||
+		strings.Contains(text, "validation errors for ")
+}
+
+func toolExecutionFailure(output string) bool {
+	text := strings.ToLower(toolFailureText(output))
+	return strings.Contains(text, "error executing tool") ||
+		strings.Contains(text, "tool execution failed")
+}
+
+func structuredToolFailure(output string) bool {
+	for _, candidate := range structuredToolFailureCandidates(output) {
+		var value any
+		if err := json.Unmarshal([]byte(candidate), &value); err == nil && structuredFailureValue(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func structuredToolFailureCandidates(output string) []string {
+	trimmed := strings.TrimSpace(output)
+	candidates := []string{trimmed}
+	if _, body, ok := strings.Cut(trimmed, "Output:"); ok {
+		candidates = append(candidates, strings.TrimSpace(body))
+	}
+	return candidates
+}
+
+func structuredFailureValue(value any) bool {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	if value, ok := boolField(obj, "success"); ok && !value && hasFailureDetail(obj) {
+		return true
+	}
+	if value, ok := boolField(obj, "ok"); ok && !value && hasFailureDetail(obj) {
+		return true
+	}
+	if value, ok := boolField(obj, "isError"); ok && value {
+		return true
+	}
+	if value, ok := boolField(obj, "is_error"); ok && value {
+		return true
+	}
+	for _, key := range []string{"result", "error"} {
+		nested, ok := obj[key].(string)
+		if !ok {
+			continue
+		}
+		var nestedValue any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(nested)), &nestedValue); err == nil && structuredFailureValue(nestedValue) {
+			return true
+		}
+	}
+	return false
+}
+
+func boolField(obj map[string]any, key string) (bool, bool) {
+	value, ok := obj[key].(bool)
+	return value, ok
+}
+
+func hasFailureDetail(obj map[string]any) bool {
+	for _, key := range []string{"error", "message", "reason", "stderr", "code"} {
+		if value, ok := obj[key]; ok && value != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func toolFailureText(output string) string {
+	parts := []string{output}
+	if _, body, ok := strings.Cut(output, "Output:"); ok {
+		parts = append(parts, body)
+	}
+	return strings.Join(parts, "\n")
+}
+
 func FormatToolOutputWithArguments(adapter Adapter, tool ToolDescriptor, arguments string, output string) string {
 	if recovery := ToolRecoveryText(ClassifyToolFailureWithArguments(tool, arguments, output)); recovery != "" {
 		return output + "\n\n" + recovery
@@ -157,6 +275,14 @@ func ToolRecoveryText(kind ToolFailureKind) string {
 		return "MCP_RESOURCES_EMPTY\nrequired_next_action: stop_mcp_resource_reading_or_use_non_resource_tools\nforbidden_next_action: guess_server_names_or_resource_uris\nrecovery: there are no listed MCP resources in this result. MCP tools may still exist; discover callable MCP tools with tool_search, not read_mcp_resource."
 	case ToolFailureToolSearchEmpty:
 		return "TOOL_SEARCH_EMPTY\nrequired_next_action: revise_tool_search_query_or_use_existing_visible_tools\nforbidden_next_action: use_mcp_resources_as_tool_discovery_or_invent_tool_names\nrecovery: tool_search found no matching callable tools for this query. Do not switch to list_mcp_resources/read_mcp_resource to discover tools; use already visible tools, narrow/broaden the tool_search query, or proceed with shell/read-only inspection when appropriate."
+	case ToolFailureRuntimeNoProgress:
+		return "TOOL_RUNTIME_NO_PROGRESS_CONFIRMED\nrequired_next_action: stop_retrying_the_same_tool_call_and_choose_a_materially_different_action\nforbidden_next_action: execute_or_echo_the_runtime_diagnostic_text\nrecovery: the bridge has already determined that this tool action made no progress. Do not call a shell command to print this message; use another available tool or continue from existing context."
+	case ToolFailureSchemaValidation:
+		return "TOOL_SCHEMA_VALIDATION_ERROR\nrequired_next_action: regenerate_arguments_from_the_visible_tool_schema_or_use_a_different_tool\nforbidden_next_action: retry_same_arguments_or_wrap_unwrap_fields_blindly\nrecovery: the tool rejected the argument shape. Re-read the visible tool schema, then call the same tool only with a materially corrected argument object."
+	case ToolFailureExecutionError:
+		return "TOOL_EXECUTION_ERROR\nrequired_next_action: inspect_the_error_and_choose_a_materially_different_action\nforbidden_next_action: repeat_same_tool_arguments_without_new_information\nrecovery: the tool runtime failed after invocation. Retry only when the next call changes the failed precondition, target, or argument shape."
+	case ToolFailureStructuredFailure:
+		return "TOOL_STRUCTURED_FAILURE\nrequired_next_action: treat_success_false_ok_false_or_isError_true_as_a_failed_tool_result\nforbidden_next_action: assume_the_tool_succeeded_from_json_presence_alone\nrecovery: the returned structured payload says the operation failed. Continue only after changing tool, target, or arguments."
 	default:
 		return ""
 	}
@@ -341,9 +467,9 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 func TextEditorRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines. If the requested content is already present, stop editing and summarize; otherwise send a smaller text editor edit using exact current old_str or insert_after text.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
+		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines with command=view. If the requested content is already present, stop editing and summarize; otherwise send a smaller text editor edit using exact current old_str or insert_line.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
 	case PatchFailureMalformedPatch, PatchFailureInvalidHunk, PatchFailureReadFileOperation:
-		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: use command=create, str_replace, insert_after, move_file, or delete_file with exact JSON arguments."
+		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: use command=view, create, str_replace, or insert with exact JSON arguments."
 	case PatchFailureAlreadyApplied:
 		return "TEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit\nrecovery: the requested content is already present. Do not send the same text editor edit again; inspect current file content, then edit a different missing change or summarize."
 	case PatchFailurePathError:

@@ -27,6 +27,12 @@ const (
 	SideEffectRead       = "read"
 	SideEffectWriteFiles = "write_files"
 	SideEffectExecute    = "execute"
+
+	ArgumentModeIdentity      = "identity"
+	ArgumentModeKwargs        = "kwargs_envelope"
+	SchemaQualityStrong       = "strong"
+	SchemaQualityOpenObject   = "open_object"
+	SchemaQualityEnvelopeOnly = "envelope_only"
 )
 
 var (
@@ -34,13 +40,17 @@ var (
 )
 
 type Context struct {
-	Tools map[string]Entry
+	Tools     map[string]Entry
+	Workspace string
 }
 
 type Entry struct {
-	Descriptor   adapters.ToolDescriptor
-	Namespace    string
-	UpstreamName string
+	Descriptor    adapters.ToolDescriptor
+	Namespace     string
+	UpstreamName  string
+	PseudoKwargs  bool
+	ArgumentMode  string
+	SchemaQuality string
 }
 
 func (e Entry) Name() string {
@@ -60,6 +70,21 @@ func (e Entry) OriginalName() string {
 
 func (e Entry) OriginalType() string {
 	return e.Descriptor.OriginalType
+}
+
+func (e Entry) Transformer() string {
+	if e.PseudoKwargs {
+		return "pseudo_kwargs"
+	}
+	return "identity"
+}
+
+func (e Entry) ContractID() string {
+	parts := []string{e.Name(), e.ArgumentMode, e.SchemaQuality}
+	if e.Namespace != "" {
+		parts = append([]string{e.Namespace}, parts...)
+	}
+	return strings.Join(parts, "|")
 }
 
 func FromCodex(responseTools []codex.ResponseTool, adapter adapters.Adapter) ([]providers.ChatTool, Context) {
@@ -205,6 +230,7 @@ func convertFunction(tool codex.ResponseTool, adapter adapters.Adapter, namespac
 	description = mcpResourceToolDescription(name, description)
 	entry := newEntry(name, kind, InputModeJSON, SideEffectNone, "function", description, tool.Raw)
 	entry.Namespace = namespace
+	entry.SchemaQuality = schemaQuality(params)
 	return []convertedTool{chatFunction(entry, params)}
 }
 
@@ -235,7 +261,26 @@ func newEntry(name string, kind string, inputMode string, sideEffect string, ori
 		OriginalType: originalType,
 		Description:  description,
 		Raw:          raw,
-	}}
+	}, ArgumentMode: ArgumentModeIdentity, SchemaQuality: SchemaQualityStrong}
+}
+
+func schemaQuality(parameters json.RawMessage) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(parameters, &obj); err != nil {
+		return SchemaQualityOpenObject
+	}
+	propertiesRaw, ok := obj["properties"]
+	if !ok {
+		return SchemaQualityOpenObject
+	}
+	var properties map[string]json.RawMessage
+	if err := json.Unmarshal(propertiesRaw, &properties); err != nil {
+		return SchemaQualityOpenObject
+	}
+	if len(properties) == 0 {
+		return SchemaQualityOpenObject
+	}
+	return SchemaQualityStrong
 }
 
 func responseToolFromMap(toolMap map[string]any) (codex.ResponseTool, bool) {

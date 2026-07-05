@@ -6,6 +6,7 @@ import (
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
+	"codex-bridge/internal/incidentlog"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/tools"
@@ -48,11 +49,13 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 	if len(message.ToolCalls) == 0 {
 		return providers.ChatCompletionRequest{}, false
 	}
-	var outputs []providers.ChatMessage
 	for _, call := range message.ToolCalls {
 		if call.Function.Name != tools.WebSearchProxyToolName {
 			return providers.ChatCompletionRequest{}, false
 		}
+	}
+	var outputs []providers.ChatMessage
+	for _, call := range message.ToolCalls {
 		output := s.searchToolOutput(ctx, call.Function.Arguments)
 		toollog.ToolOutput(logCtx, call.ID, adapters.ToolDescriptor{
 			Name:         tools.WebSearchProxyToolName,
@@ -69,6 +72,47 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 	followUp.ToolChoice = "auto"
 	followUp.Messages = append(append(followUp.Messages, message), outputs...)
 	return followUp, true
+}
+
+func (s *Server) localToolResultResolver(logCtx toollog.OutputContext, toolCtx tools.Context) toolCallLocalResolver {
+	return func(ctx context.Context, callID string, entry tools.Entry, _ string, canonicalArguments string, _ string) (codex.ResponseItem, bool) {
+		if entry.Kind() != tools.KindWebSearch {
+			return nil, false
+		}
+		output := s.searchToolOutput(ctx, canonicalArguments)
+		toollog.ToolOutput(logCtx, callID, entry.Descriptor, canonicalArguments, output, output)
+		if toolCtx.Has("exec_command") {
+			item := toolRuntimeLocalResultExecCommandCall(callID, entry, canonicalArguments, output)
+			toollog.ToolCallRerouted(logCtx.RequestID, logCtx.Model, logCtx.Profile, callID, entry, canonicalArguments, "exec_command", item["arguments"].(string), "server_executed_internal_tool")
+			return item, true
+		}
+		record := map[string]any{
+			"request_id":     logCtx.RequestID,
+			"model":          logCtx.Model,
+			"upstream_model": logCtx.UpstreamModel,
+			"profile":        logCtx.Profile,
+			"call_id":        callID,
+			"tool":           entry.Name(),
+			"kind":           entry.Kind(),
+			"arguments":      canonicalArguments,
+			"reason":         "exec_command_unavailable_for_internal_tool_result",
+		}
+		if len(logCtx.RequestSummary) > 0 {
+			record["request_summary"] = logCtx.RequestSummary
+		}
+		incidentlog.Write("internal_tool_transport_missing", record)
+		return codex.ResponseItem{
+			"id":   toolItemID("function_call", callID),
+			"type": "message",
+			"role": "assistant",
+			"content": []map[string]string{{
+				"type": "output_text",
+				"text": "CODEX_BRIDGE_INTERNAL_TOOL_ERROR\n" +
+					"tool: " + entry.Name() + "\n" +
+					"reason: exec_command_unavailable_for_internal_tool_result",
+			}},
+		}, true
+	}
 }
 
 func (s *Server) searchToolOutput(ctx context.Context, arguments string) string {

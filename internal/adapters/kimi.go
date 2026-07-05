@@ -8,12 +8,13 @@ import (
 )
 
 const kimiToolDisciplineNote = `KIMI_CODEX_TOOL_DISCIPLINE
-Create, edit, move, and delete files only with codex_text_editor.
-For renames and moves, use codex_text_editor command=move_file. If the moved file also needs a small content edit, include exact old_str and new_str in that same move_file call.
+Read and edit files with str_replace_based_edit_tool.
+Use command=view before editing unless the exact current text is already present in the conversation.
+Use command=create for new files, command=str_replace for exact replacements, and command=insert for line-based inserts.
 Never call shell for file mutations. Do not use shell commands, redirects, tee, sed -i, perl -pi, Python file writes, Node fs writes, rm, mv, or cp for source, document, or config file changes.
 Use shell only for reading files, searching, building, testing, formatting, and real project generators.
-Do not create temporary helper scripts or scratch files for read-only inspection. If the user says not to modify files, do not use codex_text_editor.
-If a file edit fails, inspect the current target lines with read-only shell commands, then send a smaller exact codex_text_editor edit.`
+Do not create temporary helper scripts or scratch files for read-only inspection. If the user says not to modify files, only use command=view.
+If a file edit fails, inspect the current target lines with command=view or read-only shell commands, then send a smaller exact edit.`
 
 type kimiAdapter struct{}
 
@@ -41,7 +42,7 @@ func (kimiAdapter) Optimization() optimization.Options {
 }
 
 func (kimiAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	if hasTool(req.Tools, "codex_text_editor") && !hasKimiToolDisciplineNote(req.Messages) {
+	if hasTool(req.Tools, "str_replace_based_edit_tool") && !hasKimiToolDisciplineNote(req.Messages) {
 		req.Messages = append([]providers.ChatMessage{{
 			Role:    "system",
 			Content: kimiToolDisciplineNote,
@@ -58,7 +59,7 @@ func (kimiAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) provi
 }
 
 func (kimiAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
-	if responseHasTool(req, "codex_text_editor") && !responseInstructionsContain(req, "KIMI_CODEX_TOOL_DISCIPLINE") {
+	if responseHasTool(req, "str_replace_based_edit_tool") && !responseInstructionsContain(req, "KIMI_CODEX_TOOL_DISCIPLINE") {
 		prependResponseInstructions(req, kimiToolDisciplineNote)
 	}
 	return req

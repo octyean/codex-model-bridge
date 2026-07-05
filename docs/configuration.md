@@ -134,7 +134,7 @@ apply_patch_tool_type = "freeform"
 - `kimi`
 
 `default` 适合普通 OpenAI-compatible 模型。`deepseek` 适合 DeepSeek 这类对工具调用和补丁格式更挑剔的模型。
-`kimi` 适合 Kimi for Coding，会把文件编辑约束到 `codex_text_editor`，避免模型退回 shell 写文件。
+`kimi` 适合 Kimi for Coding，会把文件编辑约束到 Claude 兼容的 `str_replace_based_edit_tool`，避免模型退回 shell 写文件。
 
 ## 自动发现模型
 

@@ -59,6 +59,9 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 | `tool` | 模型选择的工具名 |
 | `kind` | bridge 归一后的工具类型 |
 | `raw_arguments` | 模型原始工具参数 |
+| `contract_id` | bridge 暴露给 Chat 模型的工具合同标识 |
+| `argument_mode` | 参数模式，如 `identity`、`kwargs_envelope` |
+| `schema_quality` | 模型侧 schema 质量，如 `strong`、`open_object`、`envelope_only` |
 | `model_call` | 工具失败、改写或改道时挂回的模型原始工具调用 |
 | `failure_kind` | 已识别的失败类型，如 `context_mismatch`、`tool_search_empty` |
 | `request_summary` | 请求摘要，包含最后一段用户提示词预览和 hash |
@@ -71,16 +74,26 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 `internal/toolruntime` 负责工具运行时治理。它不按工具名写黑名单，也不靠不断追加错误字符串挡问题，而是在 bridge 可控边界做三件事：
 
 - 对工具名、副作用和参数做能力画像，形成稳定的工具签名：`tool_key + capability + arguments_hash`。
-- `tool_key` 会归一 MCP 暴露名和短工具名，例如 `mcp_xxx__browser_navigate` 与 `browser_navigate` 会落到同一个工具身份。
+- 工具参数先进入 bridge 的语义参数层，再生成真实执行参数。排查时重点看 `tool_call_frame` 里的 `model_arguments`、`canonical_arguments` 和 `runtime_arguments`。
+- namespace MCP 工具会先编译成 Chat Completions function 合同。只有 `kwargs` 内部 schema 足够明确时，bridge 才把参数提升为 top-level 字段；如果原始 schema 只有 `kwargs:{}` 这类弱合同，模型侧会看到必填 `kwargs` object，避免把弱 schema 伪装成空顶层参数。
 - 记录同一 Codex 会话内每次工具输出的签名、结果 hash、是否成功、是否产生进展。
 - 在模型下一次工具调用投射给 Codex 前判断：默认允许；同一签名已经失败且无进展，或同一响应内重复提交同一签名时，才停止重复调用。
 
-这个 Broker 不限制 MCP 的能力边界。未知工具默认允许，所有工具都走同一套签名账本。它不判断用户“该用哪个工具”，只阻止同一工具签名在没有进展后继续原样重放。停止时会通过本地 `exec_command` 回传结构化提示，要求模型换一个实质不同的动作。
+这个 Broker 不限制 MCP 或 Responses 原生工具的能力边界。未知工具默认允许，所有工具都走同一套签名账本。它不判断用户“该用哪个工具”，只阻止同一工具签名在没有进展后继续原样重放。停止时，bridge 会让 Codex 侧执行一个本地载体命令，但在上游 Chat 历史里会还原成“原工具调用 + 原工具结果”，避免模型把 `exec_command` 当成下一步策略。
+
+Chat fallback 的工具适配边界：
+
+| 工具来源 | OpenAI Responses 直转 | Chat fallback |
+| --- | --- | --- |
+| `function`、`custom`、`apply_patch`、`tool_search`、`local_shell`、namespace MCP function | 由上游 Responses 协议处理 | bridge 转换为 Chat tools，再投射回 Codex Responses item |
+| MCP resource proxy、bridge 内置 `web_search` proxy | 不需要直转 | bridge 转成本地可执行工具或代理工具 |
+| `file_search`、`computer`、`image_generation`、`code_interpreter` 等 hosted tools | 上游支持时原样直转 | 不能在 Chat fallback 中凭空执行，只能记录为 unsupported 并提示可替代路径 |
 
 新增日志事件：
 
 | 事件 | 含义 |
 | --- | --- |
+| `tool_call_frame` | 工具调用三视图，包含 `model_arguments`、`canonical_arguments`、`runtime_arguments`、`transformer`、`argument_mode`、`schema_quality` |
 | `tool_broker_decision` | Broker 对模型工具调用的运行时决策，包含 `action`、`reason`、`profiled_tool`、`progress_key` |
 | `runtime_outcome` | 工具输出观察结果，挂在 `tool_output` 中，包含 `ok`、`category`、`progress`、`output_hash` |
 
@@ -89,7 +102,7 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 ```bash
 SESSION_ID="019fxxxx"
 LOG_DIR="$HOME/.codex-bridge/logs/sessions/$SESSION_ID"
-rg 'tool_broker_decision|runtime_outcome|TOOL_RUNTIME_NO_PROGRESS|progress_key|arguments_hash' "$LOG_DIR/tool-calls.jsonl"
+rg 'tool_call_frame|tool_broker_decision|runtime_outcome|TOOL_RUNTIME_NO_PROGRESS|progress_key|arguments_hash|schema_quality|argument_mode' "$LOG_DIR/tool-calls.jsonl"
 ```
 
 判断口径：
@@ -98,6 +111,9 @@ rg 'tool_broker_decision|runtime_outcome|TOOL_RUNTIME_NO_PROGRESS|progress_key|a
 - `action=stop`：同一工具签名已经失败且没有进展，继续重复会扩大循环。
 - `reason=same_tool_signature_failed_without_progress`：停止原因来自同一签名的历史失败，不来自工具名黑名单。
 - `reason=same_tool_signature_already_requested_in_response`：模型在同一响应里重复提交了相同工具签名，后续重复调用会被本地结果替代。
+- `argument_mode=kwargs_envelope`：bridge 会把模型参数归一成 canonical 参数，再按工具合同生成真实执行参数。
+- `schema_quality=strong`：模型侧 schema 有明确字段；`schema_quality=envelope_only`：原始 MCP 工具只有弱 `kwargs` 合同，模型侧会保留必填 `kwargs` object。
+- `transformer=pseudo_kwargs`：模型侧可能看到 `kwargs` envelope；bridge 会先归一为 canonical 参数，再生成 Codex/MCP runtime 使用的真实参数。`schema_quality=envelope_only` 的历史回放会包回 `kwargs`，runtime 执行侧不再包 `kwargs`。如果仍出现 `kwargs Field required`，优先检查 `model_arguments`、`canonical_arguments`、`runtime_arguments` 三者是否混用。
 
 ## 排查顺序
 

@@ -49,6 +49,7 @@ func ToolCall(requestID string, model string, profile string, callID string, ent
 		"original_type": entry.OriginalType(),
 		"raw_arguments": rawArguments,
 	}
+	addEntryContract(record, entry)
 	if strings.TrimSpace(reasoning) != "" {
 		record["reasoning"] = incidentlog.TextSummary(reasoning)
 	}
@@ -140,6 +141,7 @@ func BlockedToolRewrite(requestID string, model string, profile string, callID s
 		"rewritten_arguments": rewrittenArguments,
 		"reason":              "shell_file_mutation_blocked",
 	}
+	addEntryContract(record, entry)
 	if modelCall := rememberedToolCall(callID); modelCall != nil {
 		record["model_call"] = modelCall
 	}
@@ -163,6 +165,30 @@ func ToolCallRerouted(requestID string, model string, profile string, callID str
 		"target_arguments": targetArguments,
 		"reason":           reason,
 	}
+	addEntryContract(record, entry)
+	if modelCall := rememberedToolCall(callID); modelCall != nil {
+		record["model_call"] = modelCall
+	}
+	appendRecord(record)
+}
+
+func ToolCallFrame(requestID string, model string, profile string, callID string, entry tools.Entry, modelArguments string, canonicalArguments string, runtimeArguments string) {
+	record := map[string]any{
+		"time":                time.Now().Format(time.RFC3339Nano),
+		"event":               "tool_call_frame",
+		"request_id":          requestID,
+		"model":               model,
+		"profile":             profile,
+		"call_id":             callID,
+		"tool":                entry.Name(),
+		"kind":                entry.Kind(),
+		"original_type":       entry.OriginalType(),
+		"transformer":         entry.Transformer(),
+		"model_arguments":     modelArguments,
+		"canonical_arguments": canonicalArguments,
+		"runtime_arguments":   runtimeArguments,
+	}
+	addEntryContract(record, entry)
 	if modelCall := rememberedToolCall(callID); modelCall != nil {
 		record["model_call"] = modelCall
 	}
@@ -185,6 +211,7 @@ func BrokerDecision(requestID string, model string, profile string, callID strin
 		"reason":        decision.Reason,
 		"profiled_tool": decision.Profile,
 	}
+	addEntryContract(record, entry)
 	if decision.ProgressKey != "" {
 		record["progress_key"] = decision.ProgressKey
 	}
@@ -202,7 +229,10 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 	if seenToolOutput(callID, rawOutput) {
 		return
 	}
-	failureKind := adapters.ClassifyPatchFailure(rawOutput)
+	failureKind := adapters.PatchFailureNone
+	if isPatchWriteKind(descriptor.Kind) {
+		failureKind = adapters.ClassifyPatchFailure(rawOutput)
+	}
 	if failureKind == adapters.PatchFailureNone {
 		failureKind = adapters.PatchFailureKind(adapters.ClassifyToolFailureWithArguments(descriptor, rawArguments, rawOutput))
 	}
@@ -316,6 +346,19 @@ func modelCallToolName(record map[string]any) string {
 		return value
 	}
 	return ""
+}
+
+func addEntryContract(record map[string]any, entry tools.Entry) {
+	if record == nil {
+		return
+	}
+	record["contract_id"] = entry.ContractID()
+	record["argument_mode"] = entry.ArgumentMode
+	record["schema_quality"] = entry.SchemaQuality
+	if entry.Namespace != "" {
+		record["namespace"] = entry.Namespace
+		record["original_name"] = entry.OriginalName()
+	}
 }
 
 func cloneRecord(record map[string]any) map[string]any {

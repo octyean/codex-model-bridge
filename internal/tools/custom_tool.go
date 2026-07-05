@@ -17,11 +17,15 @@ func ExtractCustomInput(arguments string) string {
 }
 
 func ExtractCustomToolInput(entry Entry, arguments string, adapter adapters.Adapter) string {
+	return ExtractCustomToolInputWithWorkspace(entry, arguments, adapter, "")
+}
+
+func ExtractCustomToolInputWithWorkspace(entry Entry, arguments string, adapter adapters.Adapter, workspace string) string {
 	if entry.Kind() == KindPatch {
 		return adapter.NormalizePatchInput(extractCustomInputValue(arguments, []string{"input", "patch", "content"}))
 	}
 	if entry.Kind() == KindTextEditor {
-		input, err := TextEditorPatchInput(arguments)
+		input, err := TextEditorPatchInputWithWorkspace(arguments, workspace)
 		if err != nil {
 			return ""
 		}
@@ -81,7 +85,7 @@ func convertCustom(tool codex.ResponseTool, adapter adapters.Adapter) []converte
 	}
 	entry := newEntry(name, kind, inputMode, sideEffect, rawString(tool.Raw, "type", tool.Type), tool.Description, tool.Raw)
 	if kind == KindTextEditor {
-		entry.UpstreamName = "codex_text_editor"
+		entry.UpstreamName = TextEditorToolName
 	}
 	entry.Descriptor.Description = adapter.CustomToolDescription(entry.Descriptor)
 	return []convertedTool{chatFunction(entry, params)}

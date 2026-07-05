@@ -12,7 +12,9 @@ import (
 
 const maxTextEditorReadBytes = 4 * 1024 * 1024
 
-var textEditorParameters = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"One of create, str_replace, insert_after, move_file, or delete_file."},"path":{"type":"string"},"destination_path":{"type":"string","description":"Destination path for move_file."},"new_path":{"type":"string","description":"Alias for destination_path when using move_file."},"old_str":{"type":"string","description":"Exact existing text for str_replace, insert_after anchor text, or optional exact text to replace while moving a file."},"new_str":{"type":"string","description":"Replacement text for str_replace, inserted text for insert_after, optional replacement text for move_file, or destination path for move_file when destination_path/new_path is absent."},"insert_after":{"type":"string","description":"Exact existing anchor text after which new_str/text should be inserted."},"text":{"type":"string","description":"Inserted text, or file content for create."},"file_text":{"type":"string","description":"Full file content for create."}},"required":["command","path"],"additionalProperties":false}`)
+const TextEditorToolName = "str_replace_based_edit_tool"
+
+var textEditorParameters = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["view","create","str_replace","insert"],"description":"One of view, create, str_replace, or insert."},"path":{"type":"string"},"view_range":{"type":"array","items":{"type":"integer"},"minItems":2,"maxItems":2,"description":"For view: 1-indexed [start,end], where end=-1 means through end of file."},"old_str":{"type":"string","description":"Exact existing text for str_replace."},"new_str":{"type":"string","description":"Replacement text for str_replace."},"file_text":{"type":"string","description":"Full file content for create."},"insert_line":{"type":"integer","description":"For insert: line number after which to insert text; 0 inserts at the beginning."},"insert_text":{"type":"string","description":"Text to insert for insert."}},"required":["command","path"],"additionalProperties":false}`)
 
 type textEditorCommand struct {
 	Command     string `json:"command"`
@@ -25,9 +27,16 @@ type textEditorCommand struct {
 	Text        string `json:"text"`
 	FileText    string `json:"file_text"`
 	Content     string `json:"content"`
+	ViewRange   []int  `json:"view_range"`
+	InsertLine  *int   `json:"insert_line"`
+	InsertText  string `json:"insert_text"`
 }
 
 func TextEditorPatchInput(arguments string) (string, error) {
+	return TextEditorPatchInputWithWorkspace(arguments, "")
+}
+
+func TextEditorPatchInputWithWorkspace(arguments string, workspace string) (string, error) {
 	command, err := parseTextEditorCommand(arguments)
 	if err != nil {
 		return "", err
@@ -36,13 +45,16 @@ func TextEditorPatchInput(arguments string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	fsPath := editorFSPath(path, workspace)
 	switch NormalizeTextEditorCommand(command.Command) {
+	case "view":
+		return textEditorViewResult(path, fsPath, command.ViewRange), nil
 	case "create":
 		content := firstNonEmpty(command.FileText, command.Content, command.Text, command.NewStr)
 		if content == "" {
 			return "", fmt.Errorf("create requires file_text or text")
 		}
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if info, err := os.Stat(fsPath); err == nil && !info.IsDir() {
 			return existingFileCreateResult(path), nil
 		}
 		return addFilePatch(path, content), nil
@@ -51,18 +63,24 @@ func TextEditorPatchInput(arguments string) (string, error) {
 			return "", fmt.Errorf("str_replace requires old_str")
 		}
 		newText := alignReplacementIndent(command.OldStr, command.NewStr)
-		if result, ok := alreadyAppliedReplaceResult(path, command.OldStr, newText); ok {
+		if result, ok := alreadyAppliedReplaceResult(path, fsPath, command.OldStr, newText); ok {
 			return result, nil
 		}
-		return replacePatch(path, command.OldStr, newText), nil
+		return replacePatch(path, fsPath, command.OldStr, newText), nil
 	case "insert_after":
 		anchor := firstNonEmpty(command.InsertAfter, command.OldStr)
-		text := firstNonEmpty(command.Text, command.NewStr, command.Content)
+		text := firstNonEmpty(command.InsertText, command.Text, command.NewStr, command.Content)
+		if command.InsertLine != nil {
+			if text == "" {
+				return "", fmt.Errorf("insert requires insert_text")
+			}
+			return insertLinePatch(path, fsPath, *command.InsertLine, text)
+		}
 		if anchor == "" {
-			return "", fmt.Errorf("insert_after requires insert_after or old_str")
+			return "", fmt.Errorf("insert requires insert_line")
 		}
 		if text == "" {
-			return "", fmt.Errorf("insert_after requires text or new_str")
+			return "", fmt.Errorf("insert requires insert_text")
 		}
 		return insertAfterPatch(path, anchor, text), nil
 	case "move_file":
@@ -71,7 +89,8 @@ func TextEditorPatchInput(arguments string) (string, error) {
 		if destPath == "" {
 			return "", fmt.Errorf("move_file requires destination_path or new_path")
 		}
-		if isEditorDirectoryTarget(rawDestPath, destPath) {
+		destFSPath := editorFSPath(destPath, workspace)
+		if isEditorDirectoryTarget(rawDestPath, destFSPath) {
 			return directoryTargetMoveResult(path, destPath), nil
 		}
 		if destPath == path {
@@ -80,7 +99,7 @@ func TextEditorPatchInput(arguments string) (string, error) {
 		if command.OldStr != "" {
 			return moveFilePatch(path, destPath, command.OldStr, alignReplacementIndent(command.OldStr, command.NewStr)), nil
 		}
-		return moveFilePatch(path, destPath, "", ""), nil
+		return moveOnlyPatch(path, fsPath, destPath, destFSPath), nil
 	case "delete_file":
 		return "*** Begin Patch\n*** Delete File: " + path + "\n*** End Patch", nil
 	default:
@@ -159,12 +178,8 @@ func textEditorUpdateArguments(path string, lines []string) (string, bool) {
 		})
 	}
 	if anchor, text, ok := textEditorInsertAfterFromHunk(body); ok {
-		return textEditorArguments(map[string]string{
-			"command":      "insert_after",
-			"path":         path,
-			"insert_after": anchor,
-			"text":         text,
-		})
+		_, _ = anchor, text
+		return "", false
 	}
 	return "", false
 }
@@ -265,7 +280,17 @@ func NormalizeTextEditorCommand(command string) string {
 	return value
 }
 
+func TextEditorCommand(arguments string) string {
+	command, err := parseTextEditorCommand(arguments)
+	if err != nil {
+		return ""
+	}
+	return NormalizeTextEditorCommand(command.Command)
+}
+
 var textEditorCommandAliases = map[string]string{
+	"view": "view",
+
 	"create":      "create",
 	"create_file": "create",
 
@@ -284,6 +309,82 @@ var textEditorCommandAliases = map[string]string{
 	"delete_file": "delete_file",
 }
 
+func textEditorViewResult(path string, fsPath string, viewRange []int) string {
+	info, err := os.Stat(fsPath)
+	if err != nil {
+		return strings.Join([]string{
+			"TEXT_EDITOR_VIEW_PATH_MISSING",
+			"path: " + path,
+			"file_edit_state: read_only",
+			"recovery: inspect the current tree and retry view with an existing file or directory path.",
+		}, "\n")
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(fsPath)
+		if err != nil {
+			return "TEXT_EDITOR_VIEW_FAILED\npath: " + path + "\nerror: " + err.Error()
+		}
+		lines := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() {
+				name += "/"
+			}
+			lines = append(lines, name)
+		}
+		return textEditorViewContent(path, lines, 1)
+	}
+	if info.Size() > maxTextEditorReadBytes {
+		return strings.Join([]string{
+			"TEXT_EDITOR_VIEW_FILE_TOO_LARGE",
+			"path: " + path,
+			"file_edit_state: read_only",
+			"recovery: use read-only shell commands to inspect a smaller range of this large file.",
+		}, "\n")
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return "TEXT_EDITOR_VIEW_FAILED\npath: " + path + "\nerror: " + err.Error()
+	}
+	lines := normalizedEditorLines(string(data))
+	start, end := 1, len(lines)
+	if len(viewRange) == 2 {
+		start = viewRange[0]
+		end = viewRange[1]
+		if end == -1 {
+			end = len(lines)
+		}
+	}
+	if start < 1 || end < start || start > len(lines)+1 {
+		return strings.Join([]string{
+			"TEXT_EDITOR_VIEW_INVALID_RANGE",
+			"path: " + path,
+			"file_edit_state: read_only",
+			"recovery: view_range must be [start,end] using 1-indexed lines; end=-1 means through end of file.",
+		}, "\n")
+	}
+	if end > len(lines) {
+		end = len(lines)
+	}
+	if start > end {
+		return textEditorViewContent(path, nil, start)
+	}
+	return textEditorViewContent(path, lines[start-1:end], start)
+}
+
+func textEditorViewContent(path string, lines []string, startLine int) string {
+	out := []string{
+		"TEXT_EDITOR_VIEW_RESULT",
+		"path: " + path,
+		"file_edit_state: read_only",
+		"content:",
+	}
+	for i, line := range lines {
+		out = append(out, fmt.Sprintf("%d: %s", startLine+i, line))
+	}
+	return strings.Join(out, "\n")
+}
+
 func normalizeEditorPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -294,6 +395,13 @@ func normalizeEditorPath(path string) string {
 		return ""
 	}
 	return strings.TrimPrefix(path, "./")
+}
+
+func editorFSPath(path string, workspace string) string {
+	if path == "" || filepath.IsAbs(path) || strings.TrimSpace(workspace) == "" {
+		return path
+	}
+	return filepath.Join(workspace, path)
 }
 
 func addFilePatch(path string, content string) string {
@@ -308,7 +416,7 @@ func existingFileCreateResult(path string) string {
 		"file_edit_state: not_modified",
 		"required_next_action: inspect_current_file_then_use_str_replace_or_summarize",
 		"forbidden_next_action: retry_create_same_path",
-		"recovery: the target file already exists. Do not use create for existing files; inspect the current file, then use str_replace or insert_after only if a real change is still missing.",
+		"recovery: the target file already exists. Do not use create for existing files; inspect the current file, then use str_replace or insert only if a real change is still missing.",
 	}, "\n")
 }
 
@@ -319,7 +427,7 @@ func samePathMoveResult(path string) string {
 		"file_edit_state: not_modified",
 		"required_next_action: use_str_replace_for_same_file_content_edits",
 		"forbidden_next_action: retry_move_file_same_path",
-		"recovery: source and destination are the same file. Do not use move_file for same-path edits; use str_replace or insert_after on the existing path.",
+		"recovery: source and destination are the same file. Do not use move_file for same-path edits; use str_replace or insert on the existing path.",
 	}, "\n")
 }
 
@@ -349,8 +457,8 @@ func isEditorDirectoryTarget(rawPath string, path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func replacePatch(path string, oldText string, newText string) string {
-	if expandedOld, expandedNew, ok := expandReplacementFromFile(path, oldText, newText); ok {
+func replacePatch(path string, fsPath string, oldText string, newText string) string {
+	if expandedOld, expandedNew, ok := expandReplacementFromFile(fsPath, oldText, newText); ok {
 		oldText = expandedOld
 		newText = expandedNew
 	}
@@ -361,15 +469,15 @@ func replacePatch(path string, oldText string, newText string) string {
 	return strings.Join(lines, "\n")
 }
 
-func alreadyAppliedReplaceResult(path string, oldText string, newText string) (string, bool) {
+func alreadyAppliedReplaceResult(path string, fsPath string, oldText string, newText string) (string, bool) {
 	if strings.TrimSpace(newText) == "" {
 		return "", false
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(fsPath)
 	if err != nil || info.IsDir() || info.Size() > maxTextEditorReadBytes {
 		return "", false
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(fsPath)
 	if err != nil {
 		return "", false
 	}
@@ -416,15 +524,15 @@ func countExactLineBlock(content string, block string) int {
 	return count
 }
 
-func expandReplacementFromFile(path string, oldText string, newText string) (string, string, bool) {
+func expandReplacementFromFile(fsPath string, oldText string, newText string) (string, string, bool) {
 	if oldText == "" {
 		return "", "", false
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(fsPath)
 	if err != nil || info.IsDir() || info.Size() > maxTextEditorReadBytes {
 		return "", "", false
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(fsPath)
 	if err != nil {
 		return "", "", false
 	}
@@ -455,6 +563,51 @@ func insertAfterPatch(path string, anchor string, text string) string {
 	return strings.Join(lines, "\n")
 }
 
+func insertLinePatch(path string, fsPath string, insertLine int, text string) (string, error) {
+	info, err := os.Stat(fsPath)
+	if err != nil || info.IsDir() {
+		return "", fmt.Errorf("insert requires an existing file")
+	}
+	if info.Size() > maxTextEditorReadBytes {
+		return "", fmt.Errorf("insert target is too large")
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return "", err
+	}
+	content := string(data)
+	lines := normalizedEditorLines(content)
+	if insertLine < 0 || insertLine > len(lines) {
+		return "", fmt.Errorf("insert_line out of range")
+	}
+	if len(lines) == 0 {
+		return replaceWholeFilePatch(path, text), nil
+	}
+	if insertLine == 0 {
+		for end := 1; end <= len(lines) && end <= 5; end++ {
+			oldText := strings.Join(lines[:end], "\n")
+			if countExactLineBlock(content, oldText) == 1 {
+				return replacePatch(path, fsPath, oldText, text+"\n"+oldText), nil
+			}
+		}
+		return replaceWholeFilePatch(path, text+"\n"+strings.Join(lines, "\n")), nil
+	}
+	for start := insertLine - 1; start >= 0 && insertLine-start <= 5; start-- {
+		anchor := strings.Join(lines[start:insertLine], "\n")
+		if countExactLineBlock(content, anchor) == 1 {
+			return insertAfterPatch(path, anchor, text), nil
+		}
+	}
+	return insertAfterPatch(path, strings.Join(lines[:insertLine], "\n"), text), nil
+}
+
+func replaceWholeFilePatch(path string, content string) string {
+	lines := []string{"*** Begin Patch", "*** Delete File: " + path, "*** Add File: " + path}
+	lines = append(lines, prefixedLines("+", content)...)
+	lines = append(lines, "*** End Patch")
+	return strings.Join(lines, "\n")
+}
+
 func moveFilePatch(path string, destPath string, oldText string, newText string) string {
 	lines := []string{"*** Begin Patch", "*** Update File: " + path, "*** Move to: " + destPath}
 	if oldText != "" {
@@ -464,6 +617,74 @@ func moveFilePatch(path string, destPath string, oldText string, newText string)
 	}
 	lines = append(lines, "*** End Patch")
 	return strings.Join(lines, "\n")
+}
+
+func moveOnlyPatch(path string, fsPath string, destPath string, destFSPath string) string {
+	info, err := os.Stat(fsPath)
+	if err != nil {
+		return moveSourceMissingResult(path)
+	}
+	if info.IsDir() {
+		return moveSourceDirectoryResult(path)
+	}
+	if info.Size() > maxTextEditorReadBytes {
+		return moveSourceTooLargeResult(path)
+	}
+	if _, err := os.Stat(destFSPath); err == nil {
+		return moveTargetExistsResult(destPath)
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return moveSourceMissingResult(path)
+	}
+	lines := []string{"*** Begin Patch", "*** Delete File: " + path, "*** Add File: " + destPath}
+	lines = append(lines, prefixedLines("+", string(data))...)
+	lines = append(lines, "*** End Patch")
+	return strings.Join(lines, "\n")
+}
+
+func moveSourceMissingResult(path string) string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_MOVE_SOURCE_MISSING",
+		"path: " + path,
+		"file_edit_state: not_modified",
+		"required_next_action: inspect_current_files_then_choose_existing_source_or_summarize",
+		"forbidden_next_action: retry_move_file_same_source",
+		"recovery: the source file cannot be read. Inspect the current tree and retry only with an existing source file if the move is still needed.",
+	}, "\n")
+}
+
+func moveSourceDirectoryResult(path string) string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_MOVE_SOURCE_IS_DIRECTORY",
+		"path: " + path,
+		"file_edit_state: not_modified",
+		"required_next_action: move_files_individually_or_use_project_approved_shell_when_allowed",
+		"forbidden_next_action: retry_move_file_directory_source",
+		"recovery: text editor move_file moves one file at a time. Choose a concrete file path, or use another allowed project operation for directory moves.",
+	}, "\n")
+}
+
+func moveSourceTooLargeResult(path string) string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_MOVE_SOURCE_TOO_LARGE",
+		"path: " + path,
+		"file_edit_state: not_modified",
+		"required_next_action: use_project_approved_large_file_move_method",
+		"forbidden_next_action: retry_move_file_same_large_source",
+		"recovery: the source file is too large for text editor rewrite as a patch. Use an approved file move path for large files if the user allows it.",
+	}, "\n")
+}
+
+func moveTargetExistsResult(path string) string {
+	return strings.Join([]string{
+		"TEXT_EDITOR_MOVE_TARGET_ALREADY_EXISTS",
+		"destination_path: " + path,
+		"file_edit_state: not_modified",
+		"required_next_action: inspect_destination_then_choose_replace_or_different_path",
+		"forbidden_next_action: retry_move_file_same_destination",
+		"recovery: the destination file already exists. Inspect it before replacing content or choose a different final file path.",
+	}, "\n")
 }
 
 func prefixedLines(prefix string, text string) []string {

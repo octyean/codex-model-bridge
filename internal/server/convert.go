@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -19,7 +20,9 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) []codex.ResponseItem {
+type toolCallLocalResolver func(ctx context.Context, callID string, entry tools.Entry, modelArguments string, canonicalArguments string, runtimeArguments string) (codex.ResponseItem, bool)
+
+func responseItemsFromMessage(ctx context.Context, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) []codex.ResponseItem {
 	if len(message.ToolCalls) > 0 {
 		items := make([]codex.ResponseItem, 0, len(message.ToolCalls))
 		if item := reasoningItem(message.ReasoningContent); item != nil {
@@ -28,7 +31,7 @@ func responseItemsFromMessage(message providers.ChatMessage, toolCtx tools.Conte
 		for _, call := range message.ToolCalls {
 			entry := toolCtx.Entry(call.Function.Name)
 			toollog.ToolCall(requestID, model, profile, call.ID, entry, call.Function.Arguments, message.ReasoningContent)
-			item := responseItemFromToolCall(call.ID, entry, call.Function.Arguments, toolCtx, adapter, requestID, model, profile, logger)
+			item := responseItemFromToolCall(ctx, call.ID, entry, call.Function.Arguments, toolCtx, adapter, requestID, model, profile, logger, localResolver)
 			items = append(items, item)
 			logToolTranslation(logger, requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(requestID, call.ID, entry, call.Function.Arguments, item)
@@ -54,6 +57,8 @@ type streamState struct {
 	model           string
 	profile         string
 	logger          *slog.Logger
+	requestCtx      context.Context
+	localResolver   toolCallLocalResolver
 	textAdded       bool
 	textIndex       int
 	text            string
@@ -71,7 +76,10 @@ type streamToolCall struct {
 	outputIndex int
 }
 
-func newStreamState(toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) *streamState {
+func newStreamState(ctx context.Context, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) *streamState {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return &streamState{
 		toolCtx:        toolCtx,
 		adapter:        adapter,
@@ -79,6 +87,8 @@ func newStreamState(toolCtx tools.Context, adapter adapters.Adapter, requestID s
 		model:          model,
 		profile:        profile,
 		logger:         logger,
+		requestCtx:     ctx,
+		localResolver:  localResolver,
 		textIndex:      -1,
 		reasoningIndex: -1,
 		toolCalls:      map[int]*streamToolCall{},
@@ -162,7 +172,7 @@ func (s *streamState) Done() []codex.ResponseItem {
 			}
 			entry := s.toolCtx.Entry(call.name)
 			toollog.ToolCall(s.requestID, s.model, s.profile, call.id, entry, call.arguments, s.reasoning)
-			item := responseItemFromToolCall(call.id, entry, call.arguments, s.toolCtx, s.adapter, s.requestID, s.model, s.profile, s.logger)
+			item := responseItemFromToolCall(s.requestCtx, call.id, entry, call.arguments, s.toolCtx, s.adapter, s.requestID, s.model, s.profile, s.logger, s.localResolver)
 			items = append(items, indexedResponseItem{index: s.itemIndex(call.outputIndex), item: item})
 			logToolTranslation(s.logger, s.requestID, entry, item["type"].(string))
 			logPatchWriteToolCall(s.requestID, call.id, entry, call.arguments, item)
@@ -215,7 +225,7 @@ func (s *streamState) ToolCallCount() int {
 	return len(s.toolCalls)
 }
 
-func responseItemFromToolCall(callID string, entry tools.Entry, arguments string, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger) codex.ResponseItem {
+func responseItemFromToolCall(ctx context.Context, callID string, entry tools.Entry, arguments string, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) codex.ResponseItem {
 	if rewritten, ok := adapter.ToolPolicy().RewriteBlockedToolCall(entry.Name(), arguments); ok {
 		toollog.BlockedToolRewrite(requestID, model, profile, callID, entry, arguments, rewritten)
 		if logger != nil {
@@ -230,28 +240,44 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 		}
 		arguments = rewritten
 	}
+	modelArguments := arguments
+	canonicalArguments := tools.CanonicalArguments(entry, modelArguments)
+	runtimeArguments := tools.RuntimeArguments(entry, canonicalArguments)
+	customInput := ""
+	if entry.Kind() == tools.KindCustom || entry.Kind() == tools.KindPatch || entry.Kind() == tools.KindTextEditor {
+		customInput = tools.ExtractCustomToolInputWithWorkspace(entry, canonicalArguments, adapter, toolCtx.Workspace)
+		if strings.TrimSpace(customInput) != "" {
+			runtimeArguments = customInput
+		}
+	}
+	toollog.ToolCallFrame(requestID, model, profile, callID, entry, modelArguments, canonicalArguments, runtimeArguments)
 	if decision := toolruntime.Decide(toolruntime.CallContext{
 		RequestID:          requestID,
 		Model:              model,
 		Profile:            profile,
 		CallID:             callID,
-		Tool:               runtimeToolInfo(entry, arguments),
+		Tool:               runtimeToolInfo(entry, canonicalArguments),
 		CanReturnLocalText: toolCtx.Has("exec_command"),
 	}); decision.ShouldRecord {
-		toollog.BrokerDecision(requestID, model, profile, callID, entry, arguments, decision)
+		toollog.BrokerDecision(requestID, model, profile, callID, entry, canonicalArguments, decision)
 		if decision.Action == toolruntime.DecisionStop {
-			return toolRuntimeLocalResultExecCommandCall(callID, decision.LocalText)
+			return toolRuntimeLocalResultExecCommandCall(callID, entry, canonicalArguments, decision.LocalText)
+		}
+	}
+	if localResolver != nil {
+		if item, ok := localResolver(ctx, callID, entry, modelArguments, canonicalArguments, runtimeArguments); ok {
+			return item
 		}
 	}
 	switch entry.Kind() {
 	case tools.KindCustom, tools.KindPatch, tools.KindTextEditor:
-		input := tools.ExtractCustomToolInput(entry, arguments, adapter)
+		input := customInput
 		if entry.Kind() == tools.KindTextEditor {
 			if strings.TrimSpace(input) == "" {
-				return textEditorLocalResultExecCommandCall(callID, textEditorInvalidArgumentsResult())
+				return textEditorLocalResultExecCommandCall(callID, entry.Name(), canonicalArguments, textEditorInvalidArgumentsResult())
 			}
 			if strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_") {
-				return textEditorLocalResultExecCommandCall(callID, input)
+				return textEditorLocalResultExecCommandCall(callID, entry.Name(), canonicalArguments, input)
 			}
 		}
 		return codex.ResponseItem{
@@ -263,8 +289,8 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 			"status":  "completed",
 		}
 	case tools.KindToolSearch:
-		if name, nativeArguments, ok := tools.ToolSearchCallWithContext(arguments, toolCtx); ok {
-			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, arguments, name, nativeArguments, "local_tool_search_resource")
+		if name, nativeArguments, ok := tools.ToolSearchCallWithContext(canonicalArguments, toolCtx); ok {
+			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, name, nativeArguments, "local_tool_search_resource")
 			return codex.ResponseItem{
 				"id":        toolItemID("function_call", callID),
 				"type":      "function_call",
@@ -280,12 +306,12 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 			"execution": "client",
 			"call_id":   callID,
 			"status":    "completed",
-			"arguments": tools.ToolSearchArguments(arguments),
+			"arguments": tools.ToolSearchArguments(canonicalArguments),
 		}
 	case tools.KindMCPResource:
-		name, nativeArguments := tools.MCPResourceCallForTool(entry.Name(), arguments, toolCtx)
+		name, nativeArguments := tools.MCPResourceCallForTool(entry.Name(), canonicalArguments, toolCtx)
 		if name != "read_mcp_resource" && name != "list_mcp_resources" && name != "list_mcp_resource_templates" {
-			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, arguments, name, nativeArguments, "local_context_resource")
+			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, name, nativeArguments, "local_context_resource")
 		}
 		return codex.ResponseItem{
 			"id":        toolItemID("function_call", callID),
@@ -300,7 +326,7 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 			"id":      toolItemID("shell_call", callID),
 			"type":    "shell_call",
 			"call_id": callID,
-			"action":  shellAction(arguments),
+			"action":  shellAction(canonicalArguments),
 			"status":  "completed",
 		}
 	default:
@@ -309,7 +335,7 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 			"type":      "function_call",
 			"call_id":   callID,
 			"name":      entry.OriginalName(),
-			"arguments": arguments,
+			"arguments": runtimeArguments,
 			"status":    "completed",
 		}
 		if entry.Namespace != "" {
@@ -319,8 +345,8 @@ func responseItemFromToolCall(callID string, entry tools.Entry, arguments string
 	}
 }
 
-func textEditorLocalResultExecCommandCall(callID string, input string) codex.ResponseItem {
-	arguments, _ := json.Marshal(map[string]string{"cmd": textEditorLocalResultCommand(input)})
+func textEditorLocalResultExecCommandCall(callID string, toolName string, canonicalArguments string, input string) codex.ResponseItem {
+	arguments, _ := json.Marshal(map[string]string{"cmd": textEditorLocalResultCommand(toolName, canonicalArguments, input)})
 	return codex.ResponseItem{
 		"id":        toolItemID("function_call", callID),
 		"type":      "function_call",
@@ -331,9 +357,10 @@ func textEditorLocalResultExecCommandCall(callID string, input string) codex.Res
 	}
 }
 
-func toolRuntimeLocalResultExecCommandCall(callID string, input string) codex.ResponseItem {
-	arguments, _ := json.Marshal(map[string]string{"cmd": "printf '%s\\n' " + shellSingleQuote(input)})
-	return codex.ResponseItem{
+func toolRuntimeLocalResultExecCommandCall(callID string, entry tools.Entry, canonicalArguments string, input string) codex.ResponseItem {
+	envelope := tools.RuntimeLocalResultEnvelope(entry.Name(), canonicalArguments, input)
+	arguments, _ := json.Marshal(map[string]string{"cmd": "printf '%s\\n' " + shellSingleQuote(envelope)})
+	item := codex.ResponseItem{
 		"id":        toolItemID("function_call", callID),
 		"type":      "function_call",
 		"call_id":   callID,
@@ -341,6 +368,7 @@ func toolRuntimeLocalResultExecCommandCall(callID string, input string) codex.Re
 		"arguments": string(arguments),
 		"status":    "completed",
 	}
+	return item
 }
 
 func runtimeToolInfo(entry tools.Entry, arguments string) toolruntime.ToolInfo {
@@ -398,7 +426,7 @@ func (p *textEditorStreamProjector) update(arguments string, adapter adapters.Ad
 		return nil
 	}
 	if local {
-		return p.startLocal(input)
+		return p.startLocal(arguments, input)
 	}
 	return p.appendPatchInput(input)
 }
@@ -421,6 +449,8 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 		return "", false, false
 	}
 	switch command {
+	case "view":
+		return "", false, false
 	case "create":
 		if textEditorStreamFileExists(path) {
 			return "", false, false
@@ -457,7 +487,7 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 		if anchor == "" {
 			return "", false, false
 		}
-		text, ok := fields.firstValue("text", "new_str", "content")
+		text, ok := fields.firstValue("insert_text", "text", "new_str", "content")
 		if !ok {
 			return "", false, false
 		}
@@ -518,13 +548,13 @@ func (p *textEditorStreamProjector) appendPatchInput(input string) []map[string]
 	})
 }
 
-func (p *textEditorStreamProjector) startLocal(input string) []map[string]any {
+func (p *textEditorStreamProjector) startLocal(arguments string, input string) []map[string]any {
 	p.local = true
 	if p.added {
 		return nil
 	}
 	p.added = true
-	item := textEditorLocalResultExecCommandCall(p.callID, input)
+	item := textEditorLocalResultExecCommandCall(p.callID, p.entry.Name(), arguments, input)
 	item["status"] = "in_progress"
 	delete(item, "arguments")
 	return []map[string]any{{
@@ -570,19 +600,20 @@ func (p *textEditorStreamProjector) doneEvents(item codex.ResponseItem) []map[st
 	return events
 }
 
-func textEditorLocalResultCommand(input string) string {
+func textEditorLocalResultCommand(toolName string, canonicalArguments string, input string) string {
 	command := "printf '%s\\n' " + shellSingleQuote(input)
-	if path := textEditorLocalResultPath(input); path != "" {
+	if path := textEditorLocalResultPath(input); path != "" && !strings.Contains(input, "TEXT_EDITOR_VIEW_RESULT") {
 		command += "; printf '%s\\n' '--- current file ---'; sed -n '1,200p' " + shellSingleQuote(path)
 	}
-	return command + "; exit 0"
+	envelope := tools.RuntimeLocalResultEnvelopeWithoutOutput(toolName, canonicalArguments)
+	return command + "; printf '%s\\n' " + shellSingleQuote(envelope) + "; exit 0"
 }
 
 func textEditorInvalidArgumentsResult() string {
 	return strings.Join([]string{
 		"TEXT_EDITOR_INVALID_ARGUMENTS",
 		"file_edit_state: rejected",
-		"required_next_action: call codex_text_editor with command=create, str_replace, insert_after, move_file, or delete_file and the required fields for that command",
+		"required_next_action: call " + tools.TextEditorToolName + " with command=view, create, str_replace, or insert and the required fields for that command",
 		"forbidden_next_action: retry_invalid_text_editor_command_or_send_empty_patch",
 	}, "\n")
 }
@@ -759,7 +790,7 @@ func skipJSONSpace(text string, index int) int {
 
 func isTextEditorStreamField(name string) bool {
 	switch name {
-	case "command", "path", "destination_path", "new_path", "old_str", "new_str", "insert_after", "text", "file_text", "content":
+	case "command", "path", "destination_path", "new_path", "old_str", "new_str", "insert_after", "text", "file_text", "content", "insert_text":
 		return true
 	default:
 		return false
@@ -768,7 +799,7 @@ func isTextEditorStreamField(name string) bool {
 
 func isTextEditorStreamCommand(command string) bool {
 	switch command {
-	case "create", "str_replace", "insert_after", "move_file", "delete_file":
+	case "view", "create", "str_replace", "insert_after", "move_file", "delete_file":
 		return true
 	default:
 		return false
@@ -818,12 +849,15 @@ func textEditorStreamFileMissingOldText(path string, oldText string) bool {
 	return err == nil && !strings.Contains(string(data), oldText)
 }
 
-func isPatchWriteEntry(entry tools.Entry) bool {
+func isPatchWriteEntry(entry tools.Entry, arguments string) bool {
+	if entry.Kind() == tools.KindTextEditor && tools.TextEditorCommand(arguments) == "view" {
+		return false
+	}
 	return entry.Kind() == tools.KindPatch || entry.Kind() == tools.KindTextEditor
 }
 
 func logPatchWriteToolCall(requestID string, callID string, entry tools.Entry, arguments string, item codex.ResponseItem) {
-	if isPatchWriteEntry(entry) {
+	if isPatchWriteEntry(entry, arguments) {
 		toollog.PatchToolCall(requestID, callID, entry, arguments, item)
 	}
 }
@@ -954,13 +988,22 @@ func shellAction(arguments string) map[string]any {
 	if commands, ok := obj["commands"]; ok {
 		obj["commands"] = commands
 	} else if command, ok := obj["command"]; ok {
-		obj["commands"] = []any{command}
+		obj["commands"] = shellCommands(command)
 		delete(obj, "command")
 	} else if command, ok := obj["cmd"]; ok {
-		obj["commands"] = []any{command}
+		obj["commands"] = shellCommands(command)
 		delete(obj, "cmd")
 	}
 	return obj
+}
+
+func shellCommands(command any) any {
+	switch v := command.(type) {
+	case []any, []string:
+		return v
+	default:
+		return []any{command}
+	}
 }
 
 func messageText(content any) string {

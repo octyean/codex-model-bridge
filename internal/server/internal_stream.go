@@ -68,7 +68,8 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, shape optimization.Shape, logCtx toollog.OutputContext) (*streamState, optimization.Shape, error) {
 	currentReq := chatReq
-	finalState, err := s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true)
+	localResolver := s.localToolResultResolver(logCtx, toolCtx)
+	finalState, err := s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true, localResolver)
 	if err != nil {
 		return nil, shape, err
 	}
@@ -79,7 +80,7 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 		}
 		shape = optimization.CaptureShape(followUpReq)
 		currentReq = followUpReq
-		finalState, err = s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true)
+		finalState, err = s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true, localResolver)
 		if err != nil {
 			return nil, shape, err
 		}
@@ -87,7 +88,7 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 	return finalState, shape, nil
 }
 
-func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool) (*streamState, error) {
+func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool, localResolver toolCallLocalResolver) (*streamState, error) {
 	startedAt := time.Now()
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
@@ -97,7 +98,7 @@ func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, 
 		slog.String("request_id", requestID),
 		slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
 	)
-	state := newStreamState(toolCtx, adapter, requestID, model, profile, s.logger)
+	state := newStreamState(r.Context(), toolCtx, adapter, requestID, model, profile, s.logger, localResolver)
 	firstChunk := true
 	for event := range stream {
 		if event.Err != nil {

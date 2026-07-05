@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -122,6 +123,68 @@ func CodexSessionID(raw map[string]any, headers http.Header) string {
 		}
 	}
 	return ""
+}
+
+func CodexWorkspace(raw map[string]any, headers http.Header) string {
+	if value := workspaceFromRaw(raw); value != "" {
+		return value
+	}
+	return workspaceFromTurnMetadata(headers.Get("X-Codex-Turn-Metadata"))
+}
+
+func workspaceFromRaw(raw map[string]any) string {
+	if raw == nil {
+		return ""
+	}
+	return workspaceFromValue(raw["input"])
+}
+
+func workspaceFromValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return cwdFromText(v)
+	case []any:
+		for _, item := range v {
+			if workspace := workspaceFromValue(item); workspace != "" {
+				return workspace
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"content", "text"} {
+			if workspace := workspaceFromValue(v[key]); workspace != "" {
+				return workspace
+			}
+		}
+	}
+	return ""
+}
+
+func cwdFromText(text string) string {
+	start := strings.Index(text, "<cwd>")
+	if start < 0 {
+		return ""
+	}
+	start += len("<cwd>")
+	end := strings.Index(text[start:], "</cwd>")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(text[start : start+end])
+}
+
+func workspaceFromTurnMetadata(text string) string {
+	var raw struct {
+		Workspaces map[string]any `json:"workspaces"`
+	}
+	if err := json.Unmarshal([]byte(text), &raw); err != nil || len(raw.Workspaces) == 0 {
+		return ""
+	}
+	paths := make([]string, 0, len(raw.Workspaces))
+	for path := range raw.Workspaces {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths[0]
 }
 
 func TextSummary(text string) map[string]any {

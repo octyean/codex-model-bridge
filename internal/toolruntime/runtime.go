@@ -14,10 +14,11 @@ const (
 	DecisionAllow = "allow"
 	DecisionStop  = "stop"
 
-	CapabilityRead    = "read"
-	CapabilityWrite   = "write"
-	CapabilityExecute = "execute"
-	CapabilityUnknown = "unknown"
+	CapabilityRead     = "read"
+	CapabilityWrite    = "write"
+	CapabilityExecute  = "execute"
+	CapabilityInteract = "interact"
+	CapabilityUnknown  = "unknown"
 )
 
 type ToolInfo struct {
@@ -108,6 +109,7 @@ var (
 	mu              sync.Mutex
 	requestContexts = map[string]RequestContext{}
 	requestPlanned  = map[string]map[string]int{}
+	callProfiles    = map[string]Profile{}
 	sessions        = map[string]*sessionState{}
 )
 
@@ -133,6 +135,7 @@ func ForgetRequest(requestID string) {
 
 func Decide(ctx CallContext) Decision {
 	profile := ProfileTool(ctx.Tool)
+	rememberCallProfile(ctx.CallID, profile)
 	decision := Decision{
 		Action:       DecisionAllow,
 		Reason:       "runtime_signature_allowed",
@@ -177,11 +180,14 @@ func Decide(ctx CallContext) Decision {
 }
 
 func ObserveOutput(ctx OutputContext) Outcome {
-	tool := ctx.Tool
-	if strings.TrimSpace(ctx.ModelCallTool) != "" {
-		tool.Name = ctx.ModelCallTool
+	profile, ok := callProfile(ctx.CallID)
+	if !ok {
+		tool := ctx.Tool
+		if strings.TrimSpace(ctx.ModelCallTool) != "" {
+			tool.Name = ctx.ModelCallTool
+		}
+		profile = ProfileTool(tool)
 	}
-	profile := ProfileTool(tool)
 	ok, category := outputStatus(ctx)
 	outcome := Outcome{
 		OK:          ok,
@@ -194,12 +200,33 @@ func ObserveOutput(ctx OutputContext) Outcome {
 	return outcome
 }
 
+func rememberCallProfile(callID string, profile Profile) {
+	if strings.TrimSpace(callID) == "" || profile.Signature == "" {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	callProfiles[callID] = profile
+}
+
+func callProfile(callID string) (Profile, bool) {
+	if strings.TrimSpace(callID) == "" {
+		return Profile{}, false
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	profile, ok := callProfiles[callID]
+	if ok {
+		delete(callProfiles, callID)
+	}
+	return profile, ok
+}
+
 func ProfileTool(tool ToolInfo) Profile {
-	args := parseArguments(tool.Arguments)
 	capability, readOnly, risk, source := capabilityFor(tool)
 	toolName := strings.TrimSpace(tool.Name)
 	toolKey := canonicalToolName(toolName)
-	argumentsHash := hashText(canonicalJSON(args))
+	argumentsHash := hashText(canonicalArguments(tool.Arguments))
 	signature := strings.Join([]string{
 		toolKey,
 		capability,
@@ -218,14 +245,16 @@ func ProfileTool(tool ToolInfo) Profile {
 }
 
 func canonicalToolName(name string) string {
-	name = strings.TrimSpace(name)
-	if left, right, ok := strings.Cut(name, "__"); ok && strings.HasPrefix(left, "mcp_") && strings.TrimSpace(right) != "" {
-		return strings.TrimSpace(right)
-	}
-	return name
+	return strings.TrimSpace(name)
 }
 
 func capabilityFor(tool ToolInfo) (string, bool, string, []string) {
+	if tool.Kind == "text_editor_patch" {
+		if textEditorCommand(tool.Arguments) == "view" {
+			return CapabilityRead, true, "low", []string{"arguments"}
+		}
+		return CapabilityWrite, false, "high", []string{"kind"}
+	}
 	switch tool.SideEffect {
 	case "write_files":
 		return CapabilityWrite, false, "high", []string{"side_effect"}
@@ -235,12 +264,48 @@ func capabilityFor(tool ToolInfo) (string, bool, string, []string) {
 		return CapabilityRead, true, "low", []string{"side_effect"}
 	}
 	switch tool.Kind {
-	case "patch", "text_editor_patch":
+	case "patch":
 		return CapabilityWrite, false, "high", []string{"kind"}
 	case "shell":
 		return CapabilityExecute, false, "high", []string{"kind"}
 	}
+	if capability, readOnly, risk, ok := capabilityFromText(tool.Name, tool.Description); ok {
+		return capability, readOnly, risk, []string{"heuristic"}
+	}
 	return CapabilityUnknown, true, "unknown", []string{"fallback"}
+}
+
+func textEditorCommand(arguments string) string {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(arguments), &raw); err != nil {
+		return ""
+	}
+	value, _ := raw["command"].(string)
+	return strings.TrimSpace(strings.ToLower(value))
+}
+
+func capabilityFromText(name string, description string) (string, bool, string, bool) {
+	text := strings.ToLower(strings.TrimSpace(name + " " + description))
+	switch {
+	case containsAny(text, "write", "edit", "patch", "create", "delete", "remove", "update", "upload"):
+		return CapabilityWrite, false, "high", true
+	case containsAny(text, "exec", "shell", "command", "terminal", "run "):
+		return CapabilityExecute, false, "high", true
+	case containsAny(text, "click", "type", "press", "navigate", "scroll"):
+		return CapabilityInteract, false, "medium", true
+	case containsAny(text, "search", "extract", "read", "list", "fetch", "snapshot", "inspect", "get "):
+		return CapabilityRead, true, "low", true
+	}
+	return "", true, "", false
+}
+
+func containsAny(text string, values ...string) bool {
+	for _, value := range values {
+		if strings.Contains(text, value) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestContext(requestID string) (RequestContext, bool) {
@@ -323,12 +388,12 @@ func ensureSessionLocked(sessionID string) *sessionState {
 	return state
 }
 
-func parseArguments(arguments string) map[string]any {
-	var out map[string]any
-	if err := json.Unmarshal([]byte(arguments), &out); err == nil {
-		return out
+func canonicalArguments(arguments string) string {
+	var value any
+	if err := json.Unmarshal([]byte(arguments), &value); err == nil {
+		return canonicalJSON(value)
 	}
-	return map[string]any{}
+	return arguments
 }
 
 func outputStatus(ctx OutputContext) (bool, string) {
@@ -385,32 +450,44 @@ func jsonCandidates(output string) []string {
 }
 
 func structuredFailure(value any) bool {
-	switch v := value.(type) {
-	case map[string]any:
-		for _, key := range []string{"success", "ok"} {
-			if b, ok := v[key].(bool); ok && !b {
-				return true
-			}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	if value, ok := boolField(obj, "success"); ok && !value && hasFailureDetail(obj) {
+		return true
+	}
+	if value, ok := boolField(obj, "ok"); ok && !value && hasFailureDetail(obj) {
+		return true
+	}
+	if value, ok := boolField(obj, "isError"); ok && value {
+		return true
+	}
+	if value, ok := boolField(obj, "is_error"); ok && value {
+		return true
+	}
+	for _, key := range []string{"result", "error"} {
+		nested, ok := obj[key].(string)
+		if !ok {
+			continue
 		}
-		if b, ok := v["isError"].(bool); ok && b {
+		var nestedValue any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(nested)), &nestedValue); err == nil && structuredFailure(nestedValue) {
 			return true
 		}
-		if result, ok := v["result"].(string); ok {
-			var nested any
-			if err := json.Unmarshal([]byte(result), &nested); err == nil {
-				return structuredFailure(nested)
-			}
-		}
-		for _, item := range v {
-			if structuredFailure(item) {
-				return true
-			}
-		}
-	case []any:
-		for _, item := range v {
-			if structuredFailure(item) {
-				return true
-			}
+	}
+	return false
+}
+
+func boolField(obj map[string]any, key string) (bool, bool) {
+	value, ok := obj[key].(bool)
+	return value, ok
+}
+
+func hasFailureDetail(obj map[string]any) bool {
+	for _, key := range []string{"error", "message", "reason", "stderr", "code"} {
+		if value, ok := obj[key]; ok && value != nil {
+			return true
 		}
 	}
 	return false
