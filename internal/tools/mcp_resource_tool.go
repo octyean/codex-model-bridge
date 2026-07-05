@@ -123,6 +123,14 @@ func MCPResourceCallForTool(toolName string, arguments string, ctx Context) (str
 	}
 }
 
+func MCPResourceLocalPath(arguments string) string {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(arguments), &obj); err != nil {
+		return ""
+	}
+	return localResourcePath(obj)
+}
+
 func mcpResourceProxyDescription() string {
 	return strings.Join([]string{
 		"Read context resources through Codex Bridge.",

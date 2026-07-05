@@ -298,6 +298,7 @@ func shouldWriteIncident(failureKind adapters.PatchFailureKind) bool {
 
 func shouldLogToolOutput(descriptor adapters.ToolDescriptor, rawArguments string, rawOutput string, outcome toolruntime.Outcome) bool {
 	return isPatchWriteKind(descriptor.Kind) ||
+		descriptor.SideEffect == tools.SideEffectRead ||
 		descriptor.Kind == tools.KindWebSearch ||
 		!outcome.OK ||
 		adapters.ClassifyToolFailureWithArguments(descriptor, rawArguments, rawOutput) != adapters.ToolFailureNone

@@ -53,13 +53,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.20"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.21"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.2.20",
+		"version": "0.2.21",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -140,7 +140,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	chatTools, toolCtx := tools.FromCodex(req.Tools, adapter)
 	toolCtx.Workspace = workspace
 	chatTools = append(chatTools, tools.FromAdditionalTools(transcriptResult.Items, adapter, &toolCtx)...)
-	if s.hasInternalTools(req) {
+	if s.runtime.HasSearch() && tools.HasWebSearch(req.Tools) {
 		chatTools = tools.AddWebSearchProxy(chatTools, &toolCtx)
 	}
 	if s.writeForcedLocalToolChoice(w, requestID, req, toolCtx, adapter) {
@@ -157,7 +157,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Stream:         req.Stream,
 	}
 	if req.ParallelToolCalls && !toolCtx.IsEmpty() {
-		enabled := !toolCtx.HasFileWriteTool() && !s.hasInternalTools(req)
+		enabled := !toolCtx.HasFileWriteTool() && !s.hasInternalTools(toolCtx)
 		chatReq.ParallelToolCalls = &enabled
 	}
 	chatReq = adapter.PrepareChatRequest(chatReq)
@@ -197,7 +197,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		if s.hasInternalTools(req) {
+		if s.hasInternalTools(toolCtx) {
 			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape, dumpPath)
 			return
 		}
@@ -216,7 +216,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "upstream returned no choices")
 		return
 	}
-	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message, toollog.OutputContext{
+	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message, toolCtx, toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
 		UpstreamModel:  modelCfg.UpstreamModel,

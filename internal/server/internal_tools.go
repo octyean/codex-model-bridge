@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
@@ -12,17 +13,22 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-func (s *Server) hasInternalTools(req codex.ResponsesRequest) bool {
-	return s.runtime.HasSearch() && tools.HasWebSearch(req.Tools)
+func (s *Server) hasInternalTools(toolCtx tools.Context) bool {
+	for _, entry := range toolCtx.Tools {
+		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource || isSkillViewTool(entry) {
+			return true
+		}
+	}
+	return false
 }
 
-func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
+func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
 	current := message
 	currentReq := req
 	var resp *providers.ChatCompletionResponse
 	handled := false
 	for {
-		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current, logCtx)
+		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current, toolCtx, logCtx)
 		if !ok {
 			break
 		}
@@ -45,33 +51,84 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 	return resp, currentReq, true
 }
 
-func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage, logCtx toollog.OutputContext) (providers.ChatCompletionRequest, bool) {
+func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, logCtx toollog.OutputContext) (providers.ChatCompletionRequest, bool) {
 	if len(message.ToolCalls) == 0 {
 		return providers.ChatCompletionRequest{}, false
 	}
+	type resolvedOutput struct {
+		call           providers.ChatToolCall
+		entry          tools.Entry
+		modelArguments string
+		arguments      string
+		descriptor     adapters.ToolDescriptor
+		output         string
+	}
+	resolved := make([]resolvedOutput, 0, len(message.ToolCalls))
 	for _, call := range message.ToolCalls {
-		if call.Function.Name != tools.WebSearchProxyToolName {
-			return providers.ChatCompletionRequest{}, false
+		entry := toolCtx.Entry(call.Function.Name)
+		arguments := tools.CanonicalArguments(entry, call.Function.Arguments)
+		output, descriptor, ok := s.internalToolOutput(ctx, req, entry, arguments, toolCtx)
+		if ok {
+			resolved = append(resolved, resolvedOutput{call: call, entry: entry, modelArguments: call.Function.Arguments, arguments: arguments, descriptor: descriptor, output: output})
 		}
 	}
+	if len(resolved) == 0 {
+		return providers.ChatCompletionRequest{}, false
+	}
 	var outputs []providers.ChatMessage
-	for _, call := range message.ToolCalls {
-		output := s.searchToolOutput(ctx, call.Function.Arguments)
-		toollog.ToolOutput(logCtx, call.ID, adapters.ToolDescriptor{
-			Name:         tools.WebSearchProxyToolName,
-			Kind:         tools.KindWebSearch,
-			OriginalType: "web_search_preview",
-		}, call.Function.Arguments, output, output)
+	internalMessage := message
+	internalMessage.ToolCalls = make([]providers.ChatToolCall, 0, len(resolved))
+	for _, item := range resolved {
+		toollog.ToolCall(logCtx.RequestID, logCtx.Model, logCtx.Profile, item.call.ID, item.entry, item.modelArguments, message.ReasoningContent)
+		toollog.ToolCallFrame(logCtx.RequestID, logCtx.Model, logCtx.Profile, item.call.ID, item.entry, item.modelArguments, item.arguments, tools.RuntimeArguments(item.entry, item.arguments))
+		toollog.ToolOutput(logCtx, item.call.ID, item.descriptor, item.arguments, item.output, item.output)
+		internalMessage.ToolCalls = append(internalMessage.ToolCalls, item.call)
 		outputs = append(outputs, providers.ChatMessage{
 			Role:       "tool",
-			ToolCallID: call.ID,
-			Content:    output,
+			ToolCallID: item.call.ID,
+			Content:    item.output,
 		})
 	}
 	followUp := req
 	followUp.ToolChoice = "auto"
-	followUp.Messages = append(append(followUp.Messages, message), outputs...)
+	followUp.Messages = append(append(followUp.Messages, internalMessage), outputs...)
 	return followUp, true
+}
+
+func (s *Server) internalToolOutput(ctx context.Context, req providers.ChatCompletionRequest, entry tools.Entry, arguments string, toolCtx tools.Context) (string, adapters.ToolDescriptor, bool) {
+	switch {
+	case entry.Kind() == tools.KindWebSearch:
+		return s.searchToolOutput(ctx, arguments), adapters.ToolDescriptor{Name: tools.WebSearchProxyToolName, Kind: tools.KindWebSearch, OriginalType: "web_search_preview"}, true
+	case entry.Kind() == tools.KindTextEditor:
+		output, err := tools.TextEditorPatchInputWithWorkspace(arguments, toolCtx.Workspace)
+		if err != nil {
+			return textEditorInvalidArgumentsResult(), internalToolDescriptor(entry), true
+		}
+		if !strings.HasPrefix(strings.TrimSpace(output), "TEXT_EDITOR_") {
+			return "", adapters.ToolDescriptor{}, false
+		}
+		return output, internalToolDescriptor(entry), true
+	case entry.Kind() == tools.KindMCPResource:
+		path := tools.MCPResourceLocalPath(arguments)
+		if path == "" {
+			return "", adapters.ToolDescriptor{}, false
+		}
+		return localFileReadOutput(resolveWorkspacePath(path, toolCtx.Workspace)), internalToolDescriptor(entry), true
+	case isSkillViewTool(entry):
+		output, ok := skillViewOutput(req.Messages, arguments)
+		return output, internalToolDescriptor(entry), ok
+	default:
+		return "", adapters.ToolDescriptor{}, false
+	}
+}
+
+func internalToolDescriptor(entry tools.Entry) adapters.ToolDescriptor {
+	descriptor := entry.Descriptor
+	descriptor.Name = entry.Name()
+	if descriptor.SideEffect == "" || descriptor.SideEffect == tools.SideEffectNone {
+		descriptor.SideEffect = tools.SideEffectRead
+	}
+	return descriptor
 }
 
 func (s *Server) localToolResultResolver(logCtx toollog.OutputContext, toolCtx tools.Context) toolCallLocalResolver {

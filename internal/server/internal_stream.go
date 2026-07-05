@@ -74,7 +74,7 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 		return nil, shape, err
 	}
 	for {
-		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState), logCtx)
+		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState), toolCtx, logCtx)
 		if !ok {
 			return finalState, shape, nil
 		}
