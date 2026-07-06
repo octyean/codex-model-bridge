@@ -469,7 +469,7 @@ streamOpened:
 		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "output": outputSummary(items, usage)}))
 	}
 	for i, item := range items {
-		alreadyAdded := (item["id"] == "msg_0" && state.textAdded) || (item["id"] == "rs_0" && state.reasoningAdded)
+		alreadyAdded := (item["id"] == state.textItemID && state.textAdded) || (item["id"] == state.reasoningItemID && state.reasoningAdded)
 		for _, event := range outputDoneEvents(item, i, alreadyAdded) {
 			_ = writer.Event(event)
 		}

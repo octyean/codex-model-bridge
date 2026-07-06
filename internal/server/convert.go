@@ -59,9 +59,11 @@ type streamState struct {
 	logger          *slog.Logger
 	requestCtx      context.Context
 	localResolver   toolCallLocalResolver
+	textItemID      string
 	textAdded       bool
 	textIndex       int
 	text            string
+	reasoningItemID string
 	reasoning       string
 	reasoningAdded  bool
 	reasoningIndex  int
@@ -81,17 +83,19 @@ func newStreamState(ctx context.Context, toolCtx tools.Context, adapter adapters
 		ctx = context.Background()
 	}
 	return &streamState{
-		toolCtx:        toolCtx,
-		adapter:        adapter,
-		requestID:      requestID,
-		model:          model,
-		profile:        profile,
-		logger:         logger,
-		requestCtx:     ctx,
-		localResolver:  localResolver,
-		textIndex:      -1,
-		reasoningIndex: -1,
-		toolCalls:      map[int]*streamToolCall{},
+		toolCtx:         toolCtx,
+		adapter:         adapter,
+		requestID:       requestID,
+		model:           model,
+		profile:         profile,
+		logger:          logger,
+		requestCtx:      ctx,
+		localResolver:   localResolver,
+		textItemID:      "msg_" + requestID,
+		reasoningItemID: "rs_" + requestID,
+		textIndex:       -1,
+		reasoningIndex:  -1,
+		toolCalls:       map[int]*streamToolCall{},
 	}
 }
 
@@ -105,7 +109,7 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 				s.nextOutputIndex++
 				events = append(events, map[string]any{
 					"type":         "response.output_item.added",
-					"item":         map[string]any{"id": "rs_0", "type": "reasoning", "status": "in_progress"},
+					"item":         map[string]any{"id": s.reasoningItemID, "type": "reasoning", "status": "in_progress"},
 					"output_index": s.reasoningIndex,
 				})
 			}
@@ -118,15 +122,15 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 				s.nextOutputIndex++
 				events = append(events, map[string]any{
 					"type":         "response.output_item.added",
-					"item":         map[string]any{"id": "msg_0", "type": "message", "role": "assistant", "content": []any{}},
+					"item":         map[string]any{"id": s.textItemID, "type": "message", "role": "assistant", "content": []any{}},
 					"output_index": s.textIndex,
 				})
-				events = append(events, contentPartAddedEvent("msg_0", s.textIndex))
+				events = append(events, contentPartAddedEvent(s.textItemID, s.textIndex))
 			}
 			s.text += choice.Delta.Content
 			events = append(events, map[string]any{
 				"type":          "response.output_text.delta",
-				"item_id":       "msg_0",
+				"item_id":       s.textItemID,
 				"output_index":  s.textIndex,
 				"content_index": 0,
 				"delta":         choice.Delta.Content,
@@ -161,7 +165,7 @@ func (s *streamState) Done() []codex.ResponseItem {
 	if len(s.toolCalls) > 0 {
 		if item := reasoningItem(s.reasoning); item != nil {
 			if s.reasoningAdded {
-				item["id"] = "rs_0"
+				item["id"] = s.reasoningItemID
 			}
 			items = append(items, indexedResponseItem{index: s.itemIndex(s.reasoningIndex), item: item})
 		}
@@ -181,13 +185,13 @@ func (s *streamState) Done() []codex.ResponseItem {
 	}
 	if item := reasoningItem(s.reasoning); item != nil {
 		if s.reasoningAdded {
-			item["id"] = "rs_0"
+			item["id"] = s.reasoningItemID
 		}
 		items = append(items, indexedResponseItem{index: s.itemIndex(s.reasoningIndex), item: item})
 	}
 	if s.textAdded || s.text != "" {
 		items = append(items, indexedResponseItem{index: s.itemIndex(s.textIndex), item: codex.ResponseItem{
-			"id":      "msg_0",
+			"id":      s.textItemID,
 			"type":    "message",
 			"role":    "assistant",
 			"content": []map[string]string{{"type": "output_text", "text": s.text}},
