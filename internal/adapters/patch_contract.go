@@ -68,15 +68,8 @@ func NormalizePatchInput(input string) string {
 }
 
 func ClassifyPatchFailure(output string) PatchFailureKind {
-	if textEditorViewSucceeded(output) {
-		return PatchFailureNone
-	}
 	text := strings.ToLower(output)
 	switch {
-	case strings.Contains(text, "text_editor_view_path_missing"):
-		return PatchFailurePathError
-	case strings.Contains(text, "text_editor_view_invalid_range"), strings.Contains(text, "text_editor_view_failed"):
-		return PatchFailureUnknown
 	case strings.Contains(text, "apply_patch_succeeded"),
 		strings.Contains(text, "text_editor_edit_succeeded"),
 		strings.Contains(text, "file_edit_state: completed"):
@@ -114,10 +107,6 @@ func ClassifyPatchFailure(output string) PatchFailureKind {
 	default:
 		return PatchFailureNone
 	}
-}
-
-func textEditorViewSucceeded(output string) bool {
-	return strings.Contains(output, "TEXT_EDITOR_VIEW_RESULT")
 }
 
 func ClassifyToolFailure(tool ToolDescriptor, output string) ToolFailureKind {
@@ -467,9 +456,9 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 func TextEditorRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines with command=view. If the requested content is already present, stop editing and summarize; otherwise send a smaller text editor edit using exact current old_str or insert_line.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
+		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines with read-only tools. If the requested content is already present, stop editing and summarize; otherwise send a smaller text editor edit using exact current old_str or insert_line.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
 	case PatchFailureMalformedPatch, PatchFailureInvalidHunk, PatchFailureReadFileOperation:
-		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: use command=view, create, str_replace, or insert with exact JSON arguments."
+		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: use command=create, str_replace, or insert with exact JSON arguments."
 	case PatchFailureAlreadyApplied:
 		return "TEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit\nrecovery: the requested content is already present. Do not send the same text editor edit again; inspect current file content, then edit a different missing change or summarize."
 	case PatchFailurePathError:

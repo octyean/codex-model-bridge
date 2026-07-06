@@ -104,7 +104,11 @@ func MCPResourceCallForTool(toolName string, arguments string, ctx Context) (str
 	action, _ := obj["action"].(string)
 	action = strings.TrimSpace(strings.ToLower(action))
 	if path := localResourcePath(obj); path != "" && ctx.Has("exec_command") {
-		return "exec_command", marshalObject(map[string]any{"cmd": localFileReadCommand(path)})
+		tool := toolName
+		if strings.TrimSpace(tool) == "" {
+			tool = mcpResourceProxyToolName
+		}
+		return "exec_command", marshalObject(map[string]any{"cmd": localFileReadCommandForTool(path, tool, arguments)})
 	}
 	out := map[string]any{}
 	if server, ok := obj["server"].(string); ok && strings.TrimSpace(server) != "" {
@@ -177,6 +181,10 @@ func normalizeLocalResourcePath(value string) string {
 
 func localFileReadCommand(path string) string {
 	return "sed -n '1,240p' " + shellQuote(path) + " 2>&1 | head -c 20000"
+}
+
+func localFileReadCommandForTool(path string, toolName string, arguments string) string {
+	return localFileReadCommand(path) + "; printf '\\n%s\\n' " + shellQuote(RuntimeLocalResultEnvelopeWithoutOutput(toolName, arguments))
 }
 
 func shellQuote(value string) string {

@@ -453,8 +453,6 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 		return "", false, false
 	}
 	switch command {
-	case "view":
-		return "", false, false
 	case "create":
 		if textEditorStreamFileExists(path) {
 			return "", false, false
@@ -606,7 +604,7 @@ func (p *textEditorStreamProjector) doneEvents(item codex.ResponseItem) []map[st
 
 func textEditorLocalResultCommand(toolName string, canonicalArguments string, input string) string {
 	command := "printf '%s\\n' " + shellSingleQuote(input)
-	if path := textEditorLocalResultPath(input); path != "" && !strings.Contains(input, "TEXT_EDITOR_VIEW_RESULT") {
+	if path := textEditorLocalResultPath(input); path != "" {
 		command += "; printf '%s\\n' '--- current file ---'; sed -n '1,200p' " + shellSingleQuote(path)
 	}
 	envelope := tools.RuntimeLocalResultEnvelopeWithoutOutput(toolName, canonicalArguments)
@@ -617,7 +615,7 @@ func textEditorInvalidArgumentsResult() string {
 	return strings.Join([]string{
 		"TEXT_EDITOR_INVALID_ARGUMENTS",
 		"file_edit_state: rejected",
-		"required_next_action: call " + tools.TextEditorToolName + " with command=view, create, str_replace, or insert and the required fields for that command",
+		"required_next_action: call " + tools.TextEditorToolName + " with command=create, str_replace, or insert and the required fields for that command",
 		"forbidden_next_action: retry_invalid_text_editor_command_or_send_empty_patch",
 	}, "\n")
 }
@@ -803,7 +801,7 @@ func isTextEditorStreamField(name string) bool {
 
 func isTextEditorStreamCommand(command string) bool {
 	switch command {
-	case "view", "create", "str_replace", "insert_after", "move_file", "delete_file":
+	case "create", "str_replace", "insert_after", "move_file", "delete_file":
 		return true
 	default:
 		return false
@@ -854,9 +852,6 @@ func textEditorStreamFileMissingOldText(path string, oldText string) bool {
 }
 
 func isPatchWriteEntry(entry tools.Entry, arguments string) bool {
-	if entry.Kind() == tools.KindTextEditor && tools.TextEditorCommand(arguments) == "view" {
-		return false
-	}
 	return entry.Kind() == tools.KindPatch || entry.Kind() == tools.KindTextEditor
 }
 

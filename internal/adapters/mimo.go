@@ -8,13 +8,13 @@ import (
 )
 
 const mimoToolDisciplineNote = `MIMO_CODEX_TOOL_DISCIPLINE
-Read and edit files with str_replace_based_edit_tool.
-Use command=view before editing unless the exact current text is already present in the conversation.
+Edit files with str_replace_based_edit_tool.
+Read files with codex_context_resource or read-only shell commands before editing unless the exact current text is already present in the conversation.
 Use command=create for new files, command=str_replace for exact replacements, and command=insert for line-based inserts.
 Never call shell for file mutations. Do not use shell commands, redirects, tee, sed -i, perl -pi, Python file writes, Node fs writes, rm, mv, or cp for source, document, or config file changes.
 Use shell only for reading files, searching, building, testing, formatting, and real project generators.
-Do not create temporary helper scripts or scratch files for read-only inspection. If the user says not to modify files, only use command=view.
-If a file edit fails, inspect the current target lines with command=view or read-only shell commands, then send a smaller exact edit.`
+Do not create temporary helper scripts or scratch files for read-only inspection. If the user says not to modify files, do not use str_replace_based_edit_tool.
+If a file edit fails, inspect the current target lines with codex_context_resource or read-only shell commands, then send a smaller exact edit.`
 
 const mimoStructuredOutputNote = `MIMO_CODEX_STRUCTURED_OUTPUT
 The final assistant content must be one valid JSON object matching the requested response_format schema.

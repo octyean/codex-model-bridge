@@ -250,9 +250,6 @@ func canonicalToolName(name string) string {
 
 func capabilityFor(tool ToolInfo) (string, bool, string, []string) {
 	if tool.Kind == "text_editor_patch" {
-		if textEditorCommand(tool.Arguments) == "view" {
-			return CapabilityRead, true, "low", []string{"arguments"}
-		}
 		return CapabilityWrite, false, "high", []string{"kind"}
 	}
 	switch tool.SideEffect {
@@ -273,15 +270,6 @@ func capabilityFor(tool ToolInfo) (string, bool, string, []string) {
 		return capability, readOnly, risk, []string{"heuristic"}
 	}
 	return CapabilityUnknown, true, "unknown", []string{"fallback"}
-}
-
-func textEditorCommand(arguments string) string {
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(arguments), &raw); err != nil {
-		return ""
-	}
-	value, _ := raw["command"].(string)
-	return strings.TrimSpace(strings.ToLower(value))
 }
 
 func capabilityFromText(name string, description string) (string, bool, string, bool) {

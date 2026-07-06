@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
@@ -68,9 +67,10 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 		entry := toolCtx.Entry(call.Function.Name)
 		arguments := tools.CanonicalArguments(entry, call.Function.Arguments)
 		output, descriptor, ok := s.internalToolOutput(ctx, req, entry, arguments, toolCtx)
-		if ok {
-			resolved = append(resolved, resolvedOutput{call: call, entry: entry, modelArguments: call.Function.Arguments, arguments: arguments, descriptor: descriptor, output: output})
+		if !ok {
+			return providers.ChatCompletionRequest{}, false
 		}
+		resolved = append(resolved, resolvedOutput{call: call, entry: entry, modelArguments: call.Function.Arguments, arguments: arguments, descriptor: descriptor, output: output})
 	}
 	if len(resolved) == 0 {
 		return providers.ChatCompletionRequest{}, false
@@ -99,21 +99,6 @@ func (s *Server) internalToolOutput(ctx context.Context, req providers.ChatCompl
 	switch {
 	case entry.Kind() == tools.KindWebSearch:
 		return s.searchToolOutput(ctx, arguments), adapters.ToolDescriptor{Name: tools.WebSearchProxyToolName, Kind: tools.KindWebSearch, OriginalType: "web_search_preview"}, true
-	case entry.Kind() == tools.KindTextEditor:
-		output, err := tools.TextEditorPatchInputWithWorkspace(arguments, toolCtx.Workspace)
-		if err != nil {
-			return textEditorInvalidArgumentsResult(), internalToolDescriptor(entry), true
-		}
-		if !strings.HasPrefix(strings.TrimSpace(output), "TEXT_EDITOR_") {
-			return "", adapters.ToolDescriptor{}, false
-		}
-		return output, internalToolDescriptor(entry), true
-	case entry.Kind() == tools.KindMCPResource:
-		path := tools.MCPResourceLocalPath(arguments)
-		if path == "" {
-			return "", adapters.ToolDescriptor{}, false
-		}
-		return localFileReadOutput(resolveWorkspacePath(path, toolCtx.Workspace)), internalToolDescriptor(entry), true
 	case isSkillViewTool(entry):
 		output, ok := skillViewOutput(req.Messages, arguments)
 		return output, internalToolDescriptor(entry), ok

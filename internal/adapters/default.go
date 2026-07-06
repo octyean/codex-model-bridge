@@ -115,14 +115,14 @@ func hasPatchSystemInstruction(messages []providers.ChatMessage) bool {
 
 func textEditorToolDescription() string {
 	return strings.Join([]string{
-		"Claude-compatible text editor for reading and editing files.",
-		"Use command=view with path and optional view_range to inspect files before editing.",
+		"Claude-compatible text editor for editing files.",
+		"Use read-only tools such as codex_context_resource or shell commands to inspect files before editing.",
 		"Use command=create with path and file_text to create a new file.",
 		"Use command=str_replace with path, old_str, and new_str to replace exact existing text. old_str must be copied exactly from the current file.",
 		"Use command=insert with path, insert_line, and insert_text to insert text after a line number; insert_line=0 inserts at the beginning.",
-		"Do not invent command names. Use only view, create, str_replace, or insert.",
-		"Do not use this tool for temporary helper scripts or scratch files. If the user says not to modify files, only use view.",
-		"If old_str is not exact and unique, the edit will fail. Do not retry blindly; view the current file and send a smaller exact edit.",
+		"Do not invent command names. Use only create, str_replace, or insert.",
+		"Do not use this tool for read-only inspection, temporary helper scripts, or scratch files.",
+		"If old_str is not exact and unique, the edit will fail. Do not retry blindly; inspect the current file with read-only tools and send a smaller exact edit.",
 		"If the result says TEXT_EDITOR_ALREADY_APPLIED, do not repeat that same edit; verify current file content, then edit a different missing change or summarize.",
 		"Use this editor tool for file writes.",
 	}, "\n")

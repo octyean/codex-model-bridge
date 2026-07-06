@@ -10,11 +10,11 @@ import (
 	"codex-bridge/internal/adapters"
 )
 
-const maxTextEditorReadBytes = 4 * 1024 * 1024
-
 const TextEditorToolName = "str_replace_based_edit_tool"
 
-var textEditorParameters = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["view","create","str_replace","insert"],"description":"One of view, create, str_replace, or insert."},"path":{"type":"string"},"view_range":{"type":"array","items":{"type":"integer"},"minItems":2,"maxItems":2,"description":"For view: 1-indexed [start,end], where end=-1 means through end of file."},"old_str":{"type":"string","description":"Exact existing text for str_replace."},"new_str":{"type":"string","description":"Replacement text for str_replace."},"file_text":{"type":"string","description":"Full file content for create."},"insert_line":{"type":"integer","description":"For insert: line number after which to insert text; 0 inserts at the beginning."},"insert_text":{"type":"string","description":"Text to insert for insert."}},"required":["command","path"],"additionalProperties":false}`)
+const maxTextEditorReadBytes = 4 * 1024 * 1024
+
+var textEditorParameters = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["create","str_replace","insert"],"description":"One of create, str_replace, or insert."},"path":{"type":"string"},"old_str":{"type":"string","description":"Exact existing text for str_replace."},"new_str":{"type":"string","description":"Replacement text for str_replace."},"file_text":{"type":"string","description":"Full file content for create."},"insert_line":{"type":"integer","description":"For insert: line number after which to insert text; 0 inserts at the beginning."},"insert_text":{"type":"string","description":"Text to insert for insert."}},"required":["command","path"],"additionalProperties":false}`)
 
 type textEditorCommand struct {
 	Command     string `json:"command"`
@@ -27,7 +27,6 @@ type textEditorCommand struct {
 	Text        string `json:"text"`
 	FileText    string `json:"file_text"`
 	Content     string `json:"content"`
-	ViewRange   []int  `json:"view_range"`
 	InsertLine  *int   `json:"insert_line"`
 	InsertText  string `json:"insert_text"`
 }
@@ -47,8 +46,6 @@ func TextEditorPatchInputWithWorkspace(arguments string, workspace string) (stri
 	}
 	fsPath := editorFSPath(path, workspace)
 	switch NormalizeTextEditorCommand(command.Command) {
-	case "view":
-		return textEditorViewResult(path, fsPath, command.ViewRange), nil
 	case "create":
 		content := firstNonEmpty(command.FileText, command.Content, command.Text, command.NewStr)
 		if content == "" {
@@ -280,17 +277,7 @@ func NormalizeTextEditorCommand(command string) string {
 	return value
 }
 
-func TextEditorCommand(arguments string) string {
-	command, err := parseTextEditorCommand(arguments)
-	if err != nil {
-		return ""
-	}
-	return NormalizeTextEditorCommand(command.Command)
-}
-
 var textEditorCommandAliases = map[string]string{
-	"view": "view",
-
 	"create":      "create",
 	"create_file": "create",
 
@@ -307,82 +294,6 @@ var textEditorCommandAliases = map[string]string{
 
 	"delete":      "delete_file",
 	"delete_file": "delete_file",
-}
-
-func textEditorViewResult(path string, fsPath string, viewRange []int) string {
-	info, err := os.Stat(fsPath)
-	if err != nil {
-		return strings.Join([]string{
-			"TEXT_EDITOR_VIEW_PATH_MISSING",
-			"path: " + path,
-			"file_edit_state: read_only",
-			"recovery: inspect the current tree and retry view with an existing file or directory path.",
-		}, "\n")
-	}
-	if info.IsDir() {
-		entries, err := os.ReadDir(fsPath)
-		if err != nil {
-			return "TEXT_EDITOR_VIEW_FAILED\npath: " + path + "\nerror: " + err.Error()
-		}
-		lines := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() {
-				name += "/"
-			}
-			lines = append(lines, name)
-		}
-		return textEditorViewContent(path, lines, 1)
-	}
-	if info.Size() > maxTextEditorReadBytes {
-		return strings.Join([]string{
-			"TEXT_EDITOR_VIEW_FILE_TOO_LARGE",
-			"path: " + path,
-			"file_edit_state: read_only",
-			"recovery: use read-only shell commands to inspect a smaller range of this large file.",
-		}, "\n")
-	}
-	data, err := os.ReadFile(fsPath)
-	if err != nil {
-		return "TEXT_EDITOR_VIEW_FAILED\npath: " + path + "\nerror: " + err.Error()
-	}
-	lines := normalizedEditorLines(string(data))
-	start, end := 1, len(lines)
-	if len(viewRange) == 2 {
-		start = viewRange[0]
-		end = viewRange[1]
-		if end == -1 {
-			end = len(lines)
-		}
-	}
-	if start < 1 || end < start || start > len(lines)+1 {
-		return strings.Join([]string{
-			"TEXT_EDITOR_VIEW_INVALID_RANGE",
-			"path: " + path,
-			"file_edit_state: read_only",
-			"recovery: view_range must be [start,end] using 1-indexed lines; end=-1 means through end of file.",
-		}, "\n")
-	}
-	if end > len(lines) {
-		end = len(lines)
-	}
-	if start > end {
-		return textEditorViewContent(path, nil, start)
-	}
-	return textEditorViewContent(path, lines[start-1:end], start)
-}
-
-func textEditorViewContent(path string, lines []string, startLine int) string {
-	out := []string{
-		"TEXT_EDITOR_VIEW_RESULT",
-		"path: " + path,
-		"file_edit_state: read_only",
-		"content:",
-	}
-	for i, line := range lines {
-		out = append(out, fmt.Sprintf("%d: %s", startLine+i, line))
-	}
-	return strings.Join(out, "\n")
 }
 
 func normalizeEditorPath(path string) string {
