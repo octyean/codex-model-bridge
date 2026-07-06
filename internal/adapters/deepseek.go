@@ -5,7 +5,7 @@ import (
 	"codex-bridge/internal/providers"
 )
 
-type deepSeekAdapter struct{}
+type deepSeekAdapter struct{ defaultAdapter }
 
 func (deepSeekAdapter) Name() string {
 	return DeepSeekName
@@ -39,29 +39,6 @@ func (deepSeekAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) p
 	}
 	req.AssistantToolContentNull = true
 	return req
-}
-
-func (deepSeekAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
-	return defaultAdapter{}.PrepareResponseRequest(req)
-}
-
-func (deepSeekAdapter) CustomToolDescription(tool ToolDescriptor) string {
-	return defaultAdapter{}.CustomToolDescription(tool)
-}
-
-func (deepSeekAdapter) NormalizeCustomInput(name string, input string) string {
-	if name == "apply_patch" {
-		return deepSeekAdapter{}.NormalizePatchInput(input)
-	}
-	return input
-}
-
-func (deepSeekAdapter) NormalizePatchInput(input string) string {
-	return defaultAdapter{}.NormalizePatchInput(input)
-}
-
-func (deepSeekAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
-	return defaultAdapter{}.FormatToolOutput(tool, output)
 }
 
 func repairToolPairing(messages []providers.ChatMessage) []providers.ChatMessage {

@@ -175,8 +175,12 @@ func textEditorUpdateArguments(path string, lines []string) (string, bool) {
 		})
 	}
 	if anchor, text, ok := textEditorInsertAfterFromHunk(body); ok {
-		_, _ = anchor, text
-		return "", false
+		return textEditorArguments(map[string]string{
+			"command":      "insert",
+			"path":         path,
+			"insert_after": anchor,
+			"insert_text":  text,
+		})
 	}
 	return "", false
 }

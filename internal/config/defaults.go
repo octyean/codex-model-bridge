@@ -26,7 +26,6 @@ proxy_url = ""
 enabled = false
 providers = ["duckduckgo_html", "jina"]
 max_results = 5
-read_top_k = 3
 
 [search_providers.duckduckgo_html]
 type = "duckduckgo_html"

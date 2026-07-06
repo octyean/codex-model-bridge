@@ -69,7 +69,6 @@ type SearchCapabilityConfig struct {
 	Enabled    bool     `toml:"enabled"`
 	Providers  []string `toml:"providers"`
 	MaxResults int      `toml:"max_results"`
-	ReadTopK   int      `toml:"read_top_k"`
 }
 
 type VisionCapabilityConfig struct {

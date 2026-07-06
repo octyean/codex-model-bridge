@@ -108,7 +108,7 @@ func buildConfig(options Options, probe upstreamprobe.Result) config.Config {
 		ModelDiscovery: config.ModelDiscoveryConfig{Enabled: true, Mode: "merge"},
 		Extensions:     config.ExtensionsConfig{},
 		Capabilities: config.CapabilitiesConfig{
-			Search: config.SearchCapabilityConfig{Enabled: false, Providers: []string{"jina"}, MaxResults: 5, ReadTopK: 3},
+			Search: config.SearchCapabilityConfig{Enabled: false, Providers: []string{"jina"}, MaxResults: 5},
 			Vision: config.VisionCapabilityConfig{Enabled: false, Provider: "jina_vlm", Mode: "describe"},
 		},
 		SearchProviders: map[string]config.SearchProvider{

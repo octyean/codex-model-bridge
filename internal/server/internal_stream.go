@@ -85,7 +85,6 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 			return nil, shape, err
 		}
 	}
-	return finalState, shape, nil
 }
 
 func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool, localResolver toolCallLocalResolver) (*streamState, error) {

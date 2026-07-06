@@ -415,21 +415,6 @@ func PatchIsAlreadyApplied(input string) bool {
 		PatchIsNoopUpdate(input)
 }
 
-func PatchFilesOverlap(left []string, right []string) bool {
-	seen := map[string]bool{}
-	for _, file := range left {
-		if normalized := normalizePatchFilePath(file); normalized != "" {
-			seen[normalized] = true
-		}
-	}
-	for _, file := range right {
-		if seen[normalizePatchFilePath(file)] {
-			return true
-		}
-	}
-	return false
-}
-
 func PatchRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:

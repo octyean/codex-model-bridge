@@ -16,7 +16,7 @@ Use shell only for reading files, searching, building, testing, formatting, and 
 Do not create temporary helper scripts or scratch files for read-only inspection. If the user says not to modify files, do not use str_replace_based_edit_tool.
 If a file edit fails, inspect the current target lines with codex_context_resource or read-only shell commands, then send a smaller exact edit.`
 
-type kimiAdapter struct{}
+type kimiAdapter struct{ defaultAdapter }
 
 func (kimiAdapter) Name() string {
 	return KimiName
@@ -63,25 +63,6 @@ func (kimiAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
 		prependResponseInstructions(req, kimiToolDisciplineNote)
 	}
 	return req
-}
-
-func (kimiAdapter) CustomToolDescription(tool ToolDescriptor) string {
-	return defaultAdapter{}.CustomToolDescription(tool)
-}
-
-func (kimiAdapter) NormalizeCustomInput(name string, input string) string {
-	if name == "apply_patch" {
-		return kimiAdapter{}.NormalizePatchInput(input)
-	}
-	return input
-}
-
-func (kimiAdapter) NormalizePatchInput(input string) string {
-	return defaultAdapter{}.NormalizePatchInput(input)
-}
-
-func (kimiAdapter) FormatToolOutput(tool ToolDescriptor, output string) string {
-	return defaultAdapter{}.FormatToolOutput(tool, output)
 }
 
 func hasTool(tools []providers.ChatTool, name string) bool {

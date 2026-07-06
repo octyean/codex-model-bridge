@@ -2,8 +2,6 @@ package capabilities
 
 import (
 	"context"
-
-	"codex-bridge/internal/providers"
 )
 
 type SearchProvider interface {
@@ -47,33 +45,4 @@ func (r Runtime) HasSearch() bool {
 
 func (r Runtime) HasVision() bool {
 	return r.Vision != nil
-}
-
-type StaticSearchProvider struct {
-	Result SearchResult
-}
-
-func (p StaticSearchProvider) Search(_ context.Context, query string, _ int) (SearchResult, error) {
-	result := p.Result
-	result.Query = query
-	return result, nil
-}
-
-func (p StaticSearchProvider) Read(_ context.Context, _ string) (string, error) {
-	return p.Result.RawText, nil
-}
-
-type StaticVisionProvider struct {
-	Result VisionResult
-}
-
-func (p StaticVisionProvider) Analyze(_ context.Context, _ ImageInput, _ string) (VisionResult, error) {
-	return p.Result, nil
-}
-
-func VisionMessages(result VisionResult) []providers.ChatMessage {
-	if result.Text == "" {
-		return nil
-	}
-	return []providers.ChatMessage{{Role: "system", Content: "[image analysis]\n" + result.Text}}
 }
