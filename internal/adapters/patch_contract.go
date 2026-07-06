@@ -9,7 +9,7 @@ import (
 const chatPatchSystemInstruction = `CHAT_COMPLETIONS_APPLY_PATCH_CONTRACT
 apply_patch is a Codex freeform patch transported through Chat Completions function arguments.
 The function arguments must decode to a complete patch string in input.
-Use apply_patch for source, document, and config file creation, edits, deletes, and moves. Do not use shell commands as a file editor.
+Use apply_patch when you choose to submit source, document, or config file changes as a patch.
 Before editing an existing file, inspect the current target lines unless this turn already contains the exact current text.
 apply_patch cannot read files. There is no *** Read File operation; use read-only shell commands for file inspection.
 Prefer small, surgical hunks. For large files or multi-area edits, make separate minimal hunks instead of rewriting broad surrounding blocks.
@@ -22,7 +22,7 @@ For appending to an existing file, use Update File, not Add File.
 Unchanged context lines are byte-significant: copy indentation, tabs, spaces, and text exactly from the current file.
 For whitespace-sensitive files, use the smallest valid hunk and avoid nearby context unless needed for uniqueness.
 If apply_patch reports a context mismatch, do not retry the same patch. Read the current file and generate a smaller patch from exact current lines.
-After apply_patch succeeds for a file, do not repeat an already-completed edit. Use read-only commands to verify. If another requested change is still missing in the same file, make the smallest follow-up patch from exact current context; otherwise summarize.`
+After apply_patch succeeds for a file, verify current state when needed. If another requested change is still missing in the same file, make the smallest follow-up patch from exact current context; otherwise summarize.`
 
 type PatchFailureKind string
 
@@ -35,6 +35,7 @@ const (
 	PatchFailureInvalidHunk         PatchFailureKind = "invalid_hunk"
 	PatchFailureReadFileOperation   PatchFailureKind = "read_file_operation"
 	PatchFailureAlreadyApplied      PatchFailureKind = "already_applied"
+	PatchFailureNoProgress          PatchFailureKind = "no_progress"
 	PatchFailurePathError           PatchFailureKind = "path_error"
 	PatchFailurePermissionOrSandbox PatchFailureKind = "permission_or_sandbox"
 	PatchFailureUnknown             PatchFailureKind = "unknown"
@@ -78,6 +79,11 @@ func ClassifyPatchFailure(output string) PatchFailureKind {
 		return PatchFailureReadFileOperation
 	case strings.Contains(text, "text_editor_already_applied"):
 		return PatchFailureAlreadyApplied
+	case strings.Contains(text, "file_edit_state: not_modified"),
+		strings.Contains(text, "text_editor_create_target_already_exists"),
+		strings.Contains(text, "text_editor_move_target_same_as_source"),
+		strings.Contains(text, "text_editor_move_target_is_directory"):
+		return PatchFailureNoProgress
 	case strings.Contains(text, "invalid hunk"),
 		strings.Contains(text, "expected hunk"),
 		strings.Contains(text, "expected line prefix"),
@@ -418,15 +424,17 @@ func PatchIsAlreadyApplied(input string) bool {
 func PatchRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "APPLY_PATCH_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_patch\nrecovery: read the current target file lines, then generate a smaller patch using exact current context.\npatch_discipline: do not broaden the hunk, do not rewrite whole blocks, and do not use shell as a file editor."
+		return "APPLY_PATCH_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_patch\nrecovery: read the current target file lines, then generate a smaller patch using exact current context."
 	case PatchFailureMalformedPatch:
 		return "APPLY_PATCH_MALFORMED\nrequired_next_action: regenerate_complete_freeform_patch\nforbidden_next_action: send_json_or_markdown_as_patch\nrecovery: send a complete patch starting with *** Begin Patch and ending with *** End Patch."
 	case PatchFailureInvalidHunk:
-		return "APPLY_PATCH_INVALID_HUNK\nrequired_next_action: fix_patch_syntax\nforbidden_next_action: change_target_code_to_fit_bad_patch\nrecovery: preserve exact hunk line prefixes: space for context, + for additions, - for removals.\npatch_discipline: keep the intended edit small; do not switch to shell file writes."
+		return "APPLY_PATCH_INVALID_HUNK\nrequired_next_action: fix_patch_syntax\nforbidden_next_action: change_target_code_to_fit_bad_patch\nrecovery: preserve exact hunk line prefixes: space for context, + for additions, - for removals."
 	case PatchFailureReadFileOperation:
 		return "APPLY_PATCH_WRONG_TOOL_FOR_READ\nrequired_next_action: inspect_file_with_read_only_shell\nforbidden_next_action: use_apply_patch_to_read_files\nrecovery: apply_patch only supports Add File, Update File, Delete File, and Move. Use read-only shell commands such as sed, grep, rg, head, tail, or cat to inspect files, then call apply_patch only for the actual edit."
 	case PatchFailureAlreadyApplied:
 		return "APPLY_PATCH_ALREADY_APPLIED\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_patch\nrecovery: the requested content is already present. Do not send the same patch again; inspect current file content, then patch a different missing change or summarize."
+	case PatchFailureNoProgress:
+		return "APPLY_PATCH_NO_PROGRESS\nrequired_next_action: inspect_current_file_or_choose_different_target\nforbidden_next_action: repeat_same_noop_file_edit\nrecovery: the file operation did not modify anything. Read the current state, then make a materially different edit or summarize the blocker."
 	case PatchFailurePathError:
 		return "APPLY_PATCH_PATH_ERROR\nrequired_next_action: verify_target_path\nforbidden_next_action: retry_same_path_blindly\nrecovery: inspect the directory or target file path, then generate a patch for the correct path."
 	case PatchFailurePermissionOrSandbox:
@@ -441,11 +449,13 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 func TextEditorRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines with read-only tools. If the requested content is already present, stop editing and summarize; otherwise send a smaller text editor edit using exact current old_str or insert_line.\nedit_discipline: do not broaden the edit, do not rewrite whole blocks, and do not use shell as a file editor."
+		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines. If the requested content is already present, stop editing and summarize; otherwise send a smaller workspace file editor call using exact current old_str or insert_line."
 	case PatchFailureMalformedPatch, PatchFailureInvalidHunk, PatchFailureReadFileOperation:
-		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: use command=create, str_replace, or insert with exact JSON arguments."
+		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: call the matching workspace file editor tool with exact JSON arguments."
 	case PatchFailureAlreadyApplied:
 		return "TEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit\nrecovery: the requested content is already present. Do not send the same text editor edit again; inspect current file content, then edit a different missing change or summarize."
+	case PatchFailureNoProgress:
+		return "TEXT_EDITOR_NO_PROGRESS\nfile_edit_state: not_modified\nrequired_next_action: inspect_current_file_or_choose_different_target\nforbidden_next_action: repeat_same_noop_text_editor_edit\nrecovery: the text editor operation did not modify anything. Read the current state, then make a materially different workspace file editor call or summarize the blocker."
 	case PatchFailurePathError:
 		return "TEXT_EDITOR_PATH_ERROR\nrequired_next_action: verify_target_path\nforbidden_next_action: retry_same_path_blindly\nrecovery: inspect the directory or target file path, then send a text editor edit for the correct path."
 	case PatchFailurePermissionOrSandbox:
@@ -562,7 +572,7 @@ func chatPatchToolDescription(tool ToolDescriptor) string {
 	parts := []string{
 		"This is Codex's file-editing patch tool encoded through Chat Completions. Treat it as a freeform patch transported inside JSON function arguments.",
 		"The decoded input string must start with *** Begin Patch and end with *** End Patch.",
-		"Use this tool for source, document, and config file creation, edits, deletes, and moves. Shell is for reading, searching, building, testing, formatting, and real generators, not manual file edits.",
+		"Use this tool when you choose to submit source, document, or config file changes as a patch. Shell remains a separate execution tool.",
 		"apply_patch cannot read files. Do not invent *** Read File; inspect files with read-only shell commands such as sed, grep, rg, head, tail, or cat.",
 		"Before editing an existing file, inspect the current target lines unless the current turn already includes the exact current text.",
 		"Prefer small, surgical hunks. For large files or multi-area edits, make separate minimal hunks instead of rewriting broad surrounding blocks.",

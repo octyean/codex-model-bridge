@@ -2,6 +2,8 @@ package tools
 
 import (
 	"encoding/json"
+	"strconv"
+	"strings"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
@@ -15,13 +17,12 @@ func convertExecCommand(tool codex.ResponseTool, adapter adapters.Adapter) []con
 	if len(params) == 0 {
 		params = objectParameters()
 	}
-	description := adapter.ToolPolicy().ToolDescription(name, tool.Description)
-	entry := newEntry(name, KindFunction, InputModeJSON, SideEffectExecute, "function", description, tool.Raw)
+	entry := newEntry(name, KindFunction, InputModeJSON, SideEffectExecute, "function", tool.Description, tool.Raw)
 	return []convertedTool{chatFunction(entry, params)}
 }
 
 func convertShell(tool codex.ResponseTool, adapter adapters.Adapter, originalType string) []convertedTool {
-	description := adapter.ToolPolicy().ToolDescription("shell", descriptionOrDefault(tool.Description, "Run a local shell command through Codex."))
+	description := descriptionOrDefault(tool.Description, "Run a local shell command through Codex.")
 	entry := newEntry("shell", KindShell, InputModeAction, SideEffectExecute, originalType, description, tool.Raw)
 	if originalType == "exec_command" {
 		entry.UpstreamName = "exec_command"
@@ -44,15 +45,54 @@ func ShellArguments(arguments string) map[string]any {
 func ShellOutputText(value any) string {
 	switch v := value.(type) {
 	case string:
-		return v
+		return normalizeCodexShellOutput(v)
 	case map[string]any:
 		if output, ok := v["output"].(string); ok {
-			return output
+			return normalizeCodexShellOutput(output)
 		}
 		if stdout, ok := v["stdout"].(string); ok {
-			return stdout
+			return normalizeCodexShellOutput(stdout)
 		}
 	}
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+func normalizeCodexShellOutput(output string) string {
+	exitCode, body, ok := parseCodexShellOutput(output)
+	if !ok {
+		return output
+	}
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
+		return "Exit code: " + strconv.Itoa(exitCode)
+	}
+	return "Exit code: " + strconv.Itoa(exitCode) + "\nOutput:\n" + body
+}
+
+func parseCodexShellOutput(output string) (int, string, bool) {
+	lines := strings.Split(output, "\n")
+	exitCode := 0
+	hasExitCode := false
+	outputIndex := -1
+	for index, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Process exited with code") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "Process exited with code"))
+			code, err := strconv.Atoi(value)
+			if err != nil {
+				return 0, "", false
+			}
+			exitCode = code
+			hasExitCode = true
+			continue
+		}
+		if line == "Output:" && outputIndex < 0 {
+			outputIndex = index
+		}
+	}
+	if !hasExitCode || outputIndex < 0 || outputIndex+1 > len(lines) {
+		return 0, "", false
+	}
+	return exitCode, strings.Join(lines[outputIndex+1:], "\n"), true
 }

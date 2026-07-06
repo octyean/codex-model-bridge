@@ -1,20 +1,9 @@
 package adapters
 
 import (
-	"strings"
-
 	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 )
-
-const kimiToolDisciplineNote = `KIMI_CODEX_TOOL_DISCIPLINE
-Edit files with str_replace_based_edit_tool.
-Read files with codex_context_resource or read-only shell commands before editing unless the exact current text is already present in the conversation.
-Use command=create for new files, command=str_replace for exact replacements, and command=insert for line-based inserts.
-Never call shell for file mutations. Do not use shell commands, redirects, tee, sed -i, perl -pi, Python file writes, Node fs writes, rm, mv, or cp for source, document, or config file changes.
-Use shell only for reading files, searching, building, testing, formatting, and real project generators.
-Do not create temporary helper scripts or scratch files for read-only inspection. If the user says not to modify files, do not use str_replace_based_edit_tool.
-If a file edit fails, inspect the current target lines with codex_context_resource or read-only shell commands, then send a smaller exact edit.`
 
 type kimiAdapter struct{ defaultAdapter }
 
@@ -31,7 +20,7 @@ func (kimiAdapter) Capabilities() Capabilities {
 }
 
 func (kimiAdapter) ToolPolicy() ToolPolicy {
-	return ToolPolicy{BlockShellFileWrites: true}
+	return ToolPolicy{}
 }
 
 func (kimiAdapter) Optimization() optimization.Options {
@@ -42,12 +31,6 @@ func (kimiAdapter) Optimization() optimization.Options {
 }
 
 func (kimiAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	if hasTool(req.Tools, "str_replace_based_edit_tool") && !hasKimiToolDisciplineNote(req.Messages) {
-		req.Messages = append([]providers.ChatMessage{{
-			Role:    "system",
-			Content: kimiToolDisciplineNote,
-		}}, req.Messages...)
-	}
 	req.Messages = repairToolPairing(req.Messages)
 	req = optimization.PrepareRequest(req, kimiAdapter{}.Optimization())
 	req = prepareChatPatchRequest(req)
@@ -59,64 +42,5 @@ func (kimiAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) provi
 }
 
 func (kimiAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
-	if responseHasTool(req, "str_replace_based_edit_tool") && !responseInstructionsContain(req, "KIMI_CODEX_TOOL_DISCIPLINE") {
-		prependResponseInstructions(req, kimiToolDisciplineNote)
-	}
 	return req
-}
-
-func hasTool(tools []providers.ChatTool, name string) bool {
-	for _, tool := range tools {
-		if tool.Function.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func responseHasTool(req map[string]any, name string) bool {
-	rawTools, ok := req["tools"].([]any)
-	if !ok {
-		return false
-	}
-	for _, rawTool := range rawTools {
-		tool, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
-		if toolName, _ := tool["name"].(string); toolName == name {
-			return true
-		}
-		if function, ok := tool["function"].(map[string]any); ok {
-			if toolName, _ := function["name"].(string); toolName == name {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func responseInstructionsContain(req map[string]any, marker string) bool {
-	text, _ := req["instructions"].(string)
-	return strings.Contains(text, marker)
-}
-
-func prependResponseInstructions(req map[string]any, note string) {
-	if text, _ := req["instructions"].(string); strings.TrimSpace(text) != "" {
-		req["instructions"] = note + "\n\n" + text
-		return
-	}
-	req["instructions"] = note
-}
-
-func hasKimiToolDisciplineNote(messages []providers.ChatMessage) bool {
-	for _, message := range messages {
-		if message.Role != "system" {
-			continue
-		}
-		if text, ok := message.Content.(string); ok && strings.Contains(text, "KIMI_CODEX_TOOL_DISCIPLINE") {
-			return true
-		}
-	}
-	return false
 }

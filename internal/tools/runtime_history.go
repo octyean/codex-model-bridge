@@ -44,7 +44,7 @@ func ParseRuntimeLocalResultEnvelope(text string) (string, string, string, bool)
 			continue
 		}
 		if strings.TrimSpace(obj.Output) == "" {
-			obj.Output = strings.TrimRight(strings.Join(lines[:i], "\n"), "\n")
+			obj.Output = runtimeLocalOutput(lines[:i])
 		}
 		if strings.TrimSpace(obj.Output) == "" {
 			continue
@@ -52,4 +52,14 @@ func ParseRuntimeLocalResultEnvelope(text string) (string, string, string, bool)
 		return obj.Tool, obj.Arguments, obj.Output, true
 	}
 	return "", "", "", false
+}
+
+func runtimeLocalOutput(lines []string) string {
+	output := strings.TrimRight(strings.Join(lines, "\n"), "\n")
+	if marker := "\nOutput:\n"; strings.Contains(output, "Process exited with code") {
+		if index := strings.LastIndex(output, marker); index >= 0 {
+			return strings.TrimRight(output[index+len(marker):], "\n")
+		}
+	}
+	return output
 }

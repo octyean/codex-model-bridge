@@ -114,7 +114,7 @@ codex-bridge catalog generate --config config/config.toml
 先看 bridge 配置里的 `profile`，以及生成模型目录里的 `apply_patch_tool_type`。
 
 - `profile = "deepseek"`：适合 DeepSeek。
-- `profile = "kimi"`：适合 Kimi for Coding，文件编辑会优先走 Claude 兼容的 `str_replace_based_edit_tool`。
+- `profile = "kimi"`：适合 Kimi for Coding，Codex 的文件编辑能力会翻译成一组结构化 Chat 工具：`write_workspace_file`、`replace_workspace_text`、`insert_workspace_text_at_line`、`insert_workspace_text_after_match`、`move_workspace_file`、`delete_workspace_file`。
 - `profile = "default"`：适合普通 OpenAI-compatible 模型。
 - `apply_patch_tool_type = "freeform"`：让 Codex 把 `apply_patch` 当成自由格式补丁来传。
 

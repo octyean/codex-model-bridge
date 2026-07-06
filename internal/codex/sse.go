@@ -8,7 +8,8 @@ import (
 )
 
 type SSEWriter struct {
-	w http.ResponseWriter
+	w              http.ResponseWriter
+	sequenceNumber int
 }
 
 func NewSSEWriter(w http.ResponseWriter) *SSEWriter {
@@ -19,6 +20,14 @@ func NewSSEWriter(w http.ResponseWriter) *SSEWriter {
 }
 
 func (s *SSEWriter) Event(event map[string]any) error {
+	if sequenceNumber, ok := responseSequenceNumber(event["sequence_number"]); ok {
+		if sequenceNumber >= s.sequenceNumber {
+			s.sequenceNumber = sequenceNumber + 1
+		}
+	} else {
+		event["sequence_number"] = s.sequenceNumber
+		s.sequenceNumber++
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -30,6 +39,19 @@ func (s *SSEWriter) Event(event map[string]any) error {
 		flusher.Flush()
 	}
 	return nil
+}
+
+func responseSequenceNumber(value any) (int, bool) {
+	switch n := value.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
 }
 
 func (s *SSEWriter) Comment(text string) error {

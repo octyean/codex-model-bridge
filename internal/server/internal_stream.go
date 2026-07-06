@@ -18,20 +18,10 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID
 	createdAt := time.Now().Unix()
-	_ = writer.Event(map[string]any{
-		"type": "response.created",
-		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
-		},
-	})
-	_ = writer.Event(map[string]any{
-		"type": "response.in_progress",
-		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
-		},
-	})
+	_ = writer.Event(responseCreatedEvent(respID, createdAt, req.Model))
+	_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 
-	finalState, finalShape, err := s.streamInternalToolRounds(r, writer, chatReq, provider, toolCtx, adapter, requestID, req.Model, profile, shape, toollog.OutputContext{
+	finalState, finalShape, err := s.streamInternalToolRounds(r, writer, respID, createdAt, chatReq, provider, toolCtx, adapter, requestID, req.Model, profile, shape, toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
 		UpstreamModel:  chatReq.Model,
@@ -51,7 +41,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "internal_tools": true, "output": outputSummary(items, providers.NormalizedUsage{})}))
 	}
 	for i, item := range items {
-		alreadyAdded := (item["id"] == finalState.textItemID && finalState.textAdded) || (item["id"] == finalState.reasoningItemID && finalState.reasoningAdded)
+		alreadyAdded := finalState.eventsEmitted && ((item["id"] == finalState.textItemID && finalState.textAdded) || (item["id"] == finalState.reasoningItemID && finalState.reasoningAdded))
 		for _, event := range outputDoneEvents(item, i, alreadyAdded) {
 			_ = writer.Event(event)
 		}
@@ -66,28 +56,28 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", finalState.ToolCallCount()))
 }
 
-func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, shape optimization.Shape, logCtx toollog.OutputContext) (*streamState, optimization.Shape, error) {
+func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, shape optimization.Shape, logCtx toollog.OutputContext) (*streamState, optimization.Shape, error) {
 	currentReq := chatReq
 	localResolver := s.localToolResultResolver(logCtx, toolCtx)
-	finalState, err := s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true, localResolver)
+	finalState, err := s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, model, profile, true, localResolver, false)
 	if err != nil {
 		return nil, shape, err
 	}
 	for {
-		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState), toolCtx, logCtx)
+		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState), toolCtx, adapter, logCtx)
 		if !ok {
 			return finalState, shape, nil
 		}
 		shape = optimization.CaptureShape(followUpReq)
 		currentReq = followUpReq
-		finalState, err = s.streamVisibleMessage(r, writer, currentReq, provider, toolCtx, adapter, requestID, model, profile, true, localResolver)
+		finalState, err = s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, model, profile, true, localResolver, false)
 		if err != nil {
 			return nil, shape, err
 		}
 	}
 }
 
-func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool, localResolver toolCallLocalResolver) (*streamState, error) {
+func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, hideInternalTools bool, localResolver toolCallLocalResolver, emitEvents bool) (*streamState, error) {
 	startedAt := time.Now()
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
@@ -99,25 +89,42 @@ func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, 
 	)
 	state := newStreamState(r.Context(), toolCtx, adapter, requestID, model, profile, s.logger, localResolver)
 	firstChunk := true
-	for event := range stream {
-		if event.Err != nil {
-			return nil, event.Err
-		}
-		if event.Done {
-			break
-		}
-		if firstChunk {
-			firstChunk = false
-			s.logger.Info("upstream_stream_first_chunk",
-				slog.String("request_id", requestID),
-				slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
-			)
-		}
-		for _, out := range state.AddChunk(event.Chunk) {
-			if hideInternalTools && isInternalToolEvent(out) {
-				continue
+	heartbeat := time.NewTicker(3 * time.Second)
+	defer heartbeat.Stop()
+streamLoop:
+	for {
+		select {
+		case event, ok := <-stream:
+			if !ok {
+				break streamLoop
 			}
-			_ = writer.Event(out)
+			if event.Err != nil {
+				return nil, event.Err
+			}
+			if event.Done {
+				break streamLoop
+			}
+			if firstChunk {
+				firstChunk = false
+				s.logger.Info("upstream_stream_first_chunk",
+					slog.String("request_id", requestID),
+					slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+				)
+			}
+			for _, out := range state.AddChunk(event.Chunk) {
+				if !emitEvents {
+					continue
+				}
+				if hideInternalTools && isInternalToolEvent(out) {
+					continue
+				}
+				_ = writer.Event(out)
+				state.eventsEmitted = true
+			}
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		case <-heartbeat.C:
+			_ = writer.Event(responseInProgressEvent(respID, createdAt, model))
 		}
 	}
 	return state, nil

@@ -38,8 +38,7 @@ type Adapter interface {
 }
 
 type ToolPolicy struct {
-	BlockShellFileWrites bool
-	RequiredToolChoice   bool
+	RequiredToolChoice bool
 }
 
 type ToolDescriptor struct {

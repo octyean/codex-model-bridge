@@ -18,6 +18,8 @@ const (
 	KindMCPResource = "mcp_resource"
 	KindWebSearch   = "web_search"
 	KindShell       = "shell"
+	KindHarnessUI   = "harness_ui"
+	KindImageView   = "image_view"
 
 	InputModeJSON     = "json"
 	InputModeFreeform = "freeform"
@@ -27,6 +29,7 @@ const (
 	SideEffectRead       = "read"
 	SideEffectWriteFiles = "write_files"
 	SideEffectExecute    = "execute"
+	SideEffectStatus     = "status"
 
 	ArgumentModeIdentity      = "identity"
 	ArgumentModeKwargs        = "kwargs_envelope"
@@ -37,6 +40,11 @@ const (
 
 var (
 	emptyObjectParameters = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":true}`)
+)
+
+const (
+	imageViewOriginalToolName = "view_image"
+	imageViewChatToolName     = "inspect_local_image"
 )
 
 type Context struct {
@@ -152,6 +160,27 @@ func (ctx Context) Entry(name string) Entry {
 	return newEntry(name, KindFunction, InputModeJSON, SideEffectNone, KindFunction, "", nil)
 }
 
+func (ctx Context) EntryByOriginalName(name string) (Entry, bool) {
+	if ctx.Tools == nil {
+		return Entry{}, false
+	}
+	if entry, ok := ctx.Tools[name]; ok {
+		return entry, true
+	}
+	var found Entry
+	matched := false
+	for _, entry := range ctx.Tools {
+		if entry.OriginalName() == name {
+			if matched {
+				return Entry{}, false
+			}
+			found = entry
+			matched = true
+		}
+	}
+	return found, matched
+}
+
 func (ctx Context) IsCustom(name string) bool {
 	entry := ctx.Entry(name)
 	return entry.Kind() == KindCustom || entry.Kind() == KindPatch || entry.Kind() == KindTextEditor
@@ -195,6 +224,12 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 		if adapters.UseMCPResourceProxy(adapter) && isMCPResourceTool(rawString(tool.Raw, "name", tool.Name)) {
 			return convertMCPResourceProxy()
 		}
+		if IsHarnessUITool(rawString(tool.Raw, "name", tool.Name)) {
+			return convertFunctionWithSideEffect(tool, adapter, "", KindHarnessUI, SideEffectStatus)
+		}
+		if RequiresImageInputTool(rawString(tool.Raw, "name", tool.Name)) {
+			return convertImageView(tool)
+		}
 		return convertFunction(tool, adapter, "", KindFunction)
 	case "custom":
 		return convertCustom(tool, adapter)
@@ -218,6 +253,10 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 }
 
 func convertFunction(tool codex.ResponseTool, adapter adapters.Adapter, namespace string, kind string) []convertedTool {
+	return convertFunctionWithSideEffect(tool, adapter, namespace, kind, SideEffectNone)
+}
+
+func convertFunctionWithSideEffect(tool codex.ResponseTool, adapter adapters.Adapter, namespace string, kind string, sideEffect string) []convertedTool {
 	name := rawString(tool.Raw, "name", tool.Name)
 	if name == "" {
 		return nil
@@ -226,12 +265,47 @@ func convertFunction(tool codex.ResponseTool, adapter adapters.Adapter, namespac
 	if len(params) == 0 {
 		params = objectParameters()
 	}
-	description := adapter.ToolPolicy().ToolDescription(name, tool.Description)
-	description = mcpResourceToolDescription(name, description)
-	entry := newEntry(name, kind, InputModeJSON, SideEffectNone, "function", description, tool.Raw)
+	description := mcpResourceToolDescription(name, tool.Description)
+	entry := newEntry(name, kind, InputModeJSON, sideEffect, "function", description, tool.Raw)
 	entry.Namespace = namespace
 	entry.SchemaQuality = schemaQuality(params)
 	return []convertedTool{chatFunction(entry, params)}
+}
+
+func IsHarnessUITool(name string) bool {
+	return strings.TrimSpace(name) == "update_plan"
+}
+
+func IsHarnessUIEntry(entry Entry) bool {
+	return entry.Kind() == KindHarnessUI || entry.Descriptor.SideEffect == SideEffectStatus || IsHarnessUITool(entry.Name()) || IsHarnessUITool(entry.OriginalName())
+}
+
+func RequiresImageInputTool(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == imageViewOriginalToolName || name == imageViewChatToolName
+}
+
+func RequiresImageInputEntry(entry Entry) bool {
+	return entry.Kind() == KindImageView || RequiresImageInputTool(entry.Name()) || RequiresImageInputTool(entry.OriginalName())
+}
+
+func convertImageView(tool codex.ResponseTool) []convertedTool {
+	name := rawString(tool.Raw, "name", tool.Name)
+	if name == "" {
+		return nil
+	}
+	params := tool.Parameters
+	if len(params) == 0 {
+		params = objectParameters()
+	}
+	entry := newEntry(name, KindImageView, InputModeJSON, SideEffectRead, "function", imageViewDescription(), tool.Raw)
+	entry.UpstreamName = imageViewChatToolName
+	entry.SchemaQuality = schemaQuality(params)
+	return []convertedTool{chatFunction(entry, params)}
+}
+
+func imageViewDescription() string {
+	return "Inspect a local image file from the filesystem when visual inspection is required. Use only for image files such as PNG, JPG, JPEG, WEBP, GIF, or SVG. Do not use this tool for Markdown, source code, JSON, CSS, Vue, JavaScript, TypeScript, TOML, YAML, or other text files; read text files with codex_context_resource or exec_command instead."
 }
 
 func objectParameters() json.RawMessage {

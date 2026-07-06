@@ -126,29 +126,6 @@ func CheckConfiguredPath() (string, error) {
 	return diagnostics.CheckJSONL(path)
 }
 
-func BlockedToolRewrite(requestID string, model string, profile string, callID string, entry tools.Entry, rawArguments string, rewrittenArguments string) {
-	record := map[string]any{
-		"time":                time.Now().Format(time.RFC3339Nano),
-		"event":               "tool_call_rewritten",
-		"request_id":          requestID,
-		"model":               model,
-		"profile":             profile,
-		"call_id":             callID,
-		"tool":                entry.Name(),
-		"kind":                entry.Kind(),
-		"original_type":       entry.OriginalType(),
-		"raw_arguments":       rawArguments,
-		"rewritten_arguments": rewrittenArguments,
-		"reason":              "shell_file_mutation_blocked",
-	}
-	addEntryContract(record, entry)
-	if modelCall := rememberedToolCall(callID); modelCall != nil {
-		record["model_call"] = modelCall
-	}
-	appendRecord(record)
-	incidentlog.Write("tool_call_rewritten", record)
-}
-
 func ToolCallRerouted(requestID string, model string, profile string, callID string, entry tools.Entry, rawArguments string, targetTool string, targetArguments string, reason string) {
 	record := map[string]any{
 		"time":             time.Now().Format(time.RFC3339Nano),

@@ -102,7 +102,7 @@ func localPathSeparator(r rune) bool {
 }
 
 func normalizeToolSearchFilePath(candidate string) string {
-	path := normalizeLocalResourcePath(candidate)
+	path := normalizeLocalResourcePath(candidate, true)
 	if path == "" {
 		return ""
 	}

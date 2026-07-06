@@ -149,13 +149,13 @@ find "$HOME/.codex-bridge/logs/upstream-requests" -type f -name "*$REQ_ID*" -pri
 ```text
 request_started
 model_tool_call
-tool_call_rewritten / tool_call_rerouted / tool_output
+tool_call_rerouted / tool_output
 model_call
 failure_kind
 raw_output / formatted_output
 ```
 
-这样能看到模型当时选了什么工具、给了什么参数、bridge 有没有拦截或改道、Codex 工具真实返回了什么。
+这样能看到模型当时选了什么工具、给了什么参数、bridge 有没有改道、Codex 工具真实返回了什么。
 
 ## 本地构建
 
@@ -229,7 +229,6 @@ tail -n 10 "$HOME/.codex-bridge/logs/sessions/index.jsonl"
 
 ## 常见判断
 
-- `SHELL_FILE_WRITE_BLOCKED`：模型试图用 shell 写文件，被 bridge 拦截。看同一会话后续是否改用文件编辑工具。
 - `context_mismatch`：文件编辑上下文不匹配。看 `model_call.raw_arguments` 和工具输出里的目标文件现状。
 - `tool_search_empty`：模型搜索工具失败。看后续是否误用 MCP resource 或回到已有可见工具。
 - `mcp_resources_empty`：MCP resource 列表为空。不要把它当成所有 MCP 工具不可用，只说明当前没有可读 resource。

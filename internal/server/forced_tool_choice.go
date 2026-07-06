@@ -53,18 +53,8 @@ func writeForcedLocalToolChoiceStream(w http.ResponseWriter, requestID string, r
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID
 	createdAt := time.Now().Unix()
-	_ = writer.Event(map[string]any{
-		"type": "response.created",
-		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
-		},
-	})
-	_ = writer.Event(map[string]any{
-		"type": "response.in_progress",
-		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
-		},
-	})
+	_ = writer.Event(responseCreatedEvent(respID, createdAt, req.Model))
+	_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 	for _, event := range outputDoneEvents(item, 0, false) {
 		_ = writer.Event(event)
 	}

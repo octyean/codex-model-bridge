@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 
 	"codex-bridge/internal/providers"
@@ -153,27 +154,37 @@ func localResourcePath(obj map[string]any) string {
 	}
 	if action == "read_local_file" {
 		if path, ok := obj["path"].(string); ok {
-			return normalizeLocalResourcePath(path)
+			return normalizeLocalResourcePath(path, true)
 		}
+		if uri, ok := obj["uri"].(string); ok {
+			return normalizeLocalResourcePath(uri, true)
+		}
+		return ""
 	}
 	for _, key := range []string{"path", "uri"} {
 		text, _ := obj[key].(string)
-		if path := normalizeLocalResourcePath(text); path != "" {
+		if path := normalizeLocalResourcePath(text, false); path != "" {
 			return path
 		}
 	}
 	return ""
 }
 
-func normalizeLocalResourcePath(value string) string {
+func normalizeLocalResourcePath(value string, allowWorkspaceRelative bool) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
 	}
 	if path, ok := strings.CutPrefix(value, "file://"); ok {
 		value = path
+		if unescaped, err := url.PathUnescape(value); err == nil {
+			value = unescaped
+		}
 	}
 	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") {
+		return value
+	}
+	if allowWorkspaceRelative && !strings.Contains(value, "://") {
 		return value
 	}
 	return ""

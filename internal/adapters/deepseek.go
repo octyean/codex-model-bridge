@@ -20,7 +20,7 @@ func (deepSeekAdapter) Capabilities() Capabilities {
 }
 
 func (deepSeekAdapter) ToolPolicy() ToolPolicy {
-	return ToolPolicy{BlockShellFileWrites: true}
+	return ToolPolicy{}
 }
 
 func (deepSeekAdapter) Optimization() optimization.Options {
@@ -50,8 +50,15 @@ func repairToolPairing(messages []providers.ChatMessage) []providers.ChatMessage
 			for j < len(messages) && messages[j].Role == "tool" {
 				j++
 			}
-			out = append(out, message)
-			out = append(out, pairedToolMessages(message.ToolCalls, messages[i+1:j])...)
+			tools := pairedToolMessages(message.ToolCalls, messages[i+1:j])
+			for index, call := range message.ToolCalls {
+				single := message
+				single.ToolCalls = []providers.ChatToolCall{call}
+				if index > 0 {
+					single.ReasoningContent = ""
+				}
+				out = append(out, single, tools[index])
+			}
 			i = j
 			continue
 		}

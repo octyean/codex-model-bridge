@@ -33,6 +33,11 @@ type hiddenFileEditCall struct {
 	alreadyApplied bool
 }
 
+type runtimeLocalResult struct {
+	call   providers.ChatToolCall
+	output string
+}
+
 func ToChatMessages(req codex.ResponsesRequest, adapter adapters.Adapter) (Result, error) {
 	return ToChatMessagesWithRuntime(context.Background(), req, adapter, capabilities.Runtime{})
 }
@@ -52,6 +57,9 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	if note := tools.UnsupportedToolNote(req.Tools, runtime.HasSearch()); note != "" {
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: note})
 	}
+	if textEditorTranslationNeeded(req.Tools, adapter) {
+		messages = append(messages, providers.ChatMessage{Role: "system", Content: textEditorToolTranslationNote})
+	}
 
 	items, err := parseInputItems(req.Input)
 	if err != nil {
@@ -59,10 +67,16 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	}
 	_, toolCtx := tools.FromCodex(req.Tools, adapter)
 	tools.FromAdditionalTools(items, adapter, &toolCtx)
+	runtimeLocalResults := runtimeLocalResultsByCallID(items, toolCtx)
+	allowImageInput := adapters.HasImageInput(adapter.Capabilities())
+	if len(logContext.InputModalities) > 0 {
+		allowImageInput = adapters.HasImageInput(adapters.Capabilities{InputModalities: logContext.InputModalities})
+	}
 	var pendingToolCalls []providers.ChatToolCall
 	pendingReasoning := ""
 	toolCallsByID := map[string]providers.ChatToolCall{}
 	hiddenFileEditCalls := map[string]hiddenFileEditCall{}
+	hiddenToolCalls := map[string]bool{}
 	for _, item := range items {
 		itemType, _ := item["type"].(string)
 		switch itemType {
@@ -76,16 +90,21 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			if role == "" {
 				role = "user"
 			}
-			allowImage := adapters.HasImageInput(adapter.Capabilities())
-			if len(logContext.InputModalities) > 0 {
-				allowImage = adapters.HasImageInput(adapters.Capabilities{InputModalities: logContext.InputModalities})
-			}
 			messages = append(messages, providers.ChatMessage{
 				Role:    normalizeRole(role),
-				Content: contentParts(ctx, item["content"], allowImage, runtime),
+				Content: contentParts(ctx, item["content"], allowImageInput, runtime),
 			})
 		case "function_call":
+			callID, _ := item["call_id"].(string)
+			name, _ := item["name"].(string)
+			if shouldHideFunctionToolHistory(name, allowImageInput) {
+				if callID != "" {
+					hiddenToolCalls[callID] = true
+				}
+				continue
+			}
 			call := functionToolCall(item, toolCtx)
+			call = runtimeLocalCall(call, runtimeLocalResults)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "custom_tool_call":
@@ -110,6 +129,7 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				continue
 			}
 			call := customToolCall(item, adapter)
+			call = runtimeLocalCall(call, runtimeLocalResults)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "apply_patch_call":
@@ -134,32 +154,29 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				continue
 			}
 			call := applyPatchToolCall(item, adapter)
+			call = runtimeLocalCall(call, runtimeLocalResults)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "tool_search_call":
 			call := toolSearchCall(item)
+			call = runtimeLocalCall(call, runtimeLocalResults)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "shell_call", "local_shell_call":
 			call := shellToolCall(item)
+			call = runtimeLocalCall(call, runtimeLocalResults)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output", "shell_call_output", "local_shell_call_output":
 			callID, _ := item["call_id"].(string)
+			if hiddenToolCalls[callID] {
+				continue
+			}
 			rawOutput := outputText(item)
-			if toolName, toolArguments, output, ok := tools.ParseRuntimeLocalResultEnvelope(rawOutput); ok {
-				entry := toolCtx.Entry(toolName)
-				call := providers.ChatToolCall{
-					ID:   callID,
-					Type: "function",
-					Function: providers.ChatCallFunction{
-						Name:      toolName,
-						Arguments: tools.ModelHistoryArguments(entry, toolArguments),
-					},
-				}
-				toolCallsByID[callID] = call
-				replacePendingToolCall(pendingToolCalls, call)
-				rawOutput = output
+			if result, ok := runtimeLocalResults[callID]; ok {
+				toolCallsByID[callID] = result.call
+				replacePendingToolCall(pendingToolCalls, result.call)
+				rawOutput = result.output
 			}
 			if len(pendingToolCalls) > 0 {
 				messages = append(messages, providers.ChatMessage{Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: pendingToolCalls})
@@ -178,6 +195,9 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			rawArguments := ""
 			if call, ok := toolCallsByID[callID]; ok {
 				rawArguments = call.Function.Arguments
+			}
+			if descriptor.Name == "exec_command" || descriptor.Kind == tools.KindShell {
+				rawOutput = tools.ShellOutputText(rawOutput)
 			}
 			formattedOutput := adapters.FormatToolOutputWithArguments(adapter, descriptor, rawArguments, rawOutput)
 			logModel := req.Model
@@ -214,7 +234,7 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	if len(messages) == 0 {
 		return Result{}, fmt.Errorf("responses input did not contain messages")
 	}
-	return Result{Messages: messages, Items: items}, nil
+	return Result{Messages: compactChatTranscript(messages), Items: items}, nil
 }
 
 func replacePendingToolCall(calls []providers.ChatToolCall, replacement providers.ChatToolCall) {
@@ -223,6 +243,84 @@ func replacePendingToolCall(calls []providers.ChatToolCall, replacement provider
 			calls[i] = replacement
 			return
 		}
+	}
+}
+
+const textEditorToolTranslationNote = `CHAT_TOOL_TRANSLATION
+Codex native editing instructions may mention apply_patch. In this Chat profile that editing capability is exposed as operation-specific workspace file editor functions.
+Read apply_patch instructions as write_workspace_file, replace_workspace_text, insert_workspace_text_at_line, insert_workspace_text_after_match, move_workspace_file, or delete_workspace_file calls with structured JSON arguments. There is no separate apply_patch tool in this translated tool surface, and the workspace file editor tools do not accept patch-diff syntax.`
+
+func textEditorTranslationNeeded(responseTools []codex.ResponseTool, adapter adapters.Adapter) bool {
+	if !adapters.UseTextEditorForApplyPatch(adapter) {
+		return false
+	}
+	for _, tool := range responseTools {
+		toolType, _ := tool.Raw["type"].(string)
+		if toolType == "" {
+			toolType = tool.Type
+		}
+		name, _ := tool.Raw["name"].(string)
+		if name == "" {
+			name = tool.Name
+		}
+		if toolType == "apply_patch" || (toolType == "custom" && (name == "" || name == "apply_patch")) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldHideFunctionToolHistory(name string, allowImageInput bool) bool {
+	if tools.IsHarnessUITool(name) {
+		return true
+	}
+	return tools.RequiresImageInputTool(name) && !allowImageInput
+}
+
+func runtimeLocalCall(call providers.ChatToolCall, results map[string]runtimeLocalResult) providers.ChatToolCall {
+	if result, ok := results[call.ID]; ok {
+		return result.call
+	}
+	return call
+}
+
+func runtimeLocalResultsByCallID(items []map[string]any, toolCtx tools.Context) map[string]runtimeLocalResult {
+	results := map[string]runtimeLocalResult{}
+	for _, item := range items {
+		itemType, _ := item["type"].(string)
+		if !isToolOutputItem(itemType) {
+			continue
+		}
+		callID, _ := item["call_id"].(string)
+		if callID == "" {
+			continue
+		}
+		toolName, toolArguments, output, ok := tools.ParseRuntimeLocalResultEnvelope(outputText(item))
+		if !ok {
+			continue
+		}
+		entry := toolCtx.Entry(toolName)
+		results[callID] = runtimeLocalResult{
+			call: providers.ChatToolCall{
+				ID:   callID,
+				Type: "function",
+				Function: providers.ChatCallFunction{
+					Name:      toolName,
+					Arguments: tools.ModelHistoryArguments(entry, toolArguments),
+				},
+			},
+			output: output,
+		}
+	}
+	return results
+}
+
+func isToolOutputItem(itemType string) bool {
+	switch itemType {
+	case "function_call_output", "custom_tool_call_output", "apply_patch_call_output", "tool_search_output", "shell_call_output", "local_shell_call_output":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -428,10 +526,7 @@ func applyPatchToolCall(item map[string]any, adapter adapters.Adapter) providers
 }
 
 func textEditorHistoryToolCall(callID string, input string) (providers.ChatToolCall, bool) {
-	if adapters.PatchIsAlreadyApplied(input) {
-		return providers.ChatToolCall{}, false
-	}
-	arguments, ok := tools.TextEditorArgumentsFromPatch(input)
+	name, arguments, ok := tools.TextEditorToolCallFromPatch(input)
 	if !ok {
 		return providers.ChatToolCall{}, false
 	}
@@ -439,7 +534,7 @@ func textEditorHistoryToolCall(callID string, input string) (providers.ChatToolC
 		ID:   callID,
 		Type: "function",
 		Function: providers.ChatCallFunction{
-			Name:      tools.TextEditorToolName,
+			Name:      name,
 			Arguments: arguments,
 		},
 	}, true
@@ -587,8 +682,8 @@ func outputToolDescriptorForCall(item map[string]any, call providers.ChatToolCal
 		descriptor.Kind = tools.KindPatch
 		descriptor.InputMode = tools.InputModeFreeform
 		descriptor.SideEffect = tools.SideEffectWriteFiles
-	case tools.TextEditorToolName, "codex_text_editor":
-		descriptor.Name = tools.TextEditorToolName
+	case tools.TextEditorWriteToolName, tools.TextEditorReplaceToolName, tools.TextEditorInsertLineToolName, tools.TextEditorInsertMatchToolName, tools.TextEditorMoveToolName, tools.TextEditorDeleteToolName:
+		descriptor.Name = call.Function.Name
 		descriptor.Kind = tools.KindTextEditor
 		descriptor.InputMode = tools.InputModeJSON
 		descriptor.SideEffect = tools.SideEffectWriteFiles

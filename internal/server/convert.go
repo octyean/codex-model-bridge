@@ -69,6 +69,7 @@ type streamState struct {
 	reasoningIndex  int
 	toolCalls       map[int]*streamToolCall
 	nextOutputIndex int
+	eventsEmitted   bool
 }
 
 type streamToolCall struct {
@@ -230,20 +231,6 @@ func (s *streamState) ToolCallCount() int {
 }
 
 func responseItemFromToolCall(ctx context.Context, callID string, entry tools.Entry, arguments string, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) codex.ResponseItem {
-	if rewritten, ok := adapter.ToolPolicy().RewriteBlockedToolCall(entry.Name(), arguments); ok {
-		toollog.BlockedToolRewrite(requestID, model, profile, callID, entry, arguments, rewritten)
-		if logger != nil {
-			logger.Warn("tool_call_rewritten",
-				slog.String("request_id", requestID),
-				slog.String("model", model),
-				slog.String("profile", profile),
-				slog.String("tool", entry.Name()),
-				slog.String("kind", entry.Kind()),
-				slog.String("reason", "shell_file_mutation_blocked"),
-			)
-		}
-		arguments = rewritten
-	}
 	modelArguments := arguments
 	canonicalArguments := tools.CanonicalArguments(entry, modelArguments)
 	runtimeArguments := tools.RuntimeArguments(entry, canonicalArguments)
@@ -443,6 +430,7 @@ func (p *textEditorStreamProjector) project(arguments string, adapter adapters.A
 }
 
 func (p *textEditorStreamProjector) projectPartial(arguments string, adapter adapters.Adapter) (string, bool, bool) {
+	arguments = tools.TextEditorCanonicalArguments(p.entry.Name(), arguments)
 	fields := parseTextEditorArgumentPrefix(arguments)
 	command := tools.NormalizeTextEditorCommand(fields.value("command"))
 	path := fields.value("path")
@@ -453,11 +441,11 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 		return "", false, false
 	}
 	switch command {
-	case "create":
+	case "write_file":
 		if textEditorStreamFileExists(path) {
 			return "", false, false
 		}
-		text, ok := fields.firstValue("file_text", "content", "text", "new_str")
+		text, ok := fields.firstValue("file_text")
 		if !ok {
 			return "", false, false
 		}
@@ -471,7 +459,7 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 		if oldText == "" || !fields.complete("old_str") || textEditorStreamFileMissingOldText(path, oldText) {
 			return "", false, false
 		}
-		newText, ok := fields.firstValue("new_str", "text", "content")
+		newText, ok := fields.firstValue("new_str")
 		if !ok {
 			return "", false, false
 		}
@@ -481,23 +469,20 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 			"old_str": oldText,
 			"new_str": newText,
 		})
-	case "insert_after":
-		anchor := fields.value("insert_after")
-		if anchor == "" {
-			anchor = fields.value("old_str")
-		}
+	case "insert":
+		anchor := fields.value("old_str")
 		if anchor == "" {
 			return "", false, false
 		}
-		text, ok := fields.firstValue("insert_text", "text", "new_str", "content")
+		text, ok := fields.firstValue("insert_text")
 		if !ok {
 			return "", false, false
 		}
 		return projectedPartialTextEditorInput(adapter, map[string]string{
-			"command":      command,
-			"path":         path,
-			"insert_after": anchor,
-			"text":         text,
+			"command":     command,
+			"path":        path,
+			"old_str":     anchor,
+			"insert_text": text,
 		})
 	case "delete_file":
 		return projectedTextEditorInput(adapter, map[string]string{
@@ -505,7 +490,7 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 			"path":    path,
 		})
 	case "move_file":
-		destPath, ok := fields.firstValue("destination_path", "new_path", "new_str")
+		destPath, ok := fields.firstValue("destination_path")
 		if !ok {
 			return "", false, false
 		}
@@ -515,12 +500,14 @@ func (p *textEditorStreamProjector) projectPartial(arguments string, adapter ada
 			"destination_path": destPath,
 		}
 		if oldText := fields.value("old_str"); oldText != "" && fields.complete("old_str") {
-			newText, ok := fields.firstValue("new_str", "text", "content")
+			newText, ok := fields.firstValue("new_str")
 			if !ok {
 				return "", false, false
 			}
 			values["old_str"] = oldText
 			values["new_str"] = newText
+		} else {
+			return "", false, false
 		}
 		return projectedTextEditorInput(adapter, values)
 	default:
@@ -615,7 +602,7 @@ func textEditorInvalidArgumentsResult() string {
 	return strings.Join([]string{
 		"TEXT_EDITOR_INVALID_ARGUMENTS",
 		"file_edit_state: rejected",
-		"required_next_action: call " + tools.TextEditorToolName + " with command=create, str_replace, or insert and the required fields for that command",
+		"required_next_action: call the matching workspace file editor tool with all required fields",
 		"forbidden_next_action: retry_invalid_text_editor_command_or_send_empty_patch",
 	}, "\n")
 }
@@ -792,7 +779,7 @@ func skipJSONSpace(text string, index int) int {
 
 func isTextEditorStreamField(name string) bool {
 	switch name {
-	case "command", "path", "destination_path", "new_path", "old_str", "new_str", "insert_after", "text", "file_text", "content", "insert_text":
+	case "command", "path", "destination_path", "old_str", "new_str", "file_text", "insert_text":
 		return true
 	default:
 		return false
@@ -801,7 +788,7 @@ func isTextEditorStreamField(name string) bool {
 
 func isTextEditorStreamCommand(command string) bool {
 	switch command {
-	case "create", "str_replace", "insert_after", "move_file", "delete_file":
+	case "write_file", "str_replace", "insert", "move_file", "delete_file":
 		return true
 	default:
 		return false
@@ -961,6 +948,21 @@ func contentPartAddedEvent(itemID string, outputIndex int) map[string]any {
 
 func outputTextPart(text string) map[string]any {
 	return map[string]any{"type": "output_text", "text": text, "annotations": []any{}}
+}
+
+func ensureStreamItemIDs(items []codex.ResponseItem, requestID string) {
+	for i, item := range items {
+		if _, ok := item["id"]; ok {
+			continue
+		}
+		itemType, _ := item["type"].(string)
+		switch itemType {
+		case "message":
+			item["id"] = "msg_" + requestID + "_" + strconv.Itoa(i)
+		case "reasoning":
+			item["id"] = "rs_" + requestID + "_" + strconv.Itoa(i)
+		}
+	}
 }
 
 func messageOutputText(item codex.ResponseItem) string {

@@ -27,7 +27,7 @@ func (defaultAdapter) Optimization() optimization.Options {
 }
 
 func (defaultAdapter) ToolPolicy() ToolPolicy {
-	return ToolPolicy{BlockShellFileWrites: true, RequiredToolChoice: true}
+	return ToolPolicy{RequiredToolChoice: true}
 }
 
 func (defaultAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
@@ -40,6 +40,9 @@ func (defaultAdapter) PrepareResponseRequest(req map[string]any) map[string]any 
 
 func (defaultAdapter) CustomToolDescription(tool ToolDescriptor) string {
 	if tool.Kind == "text_editor_patch" {
+		if tool.Description != "" {
+			return tool.Description
+		}
 		return textEditorToolDescription()
 	}
 	if tool.Kind == "patch" {
@@ -115,16 +118,9 @@ func hasPatchSystemInstruction(messages []providers.ChatMessage) bool {
 
 func textEditorToolDescription() string {
 	return strings.Join([]string{
-		"Claude-compatible text editor for editing files.",
-		"Use read-only tools such as codex_context_resource or shell commands to inspect files before editing.",
-		"Use command=create with path and file_text to create a new file.",
-		"Use command=str_replace with path, old_str, and new_str to replace exact existing text. old_str must be copied exactly from the current file.",
-		"Use command=insert with path, insert_line, and insert_text to insert text after a line number; insert_line=0 inserts at the beginning.",
-		"Do not invent command names. Use only create, str_replace, or insert.",
-		"Do not use this tool for read-only inspection, temporary helper scripts, or scratch files.",
-		"If old_str is not exact and unique, the edit will fail. Do not retry blindly; inspect the current file with read-only tools and send a smaller exact edit.",
-		"If the result says TEXT_EDITOR_ALREADY_APPLIED, do not repeat that same edit; verify current file content, then edit a different missing change or summarize.",
-		"Use this editor tool for file writes.",
+		"Edit Codex workspace files persistently through the operation-specific file editor tools.",
+		"Use write_workspace_file for full-file writes, replace_workspace_text for exact replacements, insert_workspace_text_at_line or insert_workspace_text_after_match for insertions, move_workspace_file for renames, and delete_workspace_file for deletion.",
+		"For reading files, evaluating content, drafting analysis, or temporary notes, use read-only tools and answer in text instead of creating scratch files.",
 	}, "\n")
 }
 

@@ -21,13 +21,13 @@ func (s *Server) hasInternalTools(toolCtx tools.Context) bool {
 	return false
 }
 
-func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
+func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
 	current := message
 	currentReq := req
 	var resp *providers.ChatCompletionResponse
 	handled := false
 	for {
-		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current, toolCtx, logCtx)
+		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current, toolCtx, adapter, logCtx)
 		if !ok {
 			break
 		}
@@ -50,7 +50,7 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 	return resp, currentReq, true
 }
 
-func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, logCtx toollog.OutputContext) (providers.ChatCompletionRequest, bool) {
+func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (providers.ChatCompletionRequest, bool) {
 	if len(message.ToolCalls) == 0 {
 		return providers.ChatCompletionRequest{}, false
 	}
@@ -92,6 +92,7 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 	followUp := req
 	followUp.ToolChoice = "auto"
 	followUp.Messages = append(append(followUp.Messages, internalMessage), outputs...)
+	followUp = adapter.PrepareChatRequest(followUp)
 	return followUp, true
 }
 

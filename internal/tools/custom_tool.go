@@ -25,7 +25,7 @@ func ExtractCustomToolInputWithWorkspace(entry Entry, arguments string, adapter 
 		return adapter.NormalizePatchInput(extractCustomInputValue(arguments, []string{"input", "patch", "content"}))
 	}
 	if entry.Kind() == KindTextEditor {
-		input, err := TextEditorPatchInputWithWorkspace(arguments, workspace)
+		input, err := TextEditorPatchInputWithWorkspace(TextEditorCanonicalArguments(entry.Name(), arguments), workspace)
 		if err != nil {
 			return ""
 		}
@@ -68,6 +68,9 @@ func convertCustom(tool codex.ResponseTool, adapter adapters.Adapter) []converte
 	if name == "" {
 		name = "apply_patch"
 	}
+	if name == "apply_patch" && adapters.UseTextEditorForApplyPatch(adapter) {
+		return convertTextEditor(tool, adapter)
+	}
 	kind := KindCustom
 	params := customParameters
 	inputMode := InputModeFreeform
@@ -77,16 +80,20 @@ func convertCustom(tool codex.ResponseTool, adapter adapters.Adapter) []converte
 		params = applyPatchParameters
 		sideEffect = SideEffectWriteFiles
 	}
-	if name == "apply_patch" && adapters.UseTextEditorForApplyPatch(adapter) {
-		kind = KindTextEditor
-		params = textEditorParameters
-		inputMode = InputModeJSON
-		sideEffect = SideEffectWriteFiles
-	}
 	entry := newEntry(name, kind, inputMode, sideEffect, rawString(tool.Raw, "type", tool.Type), tool.Description, tool.Raw)
-	if kind == KindTextEditor {
-		entry.UpstreamName = TextEditorToolName
-	}
 	entry.Descriptor.Description = adapter.CustomToolDescription(entry.Descriptor)
 	return []convertedTool{chatFunction(entry, params)}
+}
+
+func convertTextEditor(tool codex.ResponseTool, adapter adapters.Adapter) []convertedTool {
+	specs := TextEditorToolSpecs()
+	out := make([]convertedTool, 0, len(specs))
+	for _, spec := range specs {
+		entry := newEntry("apply_patch", KindTextEditor, InputModeJSON, SideEffectWriteFiles, rawString(tool.Raw, "type", tool.Type), spec.Description, tool.Raw)
+		entry.UpstreamName = spec.Name
+		entry.SchemaQuality = schemaQuality(spec.Parameters)
+		entry.Descriptor.Description = adapter.CustomToolDescription(entry.Descriptor)
+		out = append(out, chatFunction(entry, spec.Parameters))
+	}
+	return out
 }

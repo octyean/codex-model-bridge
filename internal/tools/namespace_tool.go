@@ -47,6 +47,9 @@ func convertNamespace(tool codex.ResponseTool, adapter adapters.Adapter) []conve
 }
 
 func CanonicalArguments(entry Entry, arguments string) string {
+	if entry.Kind() == KindTextEditor {
+		arguments = TextEditorCanonicalArguments(entry.Name(), arguments)
+	}
 	if !entry.PseudoKwargs {
 		return arguments
 	}
@@ -54,6 +57,9 @@ func CanonicalArguments(entry Entry, arguments string) string {
 }
 
 func RuntimeArguments(entry Entry, arguments string) string {
+	if entry.Kind() == KindTextEditor {
+		arguments = TextEditorCanonicalArguments(entry.Name(), arguments)
+	}
 	if !entry.PseudoKwargs {
 		return arguments
 	}
@@ -61,6 +67,9 @@ func RuntimeArguments(entry Entry, arguments string) string {
 }
 
 func ModelHistoryArguments(entry Entry, arguments string) string {
+	if entry.Kind() == KindTextEditor {
+		arguments = TextEditorModelArguments(entry.Name(), arguments)
+	}
 	if !entry.PseudoKwargs {
 		return arguments
 	}
@@ -73,8 +82,14 @@ func ModelHistoryArguments(entry Entry, arguments string) string {
 
 func NativeHistoryFunctionCall(name string, namespace string, arguments string, ctx Context) (string, string) {
 	if namespace == "" {
+		if entry, ok := ctx.Tools[name]; ok {
+			return entry.Name(), ModelHistoryArguments(entry, arguments)
+		}
+		if entry, ok := ctx.EntryByOriginalName(name); ok {
+			return entry.Name(), ModelHistoryArguments(entry, arguments)
+		}
 		entry := ctx.Entry(name)
-		return name, ModelHistoryArguments(entry, arguments)
+		return entry.Name(), ModelHistoryArguments(entry, arguments)
 	}
 	toolName := namespacedToolName(namespace, name)
 	entry, ok := ctx.Tools[toolName]

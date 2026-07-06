@@ -216,13 +216,14 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "upstream returned no choices")
 		return
 	}
-	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message, toolCtx, toollog.OutputContext{
+	logCtx := toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
 		UpstreamModel:  modelCfg.UpstreamModel,
 		Profile:        profileName,
 		RequestSummary: requestSummary,
-	}); ok {
+	}
+	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message, toolCtx, adapter, logCtx); ok {
 		resp = followUp
 		shape = optimization.CaptureShape(followUpReq)
 		if len(resp.Choices) == 0 {
@@ -231,13 +232,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items := responseItemsFromMessage(r.Context(), resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger, s.localToolResultResolver(toollog.OutputContext{
-		RequestID:      requestID,
-		Model:          req.Model,
-		UpstreamModel:  modelCfg.UpstreamModel,
-		Profile:        profileName,
-		RequestSummary: requestSummary,
-	}, toolCtx))
+	items := responseItemsFromMessage(r.Context(), resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger, s.localToolResultResolver(logCtx, toolCtx))
 	usage := providers.NormalizeUsage(resp.Usage)
 	if emptyOutput(items) {
 		incidentlog.Write("empty_chat_response", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "output": outputSummary(items, usage)}))
@@ -336,6 +331,8 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 	respID := "resp_" + requestID
 	startedAt := time.Now()
 	createdAt := time.Now().Unix()
+	_ = writer.Event(responseCreatedEvent(respID, createdAt, req.Model))
+	_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 
 	type streamResult struct {
 		stream <-chan providers.StreamEvent
@@ -375,7 +372,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 		s.logger.Warn("request_canceled_before_upstream_stream", slog.String("request_id", requestID), slog.String("error", r.Context().Err().Error()))
 		return
 	case <-heartbeat.C:
-		_ = writer.Comment("waiting for upstream stream")
+		_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 		for {
 			select {
 			case result := <-streamReady:
@@ -404,64 +401,69 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 				s.logger.Warn("request_canceled_before_upstream_stream", slog.String("request_id", requestID), slog.String("error", r.Context().Err().Error()))
 				return
 			case <-heartbeat.C:
-				_ = writer.Comment("waiting for upstream stream")
+				_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 			}
 		}
 	}
 
 streamOpened:
-	_ = writer.Event(map[string]any{
-		"type": "response.created",
-		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
-		},
-	})
-	_ = writer.Event(map[string]any{
-		"type": "response.in_progress",
-		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "in_progress", "output": []any{},
-		},
-	})
-
-	state := newStreamState(r.Context(), toolCtx, adapter, requestID, req.Model, profile, s.logger, s.localToolResultResolver(toollog.OutputContext{
+	logCtx := toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
 		UpstreamModel:  chatReq.Model,
 		Profile:        profile,
 		RequestSummary: incidentlog.RequestSummary(req.Raw),
-	}, toolCtx))
+	}
+	state := newStreamState(r.Context(), toolCtx, adapter, requestID, req.Model, profile, s.logger, s.localToolResultResolver(logCtx, toolCtx))
+	emitStreamEvents := toolCtx.IsEmpty()
 	var usage providers.NormalizedUsage
 	firstChunk := true
-	for event := range stream {
-		if event.Err != nil {
-			if requestCanceled(r, event.Err) {
+streamLoop:
+	for {
+		select {
+		case event, ok := <-stream:
+			if !ok {
+				break streamLoop
+			}
+			if event.Err != nil {
+				if requestCanceled(r, event.Err) {
+					return
+				}
+				incidentlog.Write("upstream_stream_event_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": event.Err.Error(), "stream": true}))
+				_ = writer.Event(map[string]any{
+					"type": "response.failed",
+					"response": map[string]any{
+						"id":    respID,
+						"error": map[string]any{"message": event.Err.Error(), "type": "server_error"},
+					},
+				})
 				return
 			}
-			incidentlog.Write("upstream_stream_event_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": event.Err.Error(), "stream": true}))
-			_ = writer.Event(map[string]any{
-				"type": "response.failed",
-				"response": map[string]any{
-					"id":    respID,
-					"error": map[string]any{"message": event.Err.Error(), "type": "server_error"},
-				},
-			})
+			if event.Done {
+				break streamLoop
+			}
+			if firstChunk {
+				firstChunk = false
+				s.logger.Info("upstream_stream_first_chunk",
+					slog.String("request_id", requestID),
+					slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
+				)
+			}
+			if event.Chunk.Usage != nil {
+				usage = providers.NormalizeUsage(event.Chunk.Usage)
+			}
+			for _, out := range state.AddChunk(event.Chunk) {
+				if !emitStreamEvents {
+					continue
+				}
+				_ = writer.Event(out)
+				state.eventsEmitted = true
+			}
+		case <-r.Context().Done():
+			s.logger.Warn("request_canceled_during_upstream_stream", slog.String("request_id", requestID), slog.String("error", r.Context().Err().Error()))
 			return
-		}
-		if event.Done {
-			break
-		}
-		if firstChunk {
-			firstChunk = false
-			s.logger.Info("upstream_stream_first_chunk",
-				slog.String("request_id", requestID),
-				slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
-			)
-		}
-		if event.Chunk.Usage != nil {
-			usage = providers.NormalizeUsage(event.Chunk.Usage)
-		}
-		for _, out := range state.AddChunk(event.Chunk) {
-			_ = writer.Event(out)
+		case <-heartbeat.C:
+			_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 		}
 	}
 	items := state.Done()
@@ -469,7 +471,7 @@ streamOpened:
 		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "output": outputSummary(items, usage)}))
 	}
 	for i, item := range items {
-		alreadyAdded := (item["id"] == state.textItemID && state.textAdded) || (item["id"] == state.reasoningItemID && state.reasoningAdded)
+		alreadyAdded := state.eventsEmitted && ((item["id"] == state.textItemID && state.textAdded) || (item["id"] == state.reasoningItemID && state.reasoningAdded))
 		for _, event := range outputDoneEvents(item, i, alreadyAdded) {
 			_ = writer.Event(event)
 		}

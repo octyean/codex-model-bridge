@@ -18,6 +18,7 @@ const (
 	CapabilityWrite    = "write"
 	CapabilityExecute  = "execute"
 	CapabilityInteract = "interact"
+	CapabilityStatus   = "status"
 	CapabilityUnknown  = "unknown"
 )
 
@@ -257,6 +258,8 @@ func capabilityFor(tool ToolInfo) (string, bool, string, []string) {
 		return CapabilityWrite, false, "high", []string{"side_effect"}
 	case "execute":
 		return CapabilityExecute, false, "high", []string{"side_effect"}
+	case "status":
+		return CapabilityStatus, true, "low", []string{"side_effect"}
 	case "read":
 		return CapabilityRead, true, "low", []string{"side_effect"}
 	}
@@ -394,6 +397,15 @@ func outputStatus(ctx OutputContext) (bool, string) {
 		}
 		return false, "tool_failure"
 	}
+	if ctx.Tool.SideEffect == "status" {
+		return false, "status_ack"
+	}
+	if toolBoundaryFailureOutput(ctx.RawOutput) {
+		return false, "tool_unavailable"
+	}
+	if noProgressOutput(ctx.RawOutput) {
+		return false, "no_progress"
+	}
 	if code, ok := shellExitCode(ctx.RawOutput); ok && code != 0 {
 		return false, "nonzero_exit"
 	}
@@ -401,6 +413,22 @@ func outputStatus(ctx OutputContext) (bool, string) {
 		return false, "structured_failure"
 	}
 	return true, "success"
+}
+
+func toolBoundaryFailureOutput(output string) bool {
+	text := strings.ToLower(output)
+	return strings.Contains(text, " is not allowed because ") ||
+		strings.Contains(text, "not allowed because you do not support") ||
+		strings.Contains(text, "tool is unavailable")
+}
+
+func noProgressOutput(output string) bool {
+	text := strings.ToLower(output)
+	return strings.Contains(text, "file_edit_state: not_modified") ||
+		strings.Contains(text, "text_editor_no_progress") ||
+		strings.Contains(text, "text_editor_create_target_already_exists") ||
+		strings.Contains(text, "text_editor_move_target_same_as_source") ||
+		strings.Contains(text, "text_editor_move_target_is_directory")
 }
 
 func shellExitCode(output string) (int, bool) {
