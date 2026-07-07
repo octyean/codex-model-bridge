@@ -192,6 +192,9 @@ func TextEditorPatchInputWithWorkspace(arguments string, workspace string) (stri
 		if command.FileText == "" {
 			return "", fmt.Errorf("write_file requires file_text")
 		}
+		if result, ok := alreadyAppliedWriteResult(path, fsPath, command.FileText); ok {
+			return result, nil
+		}
 		if info, err := os.Stat(fsPath); err == nil && !info.IsDir() {
 			return replaceWholeFilePatch(path, command.FileText), nil
 		}
@@ -210,6 +213,9 @@ func TextEditorPatchInputWithWorkspace(arguments string, workspace string) (stri
 			if command.InsertText == "" {
 				return "", fmt.Errorf("insert requires insert_text")
 			}
+			if result, ok := alreadyAppliedInsertLineResult(path, fsPath, *command.InsertLine, command.InsertText); ok {
+				return result, nil
+			}
 			return insertLinePatch(path, fsPath, *command.InsertLine, command.InsertText)
 		}
 		if command.OldStr == "" {
@@ -217,6 +223,9 @@ func TextEditorPatchInputWithWorkspace(arguments string, workspace string) (stri
 		}
 		if command.InsertText == "" {
 			return "", fmt.Errorf("insert requires insert_text")
+		}
+		if result, ok := alreadyAppliedInsertAfterResult(path, fsPath, command.OldStr, command.InsertText); ok {
+			return result, nil
 		}
 		return insertAfterPatch(path, command.OldStr, command.InsertText), nil
 	case "move_file":
@@ -233,12 +242,28 @@ func TextEditorPatchInputWithWorkspace(arguments string, workspace string) (stri
 		if command.OldStr != "" {
 			return moveFilePatch(path, destPath, command.OldStr, alignReplacementIndent(command.OldStr, command.NewStr)), nil
 		}
-		return moveFilePatch(path, destPath, "", ""), nil
+		return moveWholeFilePatch(path, destPath, fsPath)
 	case "delete_file":
 		return "*** Begin Patch\n*** Delete File: " + path + "\n*** End Patch", nil
 	default:
 		return "", fmt.Errorf("unsupported command %q", command.Command)
 	}
+}
+
+func TextEditorInvalidArgumentsResult(reason string) string {
+	lines := []string{
+		"TEXT_EDITOR_INVALID_ARGUMENTS",
+		"file_edit_state: rejected",
+	}
+	if reason = strings.TrimSpace(reason); reason != "" {
+		lines = append(lines, "reason: "+reason)
+	}
+	lines = append(lines,
+		"required_next_action: call the matching file editor tool with all required fields from the visible schema",
+		"forbidden_next_action: retry_invalid_text_editor_command_or_send_empty_patch",
+		"recovery: use write_file, replace_text, insert_text_at_line, insert_text_after_match, move_file, or delete_file with the exact required JSON fields for that tool.",
+	)
+	return strings.Join(lines, "\n")
 }
 
 func TextEditorArgumentsFromPatch(input string) (string, bool) {
@@ -500,6 +525,68 @@ func alreadyAppliedReplaceResult(path string, fsPath string, oldText string, new
 	return alreadyAppliedResult(path), true
 }
 
+func alreadyAppliedWriteResult(path string, fsPath string, fileText string) (string, bool) {
+	info, err := os.Stat(fsPath)
+	if err != nil || info.IsDir() || info.Size() > maxTextEditorReadBytes {
+		return "", false
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil || string(data) != fileText {
+		return "", false
+	}
+	return alreadyAppliedResult(path), true
+}
+
+func alreadyAppliedInsertLineResult(path string, fsPath string, insertLine int, insertText string) (string, bool) {
+	if strings.TrimSpace(insertText) == "" {
+		return "", false
+	}
+	info, err := os.Stat(fsPath)
+	if err != nil || info.IsDir() || info.Size() > maxTextEditorReadBytes {
+		return "", false
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return "", false
+	}
+	lines := normalizedEditorLines(string(data))
+	insertLines := normalizedEditorLines(insertText)
+	if insertLine < 0 || insertLine > len(lines) || len(insertLines) == 0 {
+		return "", false
+	}
+	if hasLineBlockAt(lines, insertLine, insertLines) {
+		return alreadyAppliedResult(path), true
+	}
+	return "", false
+}
+
+func alreadyAppliedInsertAfterResult(path string, fsPath string, anchor string, insertText string) (string, bool) {
+	if strings.TrimSpace(insertText) == "" || strings.TrimSpace(anchor) == "" {
+		return "", false
+	}
+	info, err := os.Stat(fsPath)
+	if err != nil || info.IsDir() || info.Size() > maxTextEditorReadBytes {
+		return "", false
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return "", false
+	}
+	content := string(data)
+	if countExactLineBlock(content, anchor) != 1 {
+		return "", false
+	}
+	lines := normalizedEditorLines(content)
+	anchorLines := normalizedEditorLines(anchor)
+	insertLines := normalizedEditorLines(insertText)
+	for i := 0; i <= len(lines)-len(anchorLines); i++ {
+		if hasLineBlockAt(lines, i, anchorLines) && hasLineBlockAt(lines, i+len(anchorLines), insertLines) {
+			return alreadyAppliedResult(path), true
+		}
+	}
+	return "", false
+}
+
 func alreadyAppliedResult(path string) string {
 	return strings.Join([]string{
 		"TEXT_EDITOR_ALREADY_APPLIED",
@@ -534,6 +621,18 @@ func countExactLineBlock(content string, block string) int {
 		}
 	}
 	return count
+}
+
+func hasLineBlockAt(lines []string, start int, block []string) bool {
+	if len(block) == 0 || start < 0 || start+len(block) > len(lines) {
+		return false
+	}
+	for i, line := range block {
+		if lines[start+i] != line {
+			return false
+		}
+	}
+	return true
 }
 
 func expandReplacementFromFile(fsPath string, oldText string, newText string) (string, string, bool) {
@@ -618,6 +717,24 @@ func replaceWholeFilePatch(path string, content string) string {
 	lines = append(lines, prefixedLines("+", content)...)
 	lines = append(lines, "*** End Patch")
 	return strings.Join(lines, "\n")
+}
+
+func moveWholeFilePatch(path string, destPath string, fsPath string) (string, error) {
+	info, err := os.Stat(fsPath)
+	if err != nil || info.IsDir() {
+		return "", fmt.Errorf("move_file requires an existing source file")
+	}
+	if info.Size() > maxTextEditorReadBytes {
+		return "", fmt.Errorf("move_file source is too large")
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return "", err
+	}
+	lines := []string{"*** Begin Patch", "*** Delete File: " + path, "*** Add File: " + destPath}
+	lines = append(lines, prefixedLines("+", string(data))...)
+	lines = append(lines, "*** End Patch")
+	return strings.Join(lines, "\n"), nil
 }
 
 func moveFilePatch(path string, destPath string, oldText string, newText string) string {

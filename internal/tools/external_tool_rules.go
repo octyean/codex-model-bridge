@@ -17,6 +17,9 @@ func normalizeExternalToolSummary(name string, description string) (string, stri
 	if externalToolBaseName(name) == externalSkillViewToolName {
 		return mcpResourceProxyToolName, "Read local skill files and linked skill resources through the unified context resource reader."
 	}
+	if externalToolBaseName(name) == "file_search" {
+		return FileSearchToolName, "Search local workspace files by literal text, then read matching files with codex_context_resource."
+	}
 	return name, normalizeExternalToolDescription(description)
 }
 

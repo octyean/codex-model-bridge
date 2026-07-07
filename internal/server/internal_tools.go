@@ -14,7 +14,7 @@ import (
 
 func (s *Server) hasInternalTools(toolCtx tools.Context) bool {
 	for _, entry := range toolCtx.Tools {
-		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource {
+		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource || entry.Kind() == tools.KindFileSearch {
 			return true
 		}
 	}
@@ -84,14 +84,15 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 	internalMessage := message
 	internalMessage.ToolCalls = make([]providers.ChatToolCall, 0, len(resolved))
 	for _, item := range resolved {
+		formattedOutput := adapters.FormatToolOutputWithArguments(adapter, item.descriptor, item.arguments, item.output)
 		toollog.ToolCall(logCtx.RequestID, logCtx.Model, logCtx.Profile, item.call.ID, item.entry, item.modelArguments, message.ReasoningContent)
 		toollog.ToolCallFrame(logCtx.RequestID, logCtx.Model, logCtx.Profile, item.call.ID, item.entry, item.modelArguments, item.arguments, tools.RuntimeArguments(item.entry, item.arguments))
-		toollog.ToolOutput(logCtx, item.call.ID, item.descriptor, item.arguments, item.output, item.output)
+		toollog.ToolOutput(logCtx, item.call.ID, item.descriptor, item.arguments, item.output, formattedOutput)
 		internalMessage.ToolCalls = append(internalMessage.ToolCalls, item.call)
 		outputs = append(outputs, providers.ChatMessage{
 			Role:       "tool",
 			ToolCallID: item.call.ID,
-			Content:    item.output,
+			Content:    formattedOutput,
 		})
 	}
 	followUp := req

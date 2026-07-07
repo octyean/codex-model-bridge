@@ -16,6 +16,7 @@ const (
 	KindTextEditor  = "text_editor_patch"
 	KindToolSearch  = "tool_search"
 	KindMCPResource = "mcp_resource"
+	KindFileSearch  = "file_search"
 	KindWebSearch   = "web_search"
 	KindShell       = "shell"
 	KindHarnessUI   = "harness_ui"
@@ -248,6 +249,8 @@ func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedT
 		return convertCustom(tool, adapter)
 	case "tool_search":
 		return convertToolSearch(tool.Description, tool.Raw)
+	case "file_search":
+		return convertFileSearch(tool)
 	case "local_shell", "shell":
 		return convertShell(tool, adapter, toolType)
 	default:
@@ -283,7 +286,21 @@ func convertFunctionWithSideEffect(tool codex.ResponseTool, adapter adapters.Ada
 }
 
 func IsHarnessUITool(name string) bool {
-	return strings.TrimSpace(name) == "update_plan"
+	switch strings.TrimSpace(name) {
+	case "create_goal", "get_goal", "update_goal", "update_plan", "request_user_input":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsPlanModeOnlyHarnessUITool(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "create_goal", "get_goal", "update_goal", "request_user_input":
+		return true
+	default:
+		return false
+	}
 }
 
 func IsHarnessUIEntry(entry Entry) bool {

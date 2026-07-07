@@ -29,6 +29,7 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 
 ```text
 ~/.codex-bridge/logs/tool-calls.jsonl
+~/.codex-bridge/logs/recoveries.jsonl
 ~/.codex-bridge/logs/incidents.jsonl
 ~/.codex-bridge/logs/upstream-requests/
 ```
@@ -45,6 +46,7 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 ~/.codex-bridge/logs/sessions/<codex_session_id>/bridge-responses.jsonl
 ~/.codex-bridge/logs/sessions/<codex_session_id>/tool-catalog.jsonl
 ~/.codex-bridge/logs/sessions/<codex_session_id>/tool-calls.jsonl
+~/.codex-bridge/logs/sessions/<codex_session_id>/recoveries.jsonl
 ~/.codex-bridge/logs/sessions/<codex_session_id>/incidents.jsonl
 ```
 
@@ -72,6 +74,7 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 | `schema_quality` | 模型侧 schema 质量，如 `strong`、`open_object`、`envelope_only` |
 | `model_call` | 工具失败、改写或改道时挂回的模型原始工具调用 |
 | `failure_kind` | 已识别的失败类型，如 `context_mismatch`、`tool_search_empty` |
+| `diagnostic_level` | 诊断等级：`ok`、`recoverable`、`incident`、`fatal` |
 | `request_summary` | 请求摘要，包含最后一段用户提示词预览和 hash |
 | `upstream_request_dump` | 对应上游请求 dump 文件路径 |
 
@@ -94,8 +97,12 @@ Chat fallback 的工具适配边界：
 | 工具来源 | OpenAI Responses 直转 | Chat fallback |
 | --- | --- | --- |
 | `function`、`custom`、`apply_patch`、`tool_search`、`local_shell`、namespace MCP function | 由上游 Responses 协议处理 | bridge 转换为 Chat tools，再投射回 Codex Responses item |
-| MCP resource proxy、bridge 内置 `web_search` proxy | 不需要直转 | bridge 转成本地可执行工具或代理工具 |
-| `file_search`、`computer`、`image_generation`、`code_interpreter` 等 hosted tools | 上游支持时原样直转 | 不能在 Chat fallback 中凭空执行，只能记录为 unsupported 并提示可替代路径 |
+| MCP resource proxy、bridge 内置 `web_search` proxy、`file_search` -> `search_files` proxy | 不需要直转 | bridge 转成本地可执行工具或代理工具 |
+| `computer`、`image_generation`、`code_interpreter` 等 hosted tools | 上游支持时原样直转 | 不能在 Chat fallback 中凭空执行，只能记录为 unsupported 并提示可替代路径 |
+
+Chat fallback 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 `search_files`。它只做本地工作区文本搜索，返回命中行；需要读取完整文件时继续用 `codex_context_resource action=read_local_file`。如果 Codex 侧后续原生下发 `file_search`，也会归一到同一个 `search_files` 合同。
+
+`tool_search` 只用于发现可调用工具，不读取本地文件或 MCP resource。搜索意图已经被当前可见工具覆盖时，历史回灌只保留对应工具提示，不附带低相关工具列表。
 
 新增日志事件：
 
@@ -137,6 +144,7 @@ tail -n 20 "$LOG_DIR/tool-catalog.jsonl"
 tail -n 20 "$LOG_DIR/prompt-requests.jsonl"
 tail -n 20 "$LOG_DIR/prompt-responses.jsonl"
 tail -n 100 "$LOG_DIR/tool-calls.jsonl"
+tail -n 100 "$LOG_DIR/recoveries.jsonl" 2>/dev/null || true
 tail -n 100 "$LOG_DIR/incidents.jsonl" 2>/dev/null || true
 ```
 

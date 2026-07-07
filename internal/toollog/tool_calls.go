@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -245,6 +246,8 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 		"formatted_output": formattedOutput,
 		"runtime_outcome":  outcome,
 	}
+	level := diagnosticLevel(failureKind, outcome)
+	record["diagnostic_level"] = level
 	if modelCall != nil {
 		record["model_call"] = modelCall
 	}
@@ -264,18 +267,72 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 		record["request_summary"] = ctx.RequestSummary
 	}
 	appendRecord(record)
-	if shouldWriteIncident(failureKind) {
+	if level == "recoverable" {
+		writeRecovery(record)
+	}
+	if level == "incident" || level == "fatal" {
 		incidentlog.Write("tool_error", record)
 	}
 }
 
-func shouldWriteIncident(failureKind adapters.PatchFailureKind) bool {
-	return failureKind != "" && failureKind != adapters.PatchFailureKind(adapters.ToolFailureMCPResourcesEmpty)
+func diagnosticLevel(failureKind adapters.PatchFailureKind, outcome toolruntime.Outcome) string {
+	category := strings.TrimSpace(string(failureKind))
+	if category == "" {
+		category = strings.TrimSpace(outcome.Category)
+	}
+	if category == "" || outcome.OK {
+		return "ok"
+	}
+	switch category {
+	case "already_applied",
+		"context_mismatch",
+		"invalid_arguments",
+		"malformed_patch",
+		"invalid_hunk",
+		"read_file_operation",
+		"no_progress",
+		"path_error",
+		"nonzero_exit",
+		"structured_failure",
+		"schema_validation_error",
+		"mcp_resource_local_identifier",
+		"mcp_resource_server_unknown",
+		"mcp_resource_unlisted_identifier",
+		"mcp_resource_read_failed",
+		"mcp_resources_empty",
+		"tool_search_empty",
+		"file_search_empty",
+		"file_search_failed",
+		"local_file_read_failed":
+		return "recoverable"
+	case "permission_or_sandbox",
+		"tool_unavailable",
+		"runtime_no_progress",
+		"tool_execution_error":
+		return "incident"
+	default:
+		return "incident"
+	}
+}
+
+func writeRecovery(record map[string]any) {
+	path := ConfiguredPath()
+	if path == "" {
+		return
+	}
+	out := cloneRecord(record)
+	out["event"] = "tool_recovery"
+	out["time"] = time.Now().Format(time.RFC3339Nano)
+	diagnostics.WriteJSONL(filepath.Join(filepath.Dir(path), "recoveries.jsonl"), out)
+	if sessionID := recordSessionID(out); sessionID != "" {
+		diagnostics.WriteSessionRecord(path, sessionID, "recoveries.jsonl", out)
+	}
 }
 
 func shouldLogToolOutput(descriptor adapters.ToolDescriptor, rawArguments string, rawOutput string, outcome toolruntime.Outcome) bool {
 	return isPatchWriteKind(descriptor.Kind) ||
 		descriptor.SideEffect == tools.SideEffectRead ||
+		descriptor.SideEffect == tools.SideEffectStatus ||
 		descriptor.Kind == tools.KindWebSearch ||
 		!outcome.OK ||
 		adapters.ClassifyToolFailureWithArguments(descriptor, rawArguments, rawOutput) != adapters.ToolFailureNone

@@ -13,7 +13,7 @@ func filterUnavailableRuntimeTools(chatTools []providers.ChatTool, toolCtx *tool
 	}
 	out := chatTools[:0]
 	for _, tool := range chatTools {
-		if tool.Function.Name == "request_user_input" {
+		if tools.IsPlanModeOnlyHarnessUITool(tool.Function.Name) {
 			delete(toolCtx.Tools, tool.Function.Name)
 			continue
 		}

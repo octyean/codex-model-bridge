@@ -8,8 +8,7 @@ import (
 )
 
 func isUnsupportedHostedTool(toolType string) bool {
-	return toolType == "file_search" ||
-		toolType == "mcp" ||
+	return toolType == "mcp" ||
 		toolType == "computer" ||
 		toolType == "image_generation" ||
 		toolType == "code_interpreter"
@@ -33,7 +32,7 @@ func UnsupportedToolNote(responseTools []codex.ResponseTool, searchEnabled bool)
 			continue
 		}
 		switch toolType {
-		case "file_search", "mcp", "computer", "image_generation", "code_interpreter":
+		case "mcp", "computer", "image_generation", "code_interpreter":
 			name := rawString(tool.Raw, "name", tool.Name)
 			if name == "" {
 				name = toolType

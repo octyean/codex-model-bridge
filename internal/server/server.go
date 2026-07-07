@@ -154,6 +154,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	chatTools, toolCtx := tools.FromCodex(req.Tools, adapter)
 	toolCtx.Workspace = workspace
 	chatTools = append(chatTools, tools.FromAdditionalTools(transcriptResult.Items, adapter, &toolCtx)...)
+	chatTools = tools.AddFileSearchProxy(chatTools, &toolCtx)
 	chatTools = filterUnavailableRuntimeTools(chatTools, &toolCtx, transcriptResult.Messages)
 	if s.runtime.HasSearch() && tools.HasWebSearch(req.Tools) {
 		chatTools = tools.AddWebSearchProxy(chatTools, &toolCtx)

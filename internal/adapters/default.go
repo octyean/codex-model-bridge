@@ -127,7 +127,7 @@ func textEditorToolDescription() string {
 func formatTextEditorToolOutput(output string) string {
 	output = sanitizeTextEditorOutput(output)
 	kind := ClassifyPatchFailure(output)
-	if recovery := TextEditorRecoveryText(kind); recovery != "" {
+	if recovery := TextEditorRecoveryText(kind); recovery != "" && !strings.Contains(output, "required_next_action:") {
 		return output + "\n\n" + recovery
 	}
 	if PatchSucceeded(output) {

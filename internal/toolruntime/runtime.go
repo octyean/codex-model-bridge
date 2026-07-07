@@ -190,10 +190,14 @@ func ObserveOutput(ctx OutputContext) Outcome {
 		profile = ProfileTool(tool)
 	}
 	ok, category := outputStatus(ctx)
+	progress := ok
+	if category == "status_ack" {
+		progress = false
+	}
 	outcome := Outcome{
 		OK:          ok,
 		Category:    category,
-		Progress:    ok,
+		Progress:    progress,
 		OutputHash:  hashText(ctx.RawOutput),
 		ProgressKey: profile.Signature,
 	}
@@ -397,9 +401,6 @@ func outputStatus(ctx OutputContext) (bool, string) {
 		}
 		return false, "tool_failure"
 	}
-	if ctx.Tool.SideEffect == "status" {
-		return false, "status_ack"
-	}
 	if toolBoundaryFailureOutput(ctx.RawOutput) {
 		return false, "tool_unavailable"
 	}
@@ -411,6 +412,9 @@ func outputStatus(ctx OutputContext) (bool, string) {
 	}
 	if failedByStructuredPayload(ctx.RawOutput) {
 		return false, "structured_failure"
+	}
+	if ctx.Tool.SideEffect == "status" {
+		return true, "status_ack"
 	}
 	return true, "success"
 }

@@ -49,7 +49,12 @@ func ToolSearchOutputSummaryForCall(raw any, arguments string, ctx Context) stri
 		return string(data)
 	}
 	lines := []string{"TOOL_SEARCH_RESULTS"}
-	lines = append(lines, visibleToolSearchGuidance(arguments, ctx)...)
+	guidance := visibleToolSearchGuidance(arguments, ctx)
+	if len(guidance) > 0 {
+		lines = append(lines, guidance...)
+		lines = append(lines, "search_results_hidden: already_visible_tool_covers_query")
+		return strings.Join(lines, "\n")
+	}
 	if len(results) == 0 {
 		if len(lines) == 1 {
 			return "[]"
@@ -73,11 +78,14 @@ func visibleToolSearchGuidance(arguments string, ctx Context) []string {
 	}
 	text := toolSearchQueryText(arguments)
 	var lines []string
-	if ctx.Has(mcpResourceProxyToolName) && looksLikeLocalReadQuery(text) {
+	if ctx.Has(mcpResourceProxyToolName) && (looksLikeLocalReadQuery(text) || localPathFromText(text, ctx) != "") {
 		lines = append(lines, "- codex_context_resource: already visible. Use action=read_local_file with path, start_line, and line_limit to read local files or skill files.")
 	}
 	if ctx.Has(TextEditorWriteToolName) && looksLikeFileEditQuery(text) {
 		lines = append(lines, "- write_file/replace_text/insert_text_at_line/insert_text_after_match/move_file/delete_file: already visible file editing tools. Use their schemas directly instead of searching again.")
+	}
+	if ctx.Has(FileSearchToolName) && looksLikeFileSearchQuery(text) {
+		lines = append(lines, "- search_files: already visible. Use query plus optional path/glob to find matching local files, then read hits with codex_context_resource.")
 	}
 	return lines
 }
@@ -119,6 +127,11 @@ func looksLikeLocalReadQuery(text string) bool {
 func looksLikeFileEditQuery(text string) bool {
 	return containsAny(text, "write", "edit", "replace", "insert", "move", "delete", "patch", "modify", "写", "编辑", "替换", "插入", "移动", "删除", "修改") &&
 		containsAny(text, "file", "path", "repo", "workspace", "文件", "路径", "仓库")
+}
+
+func looksLikeFileSearchQuery(text string) bool {
+	return containsAny(text, "search", "find", "grep", "rg", "match", "locate", "查找", "搜索", "检索", "匹配") &&
+		containsAny(text, "file", "path", "repo", "repository", "workspace", "code", "文件", "路径", "仓库", "代码")
 }
 
 func containsAny(text string, values ...string) bool {
@@ -172,51 +185,6 @@ func clipToolSearchText(text string, limit int) string {
 		return text
 	}
 	return text[:limit-3] + "..."
-}
-
-func ToolSearchCallWithContext(arguments string, ctx Context) (string, string, bool) {
-	if !ctx.Has("exec_command") {
-		return "", "", false
-	}
-	if path := toolSearchLocalPath(arguments, ctx); path != "" {
-		return "exec_command", marshalObject(map[string]any{"cmd": localFileReadCommand(localResourceRead{Path: path, StartLine: 1, LineLimit: 240})}), true
-	}
-	return "", "", false
-}
-
-func toolSearchLocalPath(arguments string, ctx Context) string {
-	var value any
-	if err := json.Unmarshal([]byte(arguments), &value); err == nil {
-		if path := toolSearchLocalPathFromValue(value, ctx); path != "" {
-			return path
-		}
-	}
-	return localPathFromText(arguments, ctx)
-}
-
-func toolSearchLocalPathFromValue(value any, ctx Context) string {
-	switch v := value.(type) {
-	case string:
-		return localPathFromText(v, ctx)
-	case []any:
-		for _, item := range v {
-			if path := toolSearchLocalPathFromValue(item, ctx); path != "" {
-				return path
-			}
-		}
-	case map[string]any:
-		for _, key := range []string{"path", "file", "uri", "query", "goal"} {
-			if path := toolSearchLocalPathFromValue(v[key], ctx); path != "" {
-				return path
-			}
-		}
-		for _, key := range []string{"paths", "files"} {
-			if path := toolSearchLocalPathFromValue(v[key], ctx); path != "" {
-				return path
-			}
-		}
-	}
-	return ""
 }
 
 func localPathFromText(text string, ctx Context) string {

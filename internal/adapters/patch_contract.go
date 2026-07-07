@@ -33,6 +33,7 @@ const (
 	PatchFailureContextMismatch     PatchFailureKind = "context_mismatch"
 	PatchFailureMalformedPatch      PatchFailureKind = "malformed_patch"
 	PatchFailureInvalidHunk         PatchFailureKind = "invalid_hunk"
+	PatchFailureInvalidArguments    PatchFailureKind = "invalid_arguments"
 	PatchFailureReadFileOperation   PatchFailureKind = "read_file_operation"
 	PatchFailureAlreadyApplied      PatchFailureKind = "already_applied"
 	PatchFailureNoProgress          PatchFailureKind = "no_progress"
@@ -53,6 +54,9 @@ const (
 	ToolFailureSchemaValidation         ToolFailureKind = "schema_validation_error"
 	ToolFailureExecutionError           ToolFailureKind = "tool_execution_error"
 	ToolFailureStructuredFailure        ToolFailureKind = "structured_failure"
+	ToolFailureFileSearchEmpty          ToolFailureKind = "file_search_empty"
+	ToolFailureFileSearchFailed         ToolFailureKind = "file_search_failed"
+	ToolFailureLocalFileReadFailed      ToolFailureKind = "local_file_read_failed"
 )
 
 func NormalizePatchInput(input string) string {
@@ -77,6 +81,8 @@ func ClassifyPatchFailure(output string) PatchFailureKind {
 		return PatchFailureNone
 	case strings.Contains(text, "*** read file:"):
 		return PatchFailureReadFileOperation
+	case strings.Contains(text, "text_editor_invalid_arguments"):
+		return PatchFailureInvalidArguments
 	case strings.Contains(text, "text_editor_already_applied"):
 		return PatchFailureAlreadyApplied
 	case strings.Contains(text, "file_edit_state: not_modified"),
@@ -152,6 +158,17 @@ func ClassifyToolFailureWithArguments(tool ToolDescriptor, arguments string, out
 		if trimmed == "[]" {
 			return ToolFailureToolSearchEmpty
 		}
+	case "search_files":
+		switch {
+		case markerValue(trimmed, "search_failed") == "true":
+			return ToolFailureFileSearchFailed
+		case markerValue(trimmed, "match_count") == "0":
+			return ToolFailureFileSearchEmpty
+		}
+	case "codex_context_resource":
+		if diagnosticMarkerLine(trimmed, "LOCAL_FILE_READ_FAILED") {
+			return ToolFailureLocalFileReadFailed
+		}
 	}
 	return ToolFailureNone
 }
@@ -164,6 +181,17 @@ func diagnosticMarkerLine(output string, marker string) bool {
 		}
 	}
 	return false
+}
+
+func markerValue(output string, key string) string {
+	prefix := strings.ToLower(key) + ":"
+	for _, line := range strings.Split(output, "\n") {
+		text := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(text), prefix) {
+			return strings.TrimSpace(text[len(prefix):])
+		}
+	}
+	return ""
 }
 
 func toolSchemaValidationFailure(output string) bool {
@@ -251,6 +279,9 @@ func toolFailureText(output string) string {
 
 func FormatToolOutputWithArguments(adapter Adapter, tool ToolDescriptor, arguments string, output string) string {
 	if recovery := ToolRecoveryText(ClassifyToolFailureWithArguments(tool, arguments, output)); recovery != "" {
+		if strings.Contains(output, "required_next_action:") {
+			return output
+		}
 		return output + "\n\n" + recovery
 	}
 	return adapter.FormatToolOutput(tool, output)
@@ -278,6 +309,12 @@ func ToolRecoveryText(kind ToolFailureKind) string {
 		return "TOOL_EXECUTION_ERROR\nrequired_next_action: inspect_the_error_and_choose_a_materially_different_action\nforbidden_next_action: repeat_same_tool_arguments_without_new_information\nrecovery: the tool runtime failed after invocation. Retry only when the next call changes the failed precondition, target, or argument shape."
 	case ToolFailureStructuredFailure:
 		return "TOOL_STRUCTURED_FAILURE\nrequired_next_action: treat_success_false_ok_false_or_isError_true_as_a_failed_tool_result\nforbidden_next_action: assume_the_tool_succeeded_from_json_presence_alone\nrecovery: the returned structured payload says the operation failed. Continue only after changing tool, target, or arguments."
+	case ToolFailureFileSearchEmpty:
+		return "FILE_SEARCH_EMPTY\nrequired_next_action: revise_query_path_or_glob_or_continue_from_existing_context\nforbidden_next_action: repeat_same_search_files_arguments\nrecovery: search_files completed but found no matching local lines. Change query/path/glob, use already known files, or summarize that no local match was found."
+	case ToolFailureFileSearchFailed:
+		return "FILE_SEARCH_FAILED\nrequired_next_action: inspect_reason_then_change_query_path_or_glob\nforbidden_next_action: repeat_same_search_files_arguments\nrecovery: search_files could not complete. Fix the query, path, or glob before retrying."
+	case ToolFailureLocalFileReadFailed:
+		return "LOCAL_FILE_READ_FAILED_RECOVERY\nrequired_next_action: verify_local_path_or_use_search_files_to_find_the_file\nforbidden_next_action: retry_same_missing_path\nrecovery: the local file read failed. Check the path with search_files or directory inspection, then read the corrected file path."
 	default:
 		return ""
 	}
@@ -449,9 +486,11 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 func TextEditorRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines. If the requested content is already present, stop editing and summarize; otherwise send a smaller file editor call using exact current old_str or insert_line."
+		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file_or_use_already_read_current_content_then_retry_exact_edit\nforbidden_next_action: retry_same_edit_or_mark_task_complete\nrecovery: read the current target file lines if they are not already visible in this turn. If the requested content is already present, stop editing and summarize; otherwise call replace_text or insert_text_after_match with exact current old_str."
 	case PatchFailureMalformedPatch, PatchFailureInvalidHunk, PatchFailureReadFileOperation:
 		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: call the matching file editor tool with exact JSON arguments."
+	case PatchFailureInvalidArguments:
+		return "TEXT_EDITOR_INVALID_ARGUMENTS\nfile_edit_state: rejected\nrequired_next_action: regenerate_text_editor_arguments_from_visible_schema\nforbidden_next_action: retry_same_invalid_arguments\nrecovery: call the matching file editor tool with every required JSON field from the visible schema."
 	case PatchFailureAlreadyApplied:
 		return "TEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit\nrecovery: the requested content is already present. Do not send the same text editor edit again; inspect current file content, then edit a different missing change or summarize."
 	case PatchFailureNoProgress:

@@ -280,17 +280,6 @@ func responseItemFromToolCall(ctx context.Context, callID string, entry tools.En
 			"status":  "completed",
 		}
 	case tools.KindToolSearch:
-		if name, nativeArguments, ok := tools.ToolSearchCallWithContext(canonicalArguments, toolCtx); ok {
-			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, name, nativeArguments, "local_tool_search_resource")
-			return codex.ResponseItem{
-				"id":        toolItemID("function_call", callID),
-				"type":      "function_call",
-				"call_id":   callID,
-				"name":      name,
-				"arguments": nativeArguments,
-				"status":    "completed",
-			}
-		}
 		return codex.ResponseItem{
 			"id":        toolItemID("tool_search_call", callID),
 			"type":      "tool_search_call",
@@ -304,6 +293,30 @@ func responseItemFromToolCall(ctx context.Context, callID string, entry tools.En
 		if name != "read_mcp_resource" && name != "list_mcp_resources" && name != "list_mcp_resource_templates" {
 			toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, name, nativeArguments, "local_context_resource")
 		}
+		return codex.ResponseItem{
+			"id":        toolItemID("function_call", callID),
+			"type":      "function_call",
+			"call_id":   callID,
+			"name":      name,
+			"arguments": nativeArguments,
+			"status":    "completed",
+		}
+	case tools.KindFileSearch:
+		name, nativeArguments, ok := tools.FileSearchCallForTool(canonicalArguments, toolCtx)
+		if !ok {
+			return codex.ResponseItem{
+				"id":   toolItemID("function_call", callID),
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]string{{
+					"type": "output_text",
+					"text": "CODEX_BRIDGE_INTERNAL_TOOL_ERROR\n" +
+						"tool: " + entry.Name() + "\n" +
+						"reason: exec_command_unavailable_for_file_search",
+				}},
+			}
+		}
+		toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, name, nativeArguments, "local_file_search")
 		return codex.ResponseItem{
 			"id":        toolItemID("function_call", callID),
 			"type":      "function_call",
@@ -599,12 +612,7 @@ func textEditorLocalResultCommand(toolName string, canonicalArguments string, in
 }
 
 func textEditorInvalidArgumentsResult() string {
-	return strings.Join([]string{
-		"TEXT_EDITOR_INVALID_ARGUMENTS",
-		"file_edit_state: rejected",
-		"required_next_action: call the matching file editor tool with all required fields",
-		"forbidden_next_action: retry_invalid_text_editor_command_or_send_empty_patch",
-	}, "\n")
+	return tools.TextEditorInvalidArgumentsResult("")
 }
 
 func textEditorLocalResultPath(input string) string {

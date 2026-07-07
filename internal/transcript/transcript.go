@@ -273,9 +273,6 @@ func textEditorTranslationNeeded(responseTools []codex.ResponseTool, adapter ada
 }
 
 func shouldHideFunctionToolHistory(name string, allowImageInput bool) bool {
-	if tools.IsHarnessUITool(name) {
-		return true
-	}
 	return tools.RequiresImageInputTool(name) && !allowImageInput
 }
 
@@ -589,7 +586,7 @@ func hiddenTextEditorHistoryOutputSummary(output string, call hiddenFileEditCall
 	if call.alreadyApplied {
 		formattedOutput += "\nTEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit"
 	}
-	if recovery := adapters.TextEditorRecoveryText(adapters.ClassifyPatchFailure(formattedOutput)); recovery != "" {
+	if recovery := adapters.TextEditorRecoveryText(adapters.ClassifyPatchFailure(formattedOutput)); recovery != "" && !strings.Contains(formattedOutput, "required_next_action:") {
 		formattedOutput += "\n\n" + recovery
 	}
 	return "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN\n" + formattedOutput
@@ -681,6 +678,13 @@ func outputToolDescriptor(item map[string]any) adapters.ToolDescriptor {
 
 func outputToolDescriptorForCall(item map[string]any, call providers.ChatToolCall) adapters.ToolDescriptor {
 	descriptor := outputToolDescriptor(item)
+	if tools.IsHarnessUITool(call.Function.Name) {
+		descriptor.Name = call.Function.Name
+		descriptor.Kind = tools.KindHarnessUI
+		descriptor.InputMode = tools.InputModeJSON
+		descriptor.SideEffect = tools.SideEffectStatus
+		return descriptor
+	}
 	switch call.Function.Name {
 	case "apply_patch":
 		descriptor.Name = "apply_patch"
@@ -695,6 +699,16 @@ func outputToolDescriptorForCall(item map[string]any, call providers.ChatToolCal
 	case "tool_search":
 		descriptor.Name = "tool_search"
 		descriptor.Kind = tools.KindToolSearch
+		descriptor.InputMode = tools.InputModeJSON
+		descriptor.SideEffect = tools.SideEffectRead
+	case tools.FileSearchToolName:
+		descriptor.Name = tools.FileSearchToolName
+		descriptor.Kind = tools.KindFileSearch
+		descriptor.InputMode = tools.InputModeJSON
+		descriptor.SideEffect = tools.SideEffectRead
+	case "codex_context_resource":
+		descriptor.Name = "codex_context_resource"
+		descriptor.Kind = tools.KindMCPResource
 		descriptor.InputMode = tools.InputModeJSON
 		descriptor.SideEffect = tools.SideEffectRead
 	case "shell", "exec_command":

@@ -367,6 +367,8 @@ func shouldKeepOutputSummaryLine(line string) bool {
 		return true
 	case strings.HasPrefix(line, "LOCAL_FILE_READ_"):
 		return true
+	case strings.HasPrefix(line, "FILE_SEARCH_"):
+		return true
 	case strings.HasPrefix(line, "line_range:"):
 		return true
 	case strings.HasPrefix(line, "total_lines:"):
@@ -378,6 +380,14 @@ func shouldKeepOutputSummaryLine(line string) bool {
 	case strings.HasPrefix(line, "file_edit_state:"):
 		return true
 	case strings.HasPrefix(line, "changed_files:"):
+		return true
+	case strings.HasPrefix(line, "match_count:"):
+		return true
+	case strings.HasPrefix(line, "shown_count:"):
+		return true
+	case strings.HasPrefix(line, "search_failed:"):
+		return true
+	case strings.HasPrefix(line, "diagnostic_level:"):
 		return true
 	case strings.HasPrefix(line, "required_next_action:"):
 		return true

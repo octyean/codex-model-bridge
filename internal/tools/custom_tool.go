@@ -27,7 +27,7 @@ func ExtractCustomToolInputWithWorkspace(entry Entry, arguments string, adapter 
 	if entry.Kind() == KindTextEditor {
 		input, err := TextEditorPatchInputWithWorkspace(TextEditorCanonicalArguments(entry.Name(), arguments), workspace)
 		if err != nil {
-			return ""
+			return TextEditorInvalidArgumentsResult(err.Error())
 		}
 		return adapter.NormalizePatchInput(input)
 	}

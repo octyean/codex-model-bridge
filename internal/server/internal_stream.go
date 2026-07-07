@@ -150,7 +150,7 @@ streamLoop:
 func isInternalToolEvent(event map[string]any) bool {
 	item, _ := event["item"].(map[string]any)
 	name, _ := item["name"].(string)
-	return name == tools.WebSearchProxyToolName
+	return name == tools.WebSearchProxyToolName || name == tools.FileSearchToolName
 }
 
 func chatMessageFromStreamState(state *streamState) providers.ChatMessage {

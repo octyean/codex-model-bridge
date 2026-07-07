@@ -44,11 +44,23 @@ func Write(event string, record map[string]any) {
 	if record == nil {
 		record = map[string]any{}
 	}
+	if _, ok := record["diagnostic_level"]; !ok {
+		record["diagnostic_level"] = diagnosticLevelForEvent(event)
+	}
 	record["time"] = time.Now().Format(time.RFC3339Nano)
 	record["event"] = event
 	diagnostics.WriteJSONL(path, record)
 	if sessionID := recordSessionID(record); sessionID != "" {
 		diagnostics.WriteSessionRecord(path, sessionID, "incidents.jsonl", record)
+	}
+}
+
+func diagnosticLevelForEvent(event string) string {
+	switch {
+	case strings.Contains(event, "upstream"), strings.Contains(event, "empty_"):
+		return "fatal"
+	default:
+		return "incident"
 	}
 }
 
