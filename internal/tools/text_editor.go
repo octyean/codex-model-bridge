@@ -10,15 +10,15 @@ import (
 	"codex-bridge/internal/adapters"
 )
 
-const TextEditorToolName = "workspace_file_editor"
+const TextEditorToolName = "file_editor"
 
 const (
-	TextEditorWriteToolName       = "write_workspace_file"
-	TextEditorReplaceToolName     = "replace_workspace_text"
-	TextEditorInsertLineToolName  = "insert_workspace_text_at_line"
-	TextEditorInsertMatchToolName = "insert_workspace_text_after_match"
-	TextEditorMoveToolName        = "move_workspace_file"
-	TextEditorDeleteToolName      = "delete_workspace_file"
+	TextEditorWriteToolName       = "write_file"
+	TextEditorReplaceToolName     = "replace_text"
+	TextEditorInsertLineToolName  = "insert_text_at_line"
+	TextEditorInsertMatchToolName = "insert_text_after_match"
+	TextEditorMoveToolName        = "move_file"
+	TextEditorDeleteToolName      = "delete_file"
 )
 
 const maxTextEditorReadBytes = 4 * 1024 * 1024
@@ -443,7 +443,7 @@ func samePathMoveResult(path string) string {
 		"file_edit_state: not_modified",
 		"required_next_action: use_str_replace_for_same_file_content_edits",
 		"forbidden_next_action: retry_move_file_same_path",
-		"recovery: source and destination are the same file. Do not use move_file for same-path edits; use str_replace or insert on the existing path.",
+		"recovery: source and destination are the same file. Do not use move_file for same-path edits; use replace_text or insert_text_after_match on the existing path.",
 	}, "\n")
 }
 

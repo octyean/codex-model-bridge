@@ -14,28 +14,33 @@ import (
 
 func (s *Server) hasInternalTools(toolCtx tools.Context) bool {
 	for _, entry := range toolCtx.Tools {
-		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource || isSkillViewTool(entry) {
+		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
+func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, sessionID string, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool) {
 	current := message
 	currentReq := req
 	var resp *providers.ChatCompletionResponse
 	handled := false
+	sequence := 0
 	for {
 		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current, toolCtx, adapter, logCtx)
 		if !ok {
 			break
 		}
+		sequence++
+		s.writePromptRequest(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "internal_tool_followup", providers.PreparedChatRequest(followUp), map[string]any{"sequence": sequence})
 		next, err := provider.Create(ctx, followUp)
 		if err != nil {
 			s.logger.Error("internal_tool_followup_failed", "error", err.Error())
+			s.writePromptFailure(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "internal_tool_followup", err.Error(), map[string]any{"sequence": sequence})
 			return nil, providers.ChatCompletionRequest{}, false
 		}
+		s.writePromptResponse(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "internal_tool_followup", next, map[string]any{"sequence": sequence})
 		if len(next.Choices) == 0 {
 			return next, followUp, true
 		}
@@ -100,9 +105,6 @@ func (s *Server) internalToolOutput(ctx context.Context, req providers.ChatCompl
 	switch {
 	case entry.Kind() == tools.KindWebSearch:
 		return s.searchToolOutput(ctx, arguments), adapters.ToolDescriptor{Name: tools.WebSearchProxyToolName, Kind: tools.KindWebSearch, OriginalType: "web_search_preview"}, true
-	case isSkillViewTool(entry):
-		output, ok := skillViewOutput(req.Messages, arguments)
-		return output, internalToolDescriptor(entry), ok
 	default:
 		return "", adapters.ToolDescriptor{}, false
 	}

@@ -24,6 +24,10 @@ func convertNamespace(tool codex.ResponseTool, adapter adapters.Adapter) []conve
 		if !ok {
 			continue
 		}
+		if converted, ok := convertExternalTool(rawString(child.Raw, "name", child.Name)); ok {
+			out = append(out, converted...)
+			continue
+		}
 		for _, converted := range convertTool(child, adapter) {
 			converted.entry.Namespace = namespace
 			converted.entry.UpstreamName = namespacedToolName(namespace, converted.entry.OriginalName())

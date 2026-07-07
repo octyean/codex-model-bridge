@@ -172,7 +172,11 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 			if hiddenToolCalls[callID] {
 				continue
 			}
-			rawOutput := outputText(item)
+			rawArguments := ""
+			if call, ok := toolCallsByID[callID]; ok {
+				rawArguments = call.Function.Arguments
+			}
+			rawOutput := outputTextForToolCall(item, rawArguments, toolCtx)
 			if result, ok := runtimeLocalResults[callID]; ok {
 				toolCallsByID[callID] = result.call
 				replacePendingToolCall(pendingToolCalls, result.call)
@@ -192,10 +196,6 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				descriptor = outputToolDescriptorForCall(item, call)
 			}
 			descriptor = adapterOutputToolDescriptor(adapter, descriptor)
-			rawArguments := ""
-			if call, ok := toolCallsByID[callID]; ok {
-				rawArguments = call.Function.Arguments
-			}
 			if descriptor.Name == "exec_command" || descriptor.Kind == tools.KindShell {
 				rawOutput = tools.ShellOutputText(rawOutput)
 			}
@@ -234,7 +234,9 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	if len(messages) == 0 {
 		return Result{}, fmt.Errorf("responses input did not contain messages")
 	}
-	return Result{Messages: compactChatTranscript(messages), Items: items}, nil
+	messages = compactChatTranscript(messages)
+	messages = tools.ExpandResourceRootAliases(messages)
+	return Result{Messages: messages, Items: items}, nil
 }
 
 func replacePendingToolCall(calls []providers.ChatToolCall, replacement providers.ChatToolCall) {
@@ -247,8 +249,8 @@ func replacePendingToolCall(calls []providers.ChatToolCall, replacement provider
 }
 
 const textEditorToolTranslationNote = `CHAT_TOOL_TRANSLATION
-Codex native editing instructions may mention apply_patch. In this Chat profile that editing capability is exposed as operation-specific workspace file editor functions.
-Read apply_patch instructions as write_workspace_file, replace_workspace_text, insert_workspace_text_at_line, insert_workspace_text_after_match, move_workspace_file, or delete_workspace_file calls with structured JSON arguments. There is no separate apply_patch tool in this translated tool surface, and the workspace file editor tools do not accept patch-diff syntax.`
+Codex native editing instructions may mention apply_patch. In this Chat profile that editing capability is exposed as operation-specific file editor functions.
+Read apply_patch instructions as write_file, replace_text, insert_text_at_line, insert_text_after_match, move_file, or delete_file calls with structured JSON arguments. There is no separate apply_patch tool in this translated tool surface, and the file editor tools do not accept patch-diff syntax.`
 
 func textEditorTranslationNeeded(responseTools []codex.ResponseTool, adapter adapters.Adapter) bool {
 	if !adapters.UseTextEditorForApplyPatch(adapter) {
@@ -646,11 +648,14 @@ func reasoningContent(item map[string]any) string {
 }
 
 func outputText(item map[string]any) string {
+	return outputTextForToolCall(item, "", tools.Context{})
+}
+
+func outputTextForToolCall(item map[string]any, rawArguments string, toolCtx tools.Context) string {
 	itemType, _ := item["type"].(string)
 	switch itemType {
 	case "tool_search_output":
-		data, _ := json.Marshal(item["tools"])
-		return string(data)
+		return tools.ToolSearchOutputSummaryForCall(item["tools"], rawArguments, toolCtx)
 	case "shell_call_output", "local_shell_call_output":
 		return tools.ShellOutputText(item["output"])
 	default:

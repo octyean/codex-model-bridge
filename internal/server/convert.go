@@ -602,7 +602,7 @@ func textEditorInvalidArgumentsResult() string {
 	return strings.Join([]string{
 		"TEXT_EDITOR_INVALID_ARGUMENTS",
 		"file_edit_state: rejected",
-		"required_next_action: call the matching workspace file editor tool with all required fields",
+		"required_next_action: call the matching file editor tool with all required fields",
 		"forbidden_next_action: retry_invalid_text_editor_command_or_send_empty_patch",
 	}, "\n")
 }

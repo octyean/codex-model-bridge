@@ -449,13 +449,13 @@ func PatchRecoveryText(kind PatchFailureKind) string {
 func TextEditorRecoveryText(kind PatchFailureKind) string {
 	switch kind {
 	case PatchFailureContextMismatch:
-		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines. If the requested content is already present, stop editing and summarize; otherwise send a smaller workspace file editor call using exact current old_str or insert_line."
+		return "TEXT_EDITOR_CONTEXT_MISMATCH\nrequired_next_action: inspect_current_file\nforbidden_next_action: retry_same_edit\nrecovery: read the current target file lines. If the requested content is already present, stop editing and summarize; otherwise send a smaller file editor call using exact current old_str or insert_line."
 	case PatchFailureMalformedPatch, PatchFailureInvalidHunk, PatchFailureReadFileOperation:
-		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: call the matching workspace file editor tool with exact JSON arguments."
+		return "TEXT_EDITOR_INVALID_EDIT\nrequired_next_action: regenerate_text_editor_arguments\nforbidden_next_action: send_diff_or_patch_syntax\nrecovery: call the matching file editor tool with exact JSON arguments."
 	case PatchFailureAlreadyApplied:
 		return "TEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit\nrecovery: the requested content is already present. Do not send the same text editor edit again; inspect current file content, then edit a different missing change or summarize."
 	case PatchFailureNoProgress:
-		return "TEXT_EDITOR_NO_PROGRESS\nfile_edit_state: not_modified\nrequired_next_action: inspect_current_file_or_choose_different_target\nforbidden_next_action: repeat_same_noop_text_editor_edit\nrecovery: the text editor operation did not modify anything. Read the current state, then make a materially different workspace file editor call or summarize the blocker."
+		return "TEXT_EDITOR_NO_PROGRESS\nfile_edit_state: not_modified\nrequired_next_action: inspect_current_file_or_choose_different_target\nforbidden_next_action: repeat_same_noop_text_editor_edit\nrecovery: the text editor operation did not modify anything. Read the current state, then make a materially different file editor call or summarize the blocker."
 	case PatchFailurePathError:
 		return "TEXT_EDITOR_PATH_ERROR\nrequired_next_action: verify_target_path\nforbidden_next_action: retry_same_path_blindly\nrecovery: inspect the directory or target file path, then send a text editor edit for the correct path."
 	case PatchFailurePermissionOrSandbox:

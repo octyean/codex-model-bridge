@@ -299,12 +299,12 @@ func summarizeToolArguments(name string, raw string) string {
 	}
 
 	switch name {
-	case "write_workspace_file", "replace_workspace_text", "insert_workspace_text_at_line", "insert_workspace_text_after_match", "move_workspace_file", "delete_workspace_file":
+	case "write_file", "replace_text", "insert_text_at_line", "insert_text_after_match", "move_file", "delete_file":
 		return keyValueSummary(args, "path", "destination_path")
 	case "exec_command":
 		return keyValueSummary(args, "cmd")
 	case "codex_context_resource":
-		return keyValueSummary(args, "action", "path", "server", "uri", "name")
+		return keyValueSummary(args, "action", "path", "start_line", "line_limit", "server", "uri", "name")
 	case "tool_search":
 		return keyValueSummary(args, "query")
 	case "inspect_local_image":
@@ -364,6 +364,16 @@ func shouldKeepOutputSummaryLine(line string) bool {
 	case strings.HasPrefix(line, "Exit code:"):
 		return true
 	case strings.HasPrefix(line, "TEXT_EDITOR_"):
+		return true
+	case strings.HasPrefix(line, "LOCAL_FILE_READ_"):
+		return true
+	case strings.HasPrefix(line, "line_range:"):
+		return true
+	case strings.HasPrefix(line, "total_lines:"):
+		return true
+	case strings.HasPrefix(line, "truncated:"):
+		return true
+	case strings.HasPrefix(line, "next_start_line:"):
 		return true
 	case strings.HasPrefix(line, "file_edit_state:"):
 		return true

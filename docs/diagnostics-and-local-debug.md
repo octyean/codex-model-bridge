@@ -38,11 +38,19 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 ```text
 ~/.codex-bridge/logs/sessions/index.jsonl
 ~/.codex-bridge/logs/sessions/<codex_session_id>/requests.jsonl
+~/.codex-bridge/logs/sessions/<codex_session_id>/codex-requests.jsonl
+~/.codex-bridge/logs/sessions/<codex_session_id>/prompt-requests.jsonl
+~/.codex-bridge/logs/sessions/<codex_session_id>/prompt-responses.jsonl
+~/.codex-bridge/logs/sessions/<codex_session_id>/prompt-stream-events.jsonl
+~/.codex-bridge/logs/sessions/<codex_session_id>/bridge-responses.jsonl
+~/.codex-bridge/logs/sessions/<codex_session_id>/tool-catalog.jsonl
 ~/.codex-bridge/logs/sessions/<codex_session_id>/tool-calls.jsonl
 ~/.codex-bridge/logs/sessions/<codex_session_id>/incidents.jsonl
 ```
 
 `sessions/index.jsonl` 用来从会话 ID、请求 ID、模型和用户最后一段提示词反查。拿到 Codex 的 `thread_id` 后，优先看对应目录。
+
+`prompt-stream-events.jsonl` 保存上游流式原始 chunk；`prompt-responses.jsonl` 保存同一轮流式响应聚合后的 message、事件计数或上游失败对象，排查时先看聚合，再回到 chunk 细查时序。`bridge-responses.jsonl` 保存 Bridge 最终返回给 Codex 的成功响应或失败对象。
 
 ## 关键字段
 
@@ -125,6 +133,9 @@ LOG_DIR="$HOME/.codex-bridge/logs/sessions/$SESSION_ID"
 
 ls -lah "$LOG_DIR"
 tail -n 50 "$LOG_DIR/requests.jsonl"
+tail -n 20 "$LOG_DIR/tool-catalog.jsonl"
+tail -n 20 "$LOG_DIR/prompt-requests.jsonl"
+tail -n 20 "$LOG_DIR/prompt-responses.jsonl"
 tail -n 100 "$LOG_DIR/tool-calls.jsonl"
 tail -n 100 "$LOG_DIR/incidents.jsonl" 2>/dev/null || true
 ```

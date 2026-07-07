@@ -2,7 +2,8 @@ package tools
 
 import (
 	"encoding/json"
-	"net/url"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"codex-bridge/internal/providers"
@@ -10,7 +11,7 @@ import (
 
 const mcpResourceProxyToolName = "codex_context_resource"
 
-var mcpResourceParameters = json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["list_mcp","list_mcp_templates","read_mcp","read_local_file","list","list_templates","read"],"description":"Use list_mcp/list_mcp_templates/read_mcp for MCP resources. Use read_local_file for local repository files, skill files, and file:// paths. list/list_templates/read are accepted aliases."},"server":{"type":"string","description":"Exact MCP server name returned by a prior list_mcp/list_mcp_templates action. Only used for MCP resource reads."},"uri":{"type":"string","description":"Exact MCP resource URI returned by list_mcp/list_mcp_templates, or a local file path/file:// URI when action=read_local_file."},"path":{"type":"string","description":"Local file path for action=read_local_file."}},"required":["action"],"additionalProperties":false}`)
+var mcpResourceParameters = json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["list_mcp","list_mcp_templates","read_mcp","read_local_file"],"description":"Use list_mcp/list_mcp_templates/read_mcp for MCP resources. Use read_local_file for local repository files, skill files, and file:// paths."},"server":{"type":"string","description":"Exact MCP server name returned by a prior list_mcp/list_mcp_templates action. Only used for MCP resource reads."},"uri":{"type":"string","description":"Exact MCP resource URI returned by list_mcp/list_mcp_templates, or a local file path/file:// URI when action=read_local_file."},"path":{"type":"string","description":"Local file path for action=read_local_file."},"start_line":{"type":"integer","description":"For read_local_file, 1-based first line to read. Omit for 1."},"line_limit":{"type":"integer","description":"For read_local_file, maximum lines to read. Omit for 240; maximum 400."}},"required":["action"],"additionalProperties":false}`)
 
 func convertMCPResourceProxy() []convertedTool {
 	entry := newEntry(mcpResourceProxyToolName, KindMCPResource, InputModeJSON, SideEffectRead, "function", mcpResourceProxyDescription(), nil)
@@ -60,13 +61,13 @@ func isMCPResourceTool(name string) bool {
 	}
 }
 
-func mcpResourceFunctionAlias(name string) string {
+func mcpResourceActionForFunction(name string) string {
 	switch name {
-	case "list", "list_mcp":
+	case "list_mcp":
 		return "list_mcp"
-	case "list_templates", "list_mcp_templates":
+	case "list_mcp_templates":
 		return "list_mcp_templates"
-	case "read", "read_mcp":
+	case "read_mcp":
 		return "read_mcp"
 	default:
 		return ""
@@ -97,31 +98,31 @@ func MCPResourceCallForTool(toolName string, arguments string, ctx Context) (str
 	if err := json.Unmarshal([]byte(arguments), &obj); err != nil {
 		return "list_mcp_resources", "{}"
 	}
-	if action := mcpResourceFunctionAlias(toolName); action != "" {
+	if action := mcpResourceActionForFunction(toolName); action != "" {
 		if current, _ := obj["action"].(string); strings.TrimSpace(current) == "" {
 			obj["action"] = action
 		}
 	}
 	action, _ := obj["action"].(string)
 	action = strings.TrimSpace(strings.ToLower(action))
-	if path := localResourcePath(obj); path != "" && ctx.Has("exec_command") {
+	if spec, ok := localResourceReadSpec(obj, ctx); ok && ctx.Has("exec_command") {
 		tool := toolName
 		if strings.TrimSpace(tool) == "" {
 			tool = mcpResourceProxyToolName
 		}
-		return "exec_command", marshalObject(map[string]any{"cmd": localFileReadCommandForTool(path, tool, arguments)})
+		return "exec_command", marshalObject(map[string]any{"cmd": localFileReadCommandForTool(spec, tool, arguments)})
 	}
 	out := map[string]any{}
 	if server, ok := obj["server"].(string); ok && strings.TrimSpace(server) != "" {
 		out["server"] = server
 	}
 	switch action {
-	case "read", "read_mcp":
+	case "read_mcp":
 		if uri, ok := obj["uri"].(string); ok {
 			out["uri"] = uri
 		}
 		return "read_mcp_resource", marshalObject(out)
-	case "list_templates", "list_mcp_templates":
+	case "list_mcp_templates":
 		return "list_mcp_resource_templates", marshalObject(out)
 	default:
 		return "list_mcp_resources", marshalObject(out)
@@ -133,69 +134,124 @@ func MCPResourceLocalPath(arguments string) string {
 	if err := json.Unmarshal([]byte(arguments), &obj); err != nil {
 		return ""
 	}
-	return localResourcePath(obj)
+	return localResourcePath(obj, Context{})
 }
 
 func mcpResourceProxyDescription() string {
 	return strings.Join([]string{
 		"Read context resources through Codex Bridge.",
 		"Use action=list_mcp to inspect MCP resources, action=list_mcp_templates to inspect MCP resource templates, and action=read_mcp only with exact server and uri values returned by a prior list result.",
-		"Use action=read_local_file with path, or with uri set to an absolute path or file:// URI, for local skill files, repository files, and other filesystem paths.",
+		"Use action=read_local_file with path, or with uri set to an absolute path, $HOME path, ~/ path, file:// URI, or workspace-relative path.",
+		"read_local_file returns line metadata. If truncated is true, continue with start_line set to next_start_line; do not repeat the same path and start_line.",
 		"MCP resources are readable data entries, not callable MCP tools. Discover callable MCP tools with tool_search.",
 		"Do not infer MCP server or URI values from prompt markup, skill names, local paths, file:// URIs, or tool names.",
 	}, "\n")
 }
 
-func localResourcePath(obj map[string]any) string {
+type localResourceRead struct {
+	Path      string
+	StartLine int
+	LineLimit int
+}
+
+func localResourceReadSpec(obj map[string]any, ctx Context) (localResourceRead, bool) {
+	path := localResourcePath(obj, ctx)
+	if path == "" {
+		return localResourceRead{}, false
+	}
+	return localResourceRead{
+		Path:      path,
+		StartLine: positiveInt(obj["start_line"], 1),
+		LineLimit: boundedPositiveInt(obj["line_limit"], 240, 400),
+	}, true
+}
+
+func localResourcePath(obj map[string]any, ctx Context) string {
 	action, _ := obj["action"].(string)
 	action = strings.TrimSpace(strings.ToLower(action))
-	if action != "read" && action != "read_mcp" && action != "read_local_file" {
+	if action != "read_local_file" {
 		return ""
 	}
 	if action == "read_local_file" {
 		if path, ok := obj["path"].(string); ok {
-			return normalizeLocalResourcePath(path, true)
+			return ctx.ResolveLocalResourcePath(path, true)
 		}
 		if uri, ok := obj["uri"].(string); ok {
-			return normalizeLocalResourcePath(uri, true)
+			return ctx.ResolveLocalResourcePath(uri, true)
 		}
 		return ""
-	}
-	for _, key := range []string{"path", "uri"} {
-		text, _ := obj[key].(string)
-		if path := normalizeLocalResourcePath(text, false); path != "" {
-			return path
-		}
 	}
 	return ""
 }
 
 func normalizeLocalResourcePath(value string, allowWorkspaceRelative bool) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if path, ok := strings.CutPrefix(value, "file://"); ok {
-		value = path
-		if unescaped, err := url.PathUnescape(value); err == nil {
-			value = unescaped
+	return resolveLocalResourcePath(value, allowWorkspaceRelative)
+}
+
+func positiveInt(value any, fallback int) int {
+	switch v := value.(type) {
+	case float64:
+		if v > 0 {
+			return int(v)
+		}
+	case int:
+		if v > 0 {
+			return v
+		}
+	case json.Number:
+		if n, err := strconv.Atoi(v.String()); err == nil && n > 0 {
+			return n
+		}
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return n
 		}
 	}
-	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") {
-		return value
-	}
-	if allowWorkspaceRelative && !strings.Contains(value, "://") {
-		return value
-	}
-	return ""
+	return fallback
 }
 
-func localFileReadCommand(path string) string {
-	return "sed -n '1,240p' " + shellQuote(path) + " 2>&1 | head -c 20000"
+func boundedPositiveInt(value any, fallback int, max int) int {
+	n := positiveInt(value, fallback)
+	if n > max {
+		return max
+	}
+	return n
 }
 
-func localFileReadCommandForTool(path string, toolName string, arguments string) string {
-	return localFileReadCommand(path) + "; printf '\\n%s\\n' " + shellQuote(RuntimeLocalResultEnvelopeWithoutOutput(toolName, arguments))
+func localFileReadCommand(spec localResourceRead) string {
+	path := shellQuote(spec.Path)
+	endLine := spec.StartLine + spec.LineLimit - 1
+	return strings.Join([]string{
+		"path=" + path,
+		"err=$(mktemp)",
+		"start=" + strconv.Itoa(spec.StartLine),
+		"limit=" + strconv.Itoa(spec.LineLimit),
+		"end=" + strconv.Itoa(endLine),
+		"if total=$(wc -l < \"$path\" 2>\"$err\"); then",
+		"  shown_end=$end",
+		"  if [ \"$total\" -gt 0 ] && [ \"$shown_end\" -gt \"$total\" ]; then shown_end=$total; fi",
+		"  truncated=false",
+		"  next_start=",
+		"  if [ \"$total\" -gt \"$end\" ]; then truncated=true; next_start=$((end + 1)); fi",
+		"  printf '%s\n' 'LOCAL_FILE_READ_RESULT'",
+		"  printf 'path: %s\n' \"$path\"",
+		"  printf 'line_range: %s-%s\n' \"$start\" \"$shown_end\"",
+		"  printf 'total_lines: %s\n' \"$total\"",
+		"  printf 'truncated: %s\n' \"$truncated\"",
+		"  if [ -n \"$next_start\" ]; then printf 'next_start_line: %s\n' \"$next_start\"; fi",
+		"  printf '%s\n' 'content:'",
+		fmt.Sprintf("  sed -n \"${start},${end}p\" \"$path\" 2>&1 | head -c %d", 30000),
+		"else",
+		"  printf '%s\n' 'LOCAL_FILE_READ_FAILED'",
+		"  printf 'path: %s\n' \"$path\"",
+		"  if [ -s \"$err\" ]; then printf '%s\n' 'error:'; cat \"$err\"; fi",
+		"fi",
+		"rm -f \"$err\"",
+	}, "\n")
+}
+
+func localFileReadCommandForTool(spec localResourceRead, toolName string, arguments string) string {
+	return localFileReadCommand(spec) + "\nprintf '\\n%s\\n' " + shellQuote(RuntimeLocalResultEnvelopeWithoutOutput(toolName, arguments))
 }
 
 func shellQuote(value string) string {

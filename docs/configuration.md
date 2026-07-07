@@ -134,7 +134,7 @@ apply_patch_tool_type = "freeform"
 - `kimi`
 
 `default` 适合普通 OpenAI-compatible 模型。`deepseek` 适合 DeepSeek 这类对工具调用和补丁格式更挑剔的模型。
-`kimi` 适合 Kimi for Coding，会把 Codex 的文件编辑能力翻译成 `write_workspace_file`、`replace_workspace_text`、`insert_workspace_text_at_line`、`insert_workspace_text_after_match`、`move_workspace_file`、`delete_workspace_file` 这组结构化 Chat 工具。
+`kimi` 适合 Kimi for Coding，会把 Codex 的文件编辑能力翻译成 `write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file` 这组结构化 Chat 工具。
 
 ## 自动发现模型
 

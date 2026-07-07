@@ -113,16 +113,29 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	requestSummary := incidentlog.RequestSummary(req.Raw)
 	workspace := incidentlog.CodexWorkspace(req.Raw, r.Header)
-	toollog.RememberRequestSession(requestID, incidentlog.CodexSessionID(req.Raw, r.Header), req.Model, modelCfg.UpstreamModel, profileName, requestSummary)
+	sessionID := incidentlog.CodexSessionID(req.Raw, r.Header)
+	toollog.RememberRequestSession(requestID, sessionID, req.Model, modelCfg.UpstreamModel, profileName, requestSummary)
 	defer toollog.ForgetRequestSession(requestID)
+	s.writeSessionLog(sessionID, "codex-requests.jsonl", map[string]any{
+		"event":           "codex_request",
+		"request_id":      requestID,
+		"model":           req.Model,
+		"upstream_model":  modelCfg.UpstreamModel,
+		"profile":         profileName,
+		"headers":         incidentlog.Headers(r.Header),
+		"request_summary": requestSummary,
+		"body":            req.Raw,
+	})
 	dumpPath := ""
 	if shouldForwardResponses(s.cfg.UpstreamProtocol(modelCfg, providerCfg), adapter) {
 		responsesProvider, ok := provider.(providers.ResponsesProvider)
 		if !ok {
-			writeError(w, http.StatusInternalServerError, "provider does not support responses protocol: "+modelCfg.Provider)
+			message := "provider does not support responses protocol: " + modelCfg.Provider
+			s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusInternalServerError, message, nil)
+			writeError(w, http.StatusInternalServerError, message)
 			return
 		}
-		s.forwardResponses(w, r, requestID, req, modelCfg, responsesProvider, adapter, dumpPath)
+		s.forwardResponses(w, r, requestID, sessionID, req, modelCfg, responsesProvider, adapter, dumpPath)
 		return
 	}
 
@@ -134,12 +147,14 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		InputModalities: effectiveInputModalities(modelCfg, adapter),
 	})
 	if err != nil {
+		s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusBadRequest, err.Error(), nil)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	chatTools, toolCtx := tools.FromCodex(req.Tools, adapter)
 	toolCtx.Workspace = workspace
 	chatTools = append(chatTools, tools.FromAdditionalTools(transcriptResult.Items, adapter, &toolCtx)...)
+	chatTools = filterUnavailableRuntimeTools(chatTools, &toolCtx, transcriptResult.Messages)
 	if s.runtime.HasSearch() && tools.HasWebSearch(req.Tools) {
 		chatTools = tools.AddWebSearchProxy(chatTools, &toolCtx)
 	}
@@ -164,6 +179,21 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	shape := optimization.CaptureShape(chatReq)
 	stats := providers.ChatRequestStats(chatReq)
 	preparedRequest := providers.PreparedChatRequest(chatReq)
+	s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, "initial", preparedRequest, map[string]any{
+		"message_count":     stats.MessageCount,
+		"tool_count":        stats.ToolCount,
+		"body_bytes":        stats.BodyBytes,
+		"estimated_tokens":  stats.EstimatedTokens,
+		"tool_choice":       toolChoice,
+		"parallel_tools":    chatReq.ParallelToolCalls,
+		"response_format":   chatReq.ResponseFormat,
+		"stream":            chatReq.Stream,
+		"prefix_hash":       shape.PrefixHash,
+		"system_hash":       shape.SystemHash,
+		"tools_hash":        shape.ToolsHash,
+		"request_body_hash": requestdump.Hash(preparedRequest),
+	})
+	s.writeToolCatalog(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, chatTools, toolCtx, toolChoice)
 
 	s.logger.Info("request_started",
 		slog.String("request_id", requestID),
@@ -198,24 +228,32 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		if s.hasInternalTools(toolCtx) {
-			s.streamInternalToolResponse(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape, dumpPath)
+			s.streamInternalToolResponse(w, r, requestID, sessionID, req, chatReq, provider, toolCtx, adapter, profileName, shape, dumpPath)
 			return
 		}
-		s.streamResponses(w, r, requestID, req, chatReq, provider, toolCtx, adapter, profileName, shape, dumpPath)
+		s.streamResponses(w, r, requestID, sessionID, req, chatReq, provider, toolCtx, adapter, profileName, shape, dumpPath)
 		return
 	}
 	resp, err := provider.Create(r.Context(), chatReq)
 	if err != nil {
 		s.logger.Error("upstream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+		extra := map[string]any{"stream": false}
+		s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, "initial", err.Error(), extra)
+		s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusBadGateway, err.Error(), extra)
 		incidentlog.Write("upstream_error", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"error": err.Error(), "stream": false}))
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if len(resp.Choices) == 0 {
+		message := "upstream returned no choices"
+		extra := map[string]any{"stream": false}
+		s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, "initial", message, extra)
+		s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusBadGateway, message, extra)
 		incidentlog.Write("empty_chat_choices", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false}))
-		writeError(w, http.StatusBadGateway, "upstream returned no choices")
+		writeError(w, http.StatusBadGateway, message)
 		return
 	}
+	s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, "initial", resp, nil)
 	logCtx := toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
@@ -223,12 +261,15 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Profile:        profileName,
 		RequestSummary: requestSummary,
 	}
-	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, chatReq, resp.Choices[0].Message, toolCtx, adapter, logCtx); ok {
+	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, sessionID, chatReq, resp.Choices[0].Message, toolCtx, adapter, logCtx); ok {
 		resp = followUp
 		shape = optimization.CaptureShape(followUpReq)
 		if len(resp.Choices) == 0 {
+			message := "upstream returned no choices"
+			extra := map[string]any{"stream": false, "after_internal_tool": true}
+			s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusBadGateway, message, extra)
 			incidentlog.Write("empty_chat_choices", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "after_internal_tool": true}))
-			writeError(w, http.StatusBadGateway, "upstream returned no choices")
+			writeError(w, http.StatusBadGateway, message)
 			return
 		}
 	}
@@ -238,7 +279,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		incidentlog.Write("empty_chat_response", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "output": outputSummary(items, usage)}))
 	}
 	s.logUsage(requestID, req.Model, profileName, adapter, shape, usage)
-	writeJSON(w, http.StatusOK, codex.ResponseObject{
+	responseObject := codex.ResponseObject{
 		ID:        responseID(resp.ID),
 		Object:    "response",
 		CreatedAt: time.Now().Unix(),
@@ -246,7 +287,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Status:    "completed",
 		Output:    items,
 		Usage:     codexUsage(usage),
-	})
+	}
+	s.writeBridgeResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, responseObject, map[string]any{"stream": false})
+	writeJSON(w, http.StatusOK, responseObject)
 }
 
 func effectiveInputModalities(modelCfg config.ModelConfig, adapter adapters.Adapter) []string {
@@ -260,10 +303,14 @@ func shouldForwardResponses(protocol string, adapter adapters.Adapter) bool {
 	return protocol == "responses" && adapter.Name() == adapters.OpenAIName
 }
 
-func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter, dumpPath string) {
+func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, sessionID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter, dumpPath string) {
 	upstreamReq := cloneResponseRequest(req.Raw)
 	upstreamReq["model"] = modelCfg.UpstreamModel
 	upstreamReq = adapter.PrepareResponseRequest(upstreamReq)
+	s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", upstreamReq, map[string]any{
+		"stream":            req.Stream,
+		"request_body_hash": requestdump.Hash(upstreamReq),
+	})
 	if path, err := requestdump.Write(requestID, req.Model, adapter.Name(), upstreamReq); err != nil {
 		s.logger.Warn("upstream_request_dump_failed",
 			slog.String("request_id", requestID),
@@ -285,16 +332,23 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 				return
 			}
 			s.logger.Error("upstream_response_stream_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+			extra := map[string]any{"stream": true}
+			s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", err.Error(), extra)
+			s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), http.StatusBadGateway, err.Error(), extra)
 			incidentlog.Write("upstream_response_stream_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": err.Error(), "stream": true}))
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		writer := codex.NewSSEWriter(w)
+		streamSeq := 0
 		for event := range stream {
 			if event.Err != nil {
 				if requestCanceled(r, event.Err) {
 					return
 				}
+				extra := map[string]any{"stream": true}
+				s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", event.Err.Error(), extra)
+				s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), http.StatusBadGateway, event.Err.Error(), extra)
 				incidentlog.Write("upstream_response_stream_event_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": event.Err.Error(), "stream": true}))
 				_ = writer.Event(map[string]any{
 					"type": "response.failed",
@@ -305,8 +359,14 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 				return
 			}
 			if event.Done {
+				s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", map[string]any{
+					"stream":      true,
+					"event_count": streamSeq,
+				}, nil)
 				return
 			}
+			streamSeq++
+			s.writePromptStreamEvent(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", streamSeq, event.Data)
 			replaceResponseModel(event.Data, req.Model)
 			_ = writer.Event(event.Data)
 		}
@@ -315,18 +375,23 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 	resp, err := provider.CreateResponse(r.Context(), upstreamReq)
 	if err != nil {
 		s.logger.Error("upstream_response_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+		extra := map[string]any{"stream": false}
+		s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", err.Error(), extra)
+		s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), http.StatusBadGateway, err.Error(), extra)
 		incidentlog.Write("upstream_response_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": err.Error(), "stream": false}))
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	replaceResponseModel(resp, req.Model)
+	s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", resp, nil)
 	if nativeResponseEmpty(resp) {
 		incidentlog.Write("empty_native_response", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"stream": false}))
 	}
+	s.writeBridgeResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), resp, map[string]any{"stream": false, "native_responses": true})
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape, dumpPath string) {
+func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, requestID string, sessionID string, req codex.ResponsesRequest, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, profile string, shape optimization.Shape, dumpPath string) {
 	writer := codex.NewSSEWriter(w)
 	respID := "resp_" + requestID
 	startedAt := time.Now()
@@ -353,6 +418,9 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 				return
 			}
 			s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", result.err.Error()))
+			extra := map[string]any{"stream": true}
+			s.writePromptFailure(sessionID, requestID, req.Model, chatReq.Model, profile, "initial", result.err.Error(), extra)
+			s.writeBridgeFailure(sessionID, requestID, req.Model, chatReq.Model, profile, http.StatusBadGateway, result.err.Error(), extra)
 			incidentlog.Write("upstream_stream_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": result.err.Error(), "stream": true}))
 			_ = writer.Event(map[string]any{
 				"type": "response.failed",
@@ -381,6 +449,9 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, request
 						return
 					}
 					s.logger.Error("upstream_stream_failed", slog.String("request_id", requestID), slog.String("error", result.err.Error()))
+					extra := map[string]any{"stream": true}
+					s.writePromptFailure(sessionID, requestID, req.Model, chatReq.Model, profile, "initial", result.err.Error(), extra)
+					s.writeBridgeFailure(sessionID, requestID, req.Model, chatReq.Model, profile, http.StatusBadGateway, result.err.Error(), extra)
 					incidentlog.Write("upstream_stream_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": result.err.Error(), "stream": true}))
 					_ = writer.Event(map[string]any{
 						"type": "response.failed",
@@ -418,6 +489,7 @@ streamOpened:
 	emitStreamEvents := toolCtx.IsEmpty()
 	var usage providers.NormalizedUsage
 	firstChunk := true
+	streamSeq := 0
 streamLoop:
 	for {
 		select {
@@ -429,6 +501,9 @@ streamLoop:
 				if requestCanceled(r, event.Err) {
 					return
 				}
+				extra := map[string]any{"stream": true}
+				s.writePromptFailure(sessionID, requestID, req.Model, chatReq.Model, profile, "initial", event.Err.Error(), extra)
+				s.writeBridgeFailure(sessionID, requestID, req.Model, chatReq.Model, profile, http.StatusBadGateway, event.Err.Error(), extra)
 				incidentlog.Write("upstream_stream_event_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": event.Err.Error(), "stream": true}))
 				_ = writer.Event(map[string]any{
 					"type": "response.failed",
@@ -442,6 +517,8 @@ streamLoop:
 			if event.Done {
 				break streamLoop
 			}
+			streamSeq++
+			s.writePromptStreamEvent(sessionID, requestID, req.Model, chatReq.Model, profile, "initial", streamSeq, event.Chunk)
 			if firstChunk {
 				firstChunk = false
 				s.logger.Info("upstream_stream_first_chunk",
@@ -467,6 +544,12 @@ streamLoop:
 		}
 	}
 	items := state.Done()
+	s.writePromptResponse(sessionID, requestID, req.Model, chatReq.Model, profile, "initial", map[string]any{
+		"stream":      true,
+		"chunk_count": streamSeq,
+		"message":     chatMessageFromStreamState(state),
+		"usage":       usage,
+	}, nil)
 	if emptyOutput(items) {
 		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "output": outputSummary(items, usage)}))
 	}
@@ -476,13 +559,15 @@ streamLoop:
 			_ = writer.Event(event)
 		}
 	}
-	_ = writer.Event(map[string]any{
+	responseCompleted := map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
 			"id": respID, "object": "response", "created_at": time.Now().Unix(), "model": req.Model, "status": "completed", "output": items,
 			"usage": codexUsage(usage),
 		},
-	})
+	}
+	_ = writer.Event(responseCompleted)
+	s.writeBridgeResponse(sessionID, requestID, req.Model, chatReq.Model, profile, responseCompleted["response"], map[string]any{"stream": true})
 	s.logUsage(requestID, req.Model, profile, adapter, shape, usage)
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", state.ToolCallCount()))
 }

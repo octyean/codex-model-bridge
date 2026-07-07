@@ -118,8 +118,8 @@ func hasPatchSystemInstruction(messages []providers.ChatMessage) bool {
 
 func textEditorToolDescription() string {
 	return strings.Join([]string{
-		"Edit Codex workspace files persistently through the operation-specific file editor tools.",
-		"Use write_workspace_file for full-file writes, replace_workspace_text for exact replacements, insert_workspace_text_at_line or insert_workspace_text_after_match for insertions, move_workspace_file for renames, and delete_workspace_file for deletion.",
+		"Edit Codex workspace files persistently through operation-specific file editor tools.",
+		"Use write_file for full-file writes, replace_text for exact replacements, insert_text_at_line or insert_text_after_match for insertions, move_file for renames, and delete_file for deletion.",
 		"For reading files, evaluating content, drafting analysis, or temporary notes, use read-only tools and answer in text instead of creating scratch files.",
 	}, "\n")
 }

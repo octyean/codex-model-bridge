@@ -101,12 +101,9 @@ func FromCodex(responseTools []codex.ResponseTool, adapter adapters.Adapter) ([]
 	for _, tool := range responseTools {
 		converted := convertTool(tool, adapter)
 		for _, item := range converted {
-			name := item.entry.Name()
-			if _, exists := ctx.Tools[name]; exists {
-				continue
+			if registerConvertedTool(&ctx, item) {
+				out = append(out, item.tool)
 			}
-			ctx.Tools[name] = item.entry
-			out = append(out, item.tool)
 		}
 	}
 	return out, ctx
@@ -133,12 +130,9 @@ func FromAdditionalTools(items []map[string]any, adapter adapters.Adapter, ctx *
 				continue
 			}
 			for _, converted := range convertTool(tool, adapter) {
-				name := converted.entry.Name()
-				if _, exists := ctx.Tools[name]; exists {
-					continue
+				if registerConvertedTool(ctx, converted) {
+					out = append(out, converted.tool)
 				}
-				ctx.Tools[name] = converted.entry
-				out = append(out, converted.tool)
 			}
 		}
 	}
@@ -152,7 +146,7 @@ func (ctx Context) Entry(name string) Entry {
 	if entry, ok := ctx.Tools[name]; ok {
 		return entry
 	}
-	if mcpResourceFunctionAlias(name) != "" {
+	if mcpResourceActionForFunction(name) != "" {
 		if _, ok := ctx.Tools[mcpResourceProxyToolName]; ok {
 			return newEntry(name, KindMCPResource, InputModeJSON, SideEffectRead, KindFunction, "", nil)
 		}
@@ -212,22 +206,38 @@ type convertedTool struct {
 	entry Entry
 }
 
+func registerConvertedTool(ctx *Context, converted convertedTool) bool {
+	if ctx.Tools == nil {
+		ctx.Tools = map[string]Entry{}
+	}
+	name := converted.entry.Name()
+	if _, exists := ctx.Tools[name]; exists {
+		return false
+	}
+	ctx.Tools[name] = converted.entry
+	return true
+}
+
 func convertTool(tool codex.ResponseTool, adapter adapters.Adapter) []convertedTool {
 	toolType := rawString(tool.Raw, "type", tool.Type)
 	switch toolType {
 	case "namespace":
 		return convertNamespace(tool, adapter)
 	case "function":
-		if rawString(tool.Raw, "name", tool.Name) == "exec_command" {
+		name := rawString(tool.Raw, "name", tool.Name)
+		if converted, ok := convertExternalTool(name); ok {
+			return converted
+		}
+		if name == "exec_command" {
 			return convertExecCommand(tool, adapter)
 		}
-		if adapters.UseMCPResourceProxy(adapter) && isMCPResourceTool(rawString(tool.Raw, "name", tool.Name)) {
+		if adapters.UseMCPResourceProxy(adapter) && isMCPResourceTool(name) {
 			return convertMCPResourceProxy()
 		}
-		if IsHarnessUITool(rawString(tool.Raw, "name", tool.Name)) {
+		if IsHarnessUITool(name) {
 			return convertFunctionWithSideEffect(tool, adapter, "", KindHarnessUI, SideEffectStatus)
 		}
-		if RequiresImageInputTool(rawString(tool.Raw, "name", tool.Name)) {
+		if RequiresImageInputTool(name) {
 			return convertImageView(tool)
 		}
 		return convertFunction(tool, adapter, "", KindFunction)
@@ -265,7 +275,7 @@ func convertFunctionWithSideEffect(tool codex.ResponseTool, adapter adapters.Ada
 	if len(params) == 0 {
 		params = objectParameters()
 	}
-	description := mcpResourceToolDescription(name, tool.Description)
+	description := normalizeToolDescription(mcpResourceToolDescription(name, tool.Description))
 	entry := newEntry(name, kind, InputModeJSON, sideEffect, "function", description, tool.Raw)
 	entry.Namespace = namespace
 	entry.SchemaQuality = schemaQuality(params)
@@ -383,4 +393,8 @@ func descriptionOrDefault(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func normalizeToolDescription(description string) string {
+	return normalizeExternalToolDescription(description)
 }
