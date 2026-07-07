@@ -53,13 +53,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.4.1"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.4.2"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.4.1",
+		"version": "0.4.2",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -165,6 +165,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	toolChoice := tools.ToolChoice(req.ToolChoice, toolCtx)
+	if note := tools.SoftRequiredToolChoiceNote(toolChoice, adapter.ToolPolicy().RequiredToolChoice); note != "" {
+		transcriptResult.Messages = append(transcriptResult.Messages, providers.ChatMessage{Role: "system", Content: note})
+	}
 	chatTools, toolChoice = tools.ApplyToolChoice(chatTools, toolChoice, adapter.ToolPolicy().RequiredToolChoice)
 	responseFormat := responseFormatFromText(req.Raw)
 	chatReq := providers.ChatCompletionRequest{

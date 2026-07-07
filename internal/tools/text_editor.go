@@ -33,32 +33,32 @@ func TextEditorToolSpecs() []TextEditorToolSpec {
 	return []TextEditorToolSpec{
 		{
 			Name:        TextEditorWriteToolName,
-			Description: "Create or replace a complete text file in the Codex workspace. Use this when you intentionally know the full target file content.",
+			Description: "Create a new text file or intentionally replace an entire file in the Codex workspace. Do not use this for small edits to an existing file; use replace_text or an insert tool after inspecting current content.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or absolute target file path."},"file_text":{"type":"string","description":"Complete desired file content."}},"required":["path","file_text"],"additionalProperties":false}`),
 		},
 		{
 			Name:        TextEditorReplaceToolName,
-			Description: "Replace exact existing text in a workspace file. Use old_str copied exactly from the current file and new_str as the replacement.",
+			Description: "Replace exact existing text in a workspace file. Read the file first unless the exact current text is already visible; old_str must be copied exactly from the current file.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or absolute target file path."},"old_str":{"type":"string","description":"Exact existing text to replace. It must appear in the current file."},"new_str":{"type":"string","description":"Replacement text."}},"required":["path","old_str","new_str"],"additionalProperties":false}`),
 		},
 		{
 			Name:        TextEditorInsertLineToolName,
-			Description: "Insert text into an existing workspace file after a line number. insert_line=0 inserts at the beginning.",
+			Description: "Insert text into an existing workspace file after a known current line number. Use insert_line=0 for the beginning; prefer insert_text_after_match when an exact anchor is safer.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or absolute target file path."},"insert_line":{"type":"integer","description":"Line number after which to insert text. Use 0 for the beginning of the file."},"insert_text":{"type":"string","description":"Text to insert."}},"required":["path","insert_line","insert_text"],"additionalProperties":false}`),
 		},
 		{
 			Name:        TextEditorInsertMatchToolName,
-			Description: "Insert text into an existing workspace file after exact anchor text copied from the current file.",
+			Description: "Insert text into an existing workspace file after exact anchor text copied from the current file. Read the target first unless the anchor is already visible in this turn.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or absolute target file path."},"old_str":{"type":"string","description":"Exact anchor text after which insert_text will be inserted."},"insert_text":{"type":"string","description":"Text to insert after old_str."}},"required":["path","old_str","insert_text"],"additionalProperties":false}`),
 		},
 		{
 			Name:        TextEditorMoveToolName,
-			Description: "Move or rename one workspace file.",
+			Description: "Move or rename one workspace file. destination_path must include the final file name, not just a directory.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or absolute source file path."},"destination_path":{"type":"string","description":"Complete destination file path, including the final file name."}},"required":["path","destination_path"],"additionalProperties":false}`),
 		},
 		{
 			Name:        TextEditorDeleteToolName,
-			Description: "Delete one workspace file.",
+			Description: "Delete one workspace file only when the requested change requires removing that file.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative or absolute target file path."}},"required":["path"],"additionalProperties":false}`),
 		},
 	}

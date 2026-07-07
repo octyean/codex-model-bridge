@@ -115,6 +115,7 @@ codex-bridge catalog generate --config config/config.toml
 
 - `profile = "deepseek"`：适合 DeepSeek。
 - `profile = "kimi"`：适合 Kimi for Coding，Codex 的文件编辑能力会翻译成一组结构化 Chat 工具：`write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file`。
+- `profile = "mimo"`：适合 Mimo，保留图片输入能力，并使用结构化 Chat 文件编辑工具。
 - `profile = "default"`：适合普通 OpenAI-compatible 模型。
 - `apply_patch_tool_type = "freeform"`：让 Codex 把 `apply_patch` 当成自由格式补丁来传。
 

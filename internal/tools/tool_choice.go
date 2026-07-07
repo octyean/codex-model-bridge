@@ -45,6 +45,22 @@ func ToolChoice(value any, ctx Context) any {
 	return value
 }
 
+func SoftRequiredToolChoiceNote(value any, supportsRequired bool) string {
+	if supportsRequired {
+		return ""
+	}
+	obj, ok := value.(map[string]any)
+	toolType, _ := obj["type"].(string)
+	if !ok || toolType != "function" {
+		return ""
+	}
+	name := choiceFunctionName(obj)
+	if name == "" {
+		return ""
+	}
+	return "CHAT_FORCED_TOOL_CHOICE\nThis Codex turn selected one required tool: " + name + ". Call that tool with appropriate arguments instead of answering in normal text. Continue from the tool result in the next turn."
+}
+
 func allowedToolsChoice(obj map[string]any, ctx Context) any {
 	rawTools, ok := obj["tools"].([]any)
 	if !ok {

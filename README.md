@@ -2,7 +2,7 @@
 
 `codex-bridge` 是给 Codex CLI / Codex App 用的模型桥。
 
-它把 DeepSeek、Kimi、Qwen、Mimo 这类 OpenAI-compatible 模型接到 Codex 里，让它们能继续用 Codex 给 GPT 预留的原生能力：`apply_patch`、`web_search`、`tool_search`、`local_shell`、`function`、`custom`、图片输入、模型目录和 reasoning 配置。
+它把 DeepSeek、Kimi、Mimo 这类 OpenAI-compatible 模型接到 Codex 里，让它们能继续用 Codex 给 GPT 预留的原生能力：`apply_patch`、`web_search`、`tool_search`、`local_shell`、`function`、`custom`、图片输入、模型目录和 reasoning 配置。
 
 ```text
 Codex CLI / App

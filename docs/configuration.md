@@ -132,9 +132,11 @@ apply_patch_tool_type = "freeform"
 - `default`
 - `deepseek`
 - `kimi`
+- `mimo`
 
 `default` 适合普通 OpenAI-compatible 模型。`deepseek` 适合 DeepSeek 这类对工具调用和补丁格式更挑剔的模型。
 `kimi` 适合 Kimi for Coding，会把 Codex 的文件编辑能力翻译成 `write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file` 这组结构化 Chat 工具。
+`mimo` 适合 Mimo，保留图片输入能力，并使用和 Kimi 相同的结构化文件编辑工具。
 
 ## 自动发现模型
 

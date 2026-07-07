@@ -1,6 +1,9 @@
 package adapters
 
-import "codex-bridge/internal/providers"
+import (
+	"codex-bridge/internal/optimization"
+	"codex-bridge/internal/providers"
+)
 
 type mimoAdapter struct{ defaultAdapter }
 
@@ -17,8 +20,22 @@ func (mimoAdapter) Capabilities() Capabilities {
 	}
 }
 
+func (mimoAdapter) Optimization() optimization.Options {
+	return optimization.Options{
+		StabilizeTools:   true,
+		CacheDiagnostics: true,
+	}
+}
+
 func (mimoAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) providers.ChatCompletionRequest {
-	return defaultAdapter{}.PrepareChatRequest(req)
+	req.Messages = repairToolPairing(req.Messages)
+	req = optimization.PrepareRequest(req, mimoAdapter{}.Optimization())
+	req = prepareChatPatchRequest(req)
+	if req.Stream && req.StreamOptions == nil {
+		req.StreamOptions = &providers.StreamOptions{IncludeUsage: true}
+	}
+	req.AssistantToolContentNull = true
+	return req
 }
 
 func (mimoAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
