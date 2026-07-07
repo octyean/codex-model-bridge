@@ -82,14 +82,14 @@ func visibleToolSearchGuidance(arguments string, ctx Context) []string {
 	}
 	text := toolSearchQueryText(arguments)
 	var lines []string
-	if ctx.Has(mcpResourceProxyToolName) && (looksLikeLocalReadQuery(text) || localPathFromText(text, ctx) != "") {
-		lines = append(lines, "- codex_context_resource: already visible. Use action=read_local_file with path, start_line, and line_limit to read local files or skill files.")
+	if ctx.Has(ReadFileToolName) && (looksLikeLocalReadQuery(text) || localPathFromText(text, ctx) != "") {
+		lines = append(lines, "- read_file: already visible. Use path, start_line, and line_limit to read local files or skill files.")
 	}
 	if ctx.Has(TextEditorWriteToolName) && looksLikeFileEditQuery(text) {
 		lines = append(lines, "- write_file/replace_text/insert_text_at_line/insert_text_after_match/move_file/delete_file: already visible file editing tools. Use their schemas directly instead of searching again.")
 	}
 	if ctx.Has(FileSearchToolName) && looksLikeFileSearchQuery(text) {
-		lines = append(lines, "- search_files: already visible. Use query plus optional path/glob to find matching local files, then read hits with codex_context_resource.")
+		lines = append(lines, "- search_files: already visible. Use query plus optional path/glob to find matching local files, then read hits with read_file.")
 	}
 	return lines
 }
@@ -337,7 +337,7 @@ func bridgeToolSearchHint(name string) string {
 	case mcpResourceProxyToolName:
 		return "Read local files or MCP resources here; continue truncated local files with start_line=next_start_line."
 	case FileSearchToolName:
-		return "Search matching local files here, then read selected hits with codex_context_resource."
+		return "Search matching local files here, then read selected hits with read_file."
 	case TextEditorWriteToolName, TextEditorReplaceToolName, TextEditorInsertLineToolName, TextEditorInsertMatchToolName, TextEditorMoveToolName, TextEditorDeleteToolName:
 		return "Use this for file edits; inspect current file content first when replacing or inserting around existing text."
 	case "tool_search":

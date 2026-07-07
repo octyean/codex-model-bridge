@@ -24,7 +24,11 @@ func ResourceRootsFromMessages(messages []providers.ChatMessage) map[string]stri
 }
 
 func (ctx Context) ResolveLocalResourcePath(value string, allowWorkspaceRelative bool) string {
-	return resolveLocalResourcePath(value, allowWorkspaceRelative)
+	path := resolveLocalResourcePath(value, allowWorkspaceRelative)
+	if path == "" || filepath.IsAbs(path) || ctx.Workspace == "" {
+		return path
+	}
+	return filepath.Clean(filepath.Join(ctx.Workspace, path))
 }
 
 func resolveLocalResourcePath(value string, allowWorkspaceRelative bool) string {

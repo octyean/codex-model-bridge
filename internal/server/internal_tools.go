@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
-	"codex-bridge/internal/incidentlog"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/tools"
@@ -14,7 +14,7 @@ import (
 
 func (s *Server) hasInternalTools(toolCtx tools.Context) bool {
 	for _, entry := range toolCtx.Tools {
-		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource || entry.Kind() == tools.KindFileSearch {
+		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource {
 			return true
 		}
 	}
@@ -71,7 +71,7 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 	for _, call := range message.ToolCalls {
 		entry := toolCtx.Entry(call.Function.Name)
 		arguments := tools.CanonicalArguments(entry, call.Function.Arguments)
-		output, descriptor, ok := s.internalToolOutput(ctx, req, entry, arguments, toolCtx)
+		output, descriptor, ok := s.internalToolOutput(ctx, req, entry, arguments, toolCtx, adapter)
 		if !ok {
 			return providers.ChatCompletionRequest{}, false
 		}
@@ -102,10 +102,19 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 	return followUp, true
 }
 
-func (s *Server) internalToolOutput(ctx context.Context, req providers.ChatCompletionRequest, entry tools.Entry, arguments string, toolCtx tools.Context) (string, adapters.ToolDescriptor, bool) {
+func (s *Server) internalToolOutput(ctx context.Context, req providers.ChatCompletionRequest, entry tools.Entry, arguments string, toolCtx tools.Context, adapter adapters.Adapter) (string, adapters.ToolDescriptor, bool) {
 	switch {
 	case entry.Kind() == tools.KindWebSearch:
 		return s.searchToolOutput(ctx, arguments), adapters.ToolDescriptor{Name: tools.WebSearchProxyToolName, Kind: tools.KindWebSearch, OriginalType: "web_search_preview"}, true
+	case entry.Kind() == tools.KindTextEditor:
+		input := tools.ExtractCustomToolInputWithWorkspace(entry, arguments, adapter, toolCtx.Workspace)
+		if strings.TrimSpace(input) == "" {
+			return tools.TextEditorInvalidArgumentsResult(""), internalToolDescriptor(entry), true
+		}
+		if strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_") {
+			return input, internalToolDescriptor(entry), true
+		}
+		return "", adapters.ToolDescriptor{}, false
 	default:
 		return "", adapters.ToolDescriptor{}, false
 	}
@@ -127,37 +136,9 @@ func (s *Server) localToolResultResolver(logCtx toollog.OutputContext, toolCtx t
 		}
 		output := s.searchToolOutput(ctx, canonicalArguments)
 		toollog.ToolOutput(logCtx, callID, entry.Descriptor, canonicalArguments, output, output)
-		if toolCtx.Has("exec_command") {
-			item := toolRuntimeLocalResultExecCommandCall(callID, entry, canonicalArguments, output)
-			toollog.ToolCallRerouted(logCtx.RequestID, logCtx.Model, logCtx.Profile, callID, entry, canonicalArguments, "exec_command", item["arguments"].(string), "server_executed_internal_tool")
-			return item, true
-		}
-		record := map[string]any{
-			"request_id":     logCtx.RequestID,
-			"model":          logCtx.Model,
-			"upstream_model": logCtx.UpstreamModel,
-			"profile":        logCtx.Profile,
-			"call_id":        callID,
-			"tool":           entry.Name(),
-			"kind":           entry.Kind(),
-			"arguments":      canonicalArguments,
-			"reason":         "exec_command_unavailable_for_internal_tool_result",
-		}
-		if len(logCtx.RequestSummary) > 0 {
-			record["request_summary"] = logCtx.RequestSummary
-		}
-		incidentlog.Write("internal_tool_transport_missing", record)
-		return codex.ResponseItem{
-			"id":   toolItemID("function_call", callID),
-			"type": "message",
-			"role": "assistant",
-			"content": []map[string]string{{
-				"type": "output_text",
-				"text": "CODEX_BRIDGE_INTERNAL_TOOL_ERROR\n" +
-					"tool: " + entry.Name() + "\n" +
-					"reason: exec_command_unavailable_for_internal_tool_result",
-			}},
-		}, true
+		item := localToolResultMessageItem(callID, output)
+		toollog.ToolCallRerouted(logCtx.RequestID, logCtx.Model, logCtx.Profile, callID, entry, canonicalArguments, "message", output, "server_executed_internal_tool")
+		return item, true
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 
 const FileSearchToolName = "search_files"
 
-var fileSearchParameters = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Literal text, identifier, phrase, or keyword to search for in local files."},"path":{"type":"string","description":"Optional workspace-relative or absolute file/directory path. Omit to search the current workspace."},"glob":{"type":"string","description":"Optional rg-style file glob, such as *.go or internal/**/*.go."},"max_results":{"type":"integer","description":"Maximum matching lines to return. Omit for 50; maximum 100."}},"required":["query"],"additionalProperties":false}`)
+var fileSearchParameters = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Literal file name, path fragment, identifier, phrase, or keyword to search for in local files."},"path":{"type":"string","description":"Optional workspace-relative or absolute file/directory path. Omit to search the current workspace."},"glob":{"type":"string","description":"Optional rg-style file glob, such as *.go or internal/**/*.go."},"max_results":{"type":"integer","description":"Maximum matching paths or lines to return. Omit for 50; maximum 100."}},"required":["query"],"additionalProperties":false}`)
 
 type fileSearchSpec struct {
 	Query      string
@@ -47,19 +47,12 @@ func fileSearchConvertedTool(originalName string, originalType string, raw map[s
 
 func fileSearchDescription() string {
 	return strings.Join([]string{
-		"Search local workspace files by literal text through Codex Bridge.",
-		"Use this to find candidate files or matching lines before reading or editing.",
-		"This does not read complete files. After a hit, call codex_context_resource with action=read_local_file and the returned path to inspect full content.",
+		"Search local workspace file paths and file contents through Codex Bridge.",
+		"Use this to find candidate files by name/path or matching content lines before reading or editing.",
+		"For filename searches, pass a distinctive literal filename or path fragment; this searches paths too.",
+		"This does not read complete files. After a hit, call read_file with the returned path to inspect full content.",
 		"Do not use this for web search, MCP resources, code execution, or generated content that is not already on disk.",
 	}, "\n")
-}
-
-func FileSearchCallForTool(arguments string, ctx Context) (string, string, bool) {
-	if !ctx.Has("exec_command") {
-		return "", "", false
-	}
-	spec := fileSearchSpecFromArguments(arguments, ctx)
-	return "exec_command", marshalObject(map[string]any{"cmd": fileSearchCommandForTool(spec, FileSearchToolName, arguments)}), true
 }
 
 func fileSearchSpecFromArguments(arguments string, ctx Context) fileSearchSpec {
@@ -85,49 +78,29 @@ func fileSearchSpecFromArguments(arguments string, ctx Context) fileSearchSpec {
 	return spec
 }
 
-func fileSearchCommandForTool(spec fileSearchSpec, toolName string, arguments string) string {
-	return fileSearchCommand(spec) + "\nprintf '\\n%s\\n' " + shellQuote(RuntimeLocalResultEnvelopeWithoutOutput(toolName, arguments))
+func FileSearchCommand(arguments string, ctx Context) ExecCommand {
+	spec := fileSearchSpecFromArguments(arguments, ctx)
+	contentArgs := []string{"rg", "--line-number", "--no-heading", "--color", "never", "--smart-case", "--trim", "--fixed-strings"}
+	if spec.Glob != "" {
+		contentArgs = append(contentArgs, "--glob", spec.Glob)
+	}
+	contentArgs = append(contentArgs, "--", spec.Query, spec.Path)
+	fileArgs := []string{"rg", "--files"}
+	if spec.Glob != "" {
+		fileArgs = append(fileArgs, "--glob", spec.Glob)
+	}
+	fileArgs = append(fileArgs, spec.Path)
+	pathArgs := []string{"rg", "--color", "never", "--smart-case", "--fixed-strings", "--", spec.Query}
+	return ExecCommand{
+		Cmd:             "( " + shellJoin(contentArgs) + " 2>&1 || true; " + shellJoin(fileArgs) + " 2>/dev/null | " + shellJoin(pathArgs) + " 2>&1 || true ) | head -n " + strconv.Itoa(spec.MaxResults) + " | head -c 30000",
+		Workdir:         ctx.Workspace,
+		MaxOutputTokens: 12000,
+	}
 }
 
-func fileSearchCommand(spec fileSearchSpec) string {
-	return strings.Join([]string{
-		"query=" + shellQuote(spec.Query),
-		"target=" + shellQuote(spec.Path),
-		"glob=" + shellQuote(spec.Glob),
-		"max=" + strconv.Itoa(spec.MaxResults),
-		"tmp=$(mktemp)",
-		"err=$(mktemp)",
-		"printf '%s\n' 'FILE_SEARCH_RESULTS'",
-		"printf 'query: %s\n' \"$query\"",
-		"printf 'path: %s\n' \"$target\"",
-		"if [ -n \"$glob\" ]; then printf 'glob: %s\n' \"$glob\"; fi",
-		"printf '%s\n' 'next_action: read matched files with codex_context_resource action=read_local_file'",
-		"if [ -z \"$query\" ]; then",
-		"  printf '%s\n' 'search_failed: true'",
-		"  printf '%s\n' 'reason: query_required'",
-		"elif [ -n \"$glob\" ]; then",
-		"  rg --line-number --no-heading --color never --smart-case --trim --fixed-strings --glob \"$glob\" -- \"$query\" \"$target\" >\"$tmp\" 2>\"$err\"",
-		"  status=$?",
-		"else",
-		"  rg --line-number --no-heading --color never --smart-case --trim --fixed-strings -- \"$query\" \"$target\" >\"$tmp\" 2>\"$err\"",
-		"  status=$?",
-		"fi",
-		"if [ -n \"${status:-}\" ]; then",
-		"  if [ \"$status\" -eq 0 ] || [ \"$status\" -eq 1 ]; then",
-		"    total=$(wc -l < \"$tmp\" | tr -d ' ')",
-		"    shown=$total",
-		"    if [ \"$shown\" -gt \"$max\" ]; then shown=$max; fi",
-		"    printf 'match_count: %s\n' \"$total\"",
-		"    printf 'shown_count: %s\n' \"$shown\"",
-		"    if [ \"$total\" -gt \"$max\" ]; then printf '%s\n' 'more_results_omitted: true'; fi",
-		"    printf '%s\n' 'results:'",
-		"    if [ \"$shown\" -gt 0 ]; then head -n \"$max\" \"$tmp\" | head -c 30000; fi",
-		"  else",
-		"    printf '%s\n' 'search_failed: true'",
-		"    printf 'exit_code: %s\n' \"$status\"",
-		"    if [ -s \"$err\" ]; then printf '%s\n' 'error:'; cat \"$err\"; fi",
-		"  fi",
-		"fi",
-		"rm -f \"$tmp\" \"$err\"",
-	}, "\n")
+func shellJoin(args []string) string {
+	for i, arg := range args {
+		args[i] = shellQuote(arg)
+	}
+	return strings.Join(args, " ")
 }

@@ -15,17 +15,17 @@ func convertExternalTool(name string) ([]convertedTool, bool) {
 
 func normalizeExternalToolSummary(name string, description string) (string, string) {
 	if externalToolBaseName(name) == externalSkillViewToolName {
-		return mcpResourceProxyToolName, "Read local skill files and linked skill resources through the unified context resource reader."
+		return ReadFileToolName, "Read local skill files by their filesystem path."
 	}
 	if externalToolBaseName(name) == "file_search" {
-		return FileSearchToolName, "Search local workspace files by literal text, then read matching files with codex_context_resource."
+		return FileSearchToolName, "Search local workspace files by literal text, then read matching files with read_file."
 	}
 	return name, normalizeExternalToolDescription(description)
 }
 
 func normalizeExternalToolDescription(description string) string {
-	description = strings.ReplaceAll(description, "Use skill_view(name) to load full content.", "Use codex_context_resource with action=read_local_file to read local skill files when a file path is available.")
-	description = strings.ReplaceAll(description, "skill_view(name)", "codex_context_resource read_local_file")
+	description = strings.ReplaceAll(description, "Use skill_view(name) to load full content.", "Use read_file to read local skill files when a file path is available.")
+	description = strings.ReplaceAll(description, "skill_view(name)", "read_file")
 	return description
 }
 

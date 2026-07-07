@@ -21,7 +21,8 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 	_ = writer.Event(responseCreatedEvent(respID, createdAt, req.Model))
 	_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 
-	finalState, finalShape, err := s.streamInternalToolRounds(r, writer, respID, createdAt, chatReq, provider, toolCtx, adapter, requestID, sessionID, req.Model, profile, shape, toollog.OutputContext{
+	trace := &internalToolTrace{}
+	finalState, finalShape, err := s.streamInternalToolRounds(r, writer, respID, createdAt, chatReq, provider, toolCtx, adapter, requestID, sessionID, req.Model, profile, shape, trace, toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
 		UpstreamModel:  chatReq.Model,
@@ -39,19 +40,21 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	items := finalState.Done()
-	if emptyOutput(items) {
-		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "internal_tools": true, "output": outputSummary(items, providers.NormalizedUsage{})}))
+	completedItems := append(append([]codex.ResponseItem{}, trace.items...), items...)
+	outputIndexOffset := len(trace.items)
+	if emptyOutput(completedItems) {
+		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "internal_tools": true, "output": outputSummary(completedItems, providers.NormalizedUsage{})}))
 	}
 	for i, item := range items {
 		alreadyAdded := finalState.eventsEmitted && ((item["id"] == finalState.textItemID && finalState.textAdded) || (item["id"] == finalState.reasoningItemID && finalState.reasoningAdded))
-		for _, event := range outputDoneEvents(item, i, alreadyAdded) {
+		for _, event := range outputDoneEvents(item, i+outputIndexOffset, alreadyAdded) {
 			_ = writer.Event(event)
 		}
 	}
 	responseCompleted := map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
-			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "completed", "output": items,
+			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "completed", "output": completedItems,
 		},
 	}
 	_ = writer.Event(responseCompleted)
@@ -60,7 +63,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", finalState.ToolCallCount()))
 }
 
-func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, shape optimization.Shape, logCtx toollog.OutputContext) (*streamState, optimization.Shape, error) {
+func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, shape optimization.Shape, trace *internalToolTrace, logCtx toollog.OutputContext) (*streamState, optimization.Shape, error) {
 	currentReq := chatReq
 	localResolver := s.localToolResultResolver(logCtx, toolCtx)
 	finalState, err := s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "initial", true, localResolver, false)
@@ -69,6 +72,7 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 	}
 	sequence := 0
 	for {
+		trace.emit(writer, chatMessageFromStreamState(finalState), toolCtx)
 		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState), toolCtx, adapter, logCtx)
 		if !ok {
 			return finalState, shape, nil
@@ -82,6 +86,42 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 			return nil, shape, err
 		}
 	}
+}
+
+type internalToolTrace struct {
+	items []codex.ResponseItem
+}
+
+func (t *internalToolTrace) emit(writer *codex.SSEWriter, message providers.ChatMessage, toolCtx tools.Context) {
+	for _, call := range message.ToolCalls {
+		item, ok := internalToolCallItem(call, toolCtx)
+		if !ok {
+			continue
+		}
+		outputIndex := len(t.items)
+		t.items = append(t.items, item)
+		for _, event := range outputDoneEvents(item, outputIndex, false) {
+			_ = writer.Event(event)
+		}
+	}
+}
+
+func internalToolCallItem(call providers.ChatToolCall, toolCtx tools.Context) (codex.ResponseItem, bool) {
+	entry := toolCtx.Entry(call.Function.Name)
+	switch entry.Kind() {
+	case tools.KindWebSearch:
+	default:
+		return nil, false
+	}
+	arguments := tools.CanonicalArguments(entry, call.Function.Arguments)
+	return codex.ResponseItem{
+		"id":        "fco_" + call.ID,
+		"type":      "function_call_output",
+		"call_id":   call.ID,
+		"name":      entry.Name(),
+		"arguments": arguments,
+		"output":    entry.Name() + ": " + arguments,
+	}, true
 }
 
 func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, stage string, hideInternalTools bool, localResolver toolCallLocalResolver, emitEvents bool) (*streamState, error) {
@@ -150,7 +190,7 @@ streamLoop:
 func isInternalToolEvent(event map[string]any) bool {
 	item, _ := event["item"].(map[string]any)
 	name, _ := item["name"].(string)
-	return name == tools.WebSearchProxyToolName || name == tools.FileSearchToolName
+	return name == tools.WebSearchProxyToolName || name == tools.ReadFileToolName || name == tools.ListFilesToolName || name == tools.FileSearchToolName
 }
 
 func chatMessageFromStreamState(state *streamState) providers.ChatMessage {

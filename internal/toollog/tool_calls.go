@@ -21,12 +21,18 @@ const EnvToolLogPath = "CODEX_BRIDGE_TOOL_LOG"
 
 var seenToolOutputs sync.Map
 var modelToolCalls sync.Map
+var logicalToolCalls sync.Map
 var requestContexts sync.Map
 
 type requestContext struct {
 	SessionID     string
 	Model         string
 	UpstreamModel string
+}
+
+type LogicalToolCall struct {
+	Name      string
+	Arguments string
 }
 
 type OutputContext struct {
@@ -56,6 +62,9 @@ func ToolCall(requestID string, model string, profile string, callID string, ent
 	}
 	attachRequestContext(record)
 	modelToolCalls.Store(callID, cloneRecord(record))
+	if tools.IsNativeCommandProxyToolName(entry.Name()) {
+		logicalToolCalls.Store(callID, LogicalToolCall{Name: entry.Name(), Arguments: rawArguments})
+	}
 	appendRecord(record)
 }
 
@@ -365,6 +374,18 @@ func takeRememberedToolCall(callID string) map[string]any {
 	}
 	record, _ := value.(map[string]any)
 	return cloneRecord(record)
+}
+
+func RememberedLogicalToolCall(callID string) (LogicalToolCall, bool) {
+	value, ok := logicalToolCalls.Load(callID)
+	if !ok {
+		return LogicalToolCall{}, false
+	}
+	call, _ := value.(LogicalToolCall)
+	if call.Name == "" {
+		return LogicalToolCall{}, false
+	}
+	return call, true
 }
 
 func modelCallToolName(record map[string]any) string {

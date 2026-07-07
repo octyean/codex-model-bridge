@@ -16,6 +16,8 @@ const (
 	KindTextEditor  = "text_editor_patch"
 	KindToolSearch  = "tool_search"
 	KindMCPResource = "mcp_resource"
+	KindReadFile    = "read_file"
+	KindListFiles   = "list_files"
 	KindFileSearch  = "file_search"
 	KindWebSearch   = "web_search"
 	KindShell       = "shell"
@@ -202,6 +204,15 @@ func (ctx Context) Has(name string) bool {
 	return ok
 }
 
+func IsNativeCommandProxyToolName(name string) bool {
+	switch name {
+	case ReadFileToolName, ListFilesToolName, FileSearchToolName:
+		return true
+	default:
+		return false
+	}
+}
+
 type convertedTool struct {
 	tool  providers.ChatTool
 	entry Entry
@@ -332,7 +343,7 @@ func convertImageView(tool codex.ResponseTool) []convertedTool {
 }
 
 func imageViewDescription() string {
-	return "Inspect a local image file from the filesystem when visual inspection is required. Use only for image files such as PNG, JPG, JPEG, WEBP, GIF, or SVG. Do not use this tool for Markdown, source code, JSON, CSS, Vue, JavaScript, TypeScript, TOML, YAML, or other text files; read text files with codex_context_resource or exec_command instead."
+	return "Inspect a local image file from the filesystem when visual inspection is required. Use only for image files such as PNG, JPG, JPEG, WEBP, GIF, or SVG. Do not use this tool for Markdown, source code, JSON, CSS, Vue, JavaScript, TypeScript, TOML, YAML, or other text files; read text files with read_file instead."
 }
 
 func objectParameters() json.RawMessage {

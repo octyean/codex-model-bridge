@@ -58,6 +58,22 @@ func ShellOutputText(value any) string {
 	return string(data)
 }
 
+func CommandOutputBodyText(value any) string {
+	text := ShellOutputText(value)
+	exitCode, body, ok := parseCodexShellOutput(text)
+	if !ok {
+		return text
+	}
+	body = strings.TrimRight(body, "\n")
+	if exitCode == 0 {
+		return body
+	}
+	if body == "" {
+		return "exit_code: " + strconv.Itoa(exitCode)
+	}
+	return "exit_code: " + strconv.Itoa(exitCode) + "\n" + body
+}
+
 func normalizeCodexShellOutput(output string) string {
 	exitCode, body, ok := parseCodexShellOutput(output)
 	if !ok {
@@ -79,6 +95,16 @@ func parseCodexShellOutput(output string) (int, string, bool) {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "Process exited with code") {
 			value := strings.TrimSpace(strings.TrimPrefix(line, "Process exited with code"))
+			code, err := strconv.Atoi(value)
+			if err != nil {
+				return 0, "", false
+			}
+			exitCode = code
+			hasExitCode = true
+			continue
+		}
+		if strings.HasPrefix(line, "Exit code:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "Exit code:"))
 			code, err := strconv.Atoi(value)
 			if err != nil {
 				return 0, "", false

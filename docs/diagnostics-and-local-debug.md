@@ -100,7 +100,7 @@ Chat fallback 的工具适配边界：
 | MCP resource proxy、bridge 内置 `web_search` proxy、`file_search` -> `search_files` proxy | 不需要直转 | bridge 转成本地可执行工具或代理工具 |
 | `computer`、`image_generation`、`code_interpreter` 等 hosted tools | 上游支持时原样直转 | 不能在 Chat fallback 中凭空执行，只能记录为 unsupported 并提示可替代路径 |
 
-Chat fallback 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 `search_files`。它只做本地工作区文本搜索，返回命中行；需要读取完整文件时继续用 `codex_context_resource action=read_local_file`。如果 Codex 侧后续原生下发 `file_search`，也会归一到同一个 `search_files` 合同。
+Chat fallback 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 `read_file`、`list_files` 和 `search_files`。这三个是给第三方 Chat 模型看的逻辑工具，返回 Codex Harness 时会投影成原生 `exec_command`；App 因此显示 `command_execution`。需要读取完整文件时继续用 `read_file`，不要把本地路径伪装成 MCP resource。
 
 `tool_search` 只用于发现可调用工具，不读取本地文件或 MCP resource。搜索意图已经被当前可见工具覆盖时，历史回灌只保留对应工具提示，不附带低相关工具列表。
 

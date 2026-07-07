@@ -252,7 +252,7 @@ func responseItemFromToolCall(ctx context.Context, callID string, entry tools.En
 	}); decision.ShouldRecord {
 		toollog.BrokerDecision(requestID, model, profile, callID, entry, canonicalArguments, decision)
 		if decision.Action == toolruntime.DecisionStop {
-			return toolRuntimeLocalResultExecCommandCall(callID, entry, canonicalArguments, decision.LocalText)
+			return localToolResultMessageItem(callID, decision.LocalText)
 		}
 	}
 	if localResolver != nil {
@@ -265,10 +265,10 @@ func responseItemFromToolCall(ctx context.Context, callID string, entry tools.En
 		input := customInput
 		if entry.Kind() == tools.KindTextEditor {
 			if strings.TrimSpace(input) == "" {
-				return textEditorLocalResultExecCommandCall(callID, entry.Name(), canonicalArguments, textEditorInvalidArgumentsResult())
+				return localToolResultMessageItem(callID, textEditorInvalidArgumentsResult())
 			}
 			if strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_") {
-				return textEditorLocalResultExecCommandCall(callID, entry.Name(), canonicalArguments, input)
+				return localToolResultMessageItem(callID, input)
 			}
 		}
 		return codex.ResponseItem{
@@ -301,30 +301,18 @@ func responseItemFromToolCall(ctx context.Context, callID string, entry tools.En
 			"arguments": nativeArguments,
 			"status":    "completed",
 		}
+	case tools.KindReadFile:
+		command := tools.ReadFileCommand(canonicalArguments, toolCtx)
+		toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, "exec_command", execCommandArguments(command), "native_command_execution")
+		return execCommandItem(callID, command)
+	case tools.KindListFiles:
+		command := tools.ListFilesCommand(canonicalArguments, toolCtx)
+		toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, "exec_command", execCommandArguments(command), "native_command_execution")
+		return execCommandItem(callID, command)
 	case tools.KindFileSearch:
-		name, nativeArguments, ok := tools.FileSearchCallForTool(canonicalArguments, toolCtx)
-		if !ok {
-			return codex.ResponseItem{
-				"id":   toolItemID("function_call", callID),
-				"type": "message",
-				"role": "assistant",
-				"content": []map[string]string{{
-					"type": "output_text",
-					"text": "CODEX_BRIDGE_INTERNAL_TOOL_ERROR\n" +
-						"tool: " + entry.Name() + "\n" +
-						"reason: exec_command_unavailable_for_file_search",
-				}},
-			}
-		}
-		toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, name, nativeArguments, "local_file_search")
-		return codex.ResponseItem{
-			"id":        toolItemID("function_call", callID),
-			"type":      "function_call",
-			"call_id":   callID,
-			"name":      name,
-			"arguments": nativeArguments,
-			"status":    "completed",
-		}
+		command := tools.FileSearchCommand(canonicalArguments, toolCtx)
+		toollog.ToolCallRerouted(requestID, model, profile, callID, entry, canonicalArguments, "exec_command", execCommandArguments(command), "native_command_execution")
+		return execCommandItem(callID, command)
 	case tools.KindShell:
 		return codex.ResponseItem{
 			"id":      toolItemID("shell_call", callID),
@@ -349,28 +337,39 @@ func responseItemFromToolCall(ctx context.Context, callID string, entry tools.En
 	}
 }
 
-func textEditorLocalResultExecCommandCall(callID string, toolName string, canonicalArguments string, input string) codex.ResponseItem {
-	arguments, _ := json.Marshal(map[string]string{"cmd": textEditorLocalResultCommand(toolName, canonicalArguments, input)})
+func execCommandItem(callID string, command tools.ExecCommand) codex.ResponseItem {
 	return codex.ResponseItem{
 		"id":        toolItemID("function_call", callID),
 		"type":      "function_call",
 		"call_id":   callID,
 		"name":      "exec_command",
-		"arguments": string(arguments),
+		"arguments": execCommandArguments(command),
 		"status":    "completed",
 	}
 }
 
-func toolRuntimeLocalResultExecCommandCall(callID string, entry tools.Entry, canonicalArguments string, input string) codex.ResponseItem {
-	envelope := tools.RuntimeLocalResultEnvelope(entry.Name(), canonicalArguments, input)
-	arguments, _ := json.Marshal(map[string]string{"cmd": "printf '%s\\n' " + shellSingleQuote(envelope)})
+func execCommandArguments(command tools.ExecCommand) string {
+	args := map[string]any{
+		"cmd":               command.Cmd,
+		"yield_time_ms":     1000,
+		"max_output_tokens": command.MaxOutputTokens,
+	}
+	if command.Workdir != "" {
+		args["workdir"] = command.Workdir
+	}
+	data, _ := json.Marshal(args)
+	return string(data)
+}
+
+func localToolResultMessageItem(callID string, input string) codex.ResponseItem {
 	item := codex.ResponseItem{
-		"id":        toolItemID("function_call", callID),
-		"type":      "function_call",
-		"call_id":   callID,
-		"name":      "exec_command",
-		"arguments": string(arguments),
-		"status":    "completed",
+		"id":   "msg_" + strings.TrimPrefix(callID, "call_"),
+		"type": "message",
+		"role": "assistant",
+		"content": []map[string]string{{
+			"type": "output_text",
+			"text": input,
+		}},
 	}
 	return item
 }
@@ -405,15 +404,16 @@ func toolItemID(itemType string, callID string) string {
 }
 
 type textEditorStreamProjector struct {
-	callID string
-	entry  tools.Entry
-	input  string
-	added  bool
-	local  bool
+	requestID string
+	callID    string
+	entry     tools.Entry
+	input     string
+	added     bool
+	local     bool
 }
 
-func newTextEditorStreamProjector(callID string, entry tools.Entry) *textEditorStreamProjector {
-	return &textEditorStreamProjector{callID: callID, entry: entry}
+func newTextEditorStreamProjector(requestID string, callID string, entry tools.Entry) *textEditorStreamProjector {
+	return &textEditorStreamProjector{requestID: requestID, callID: callID, entry: entry}
 }
 
 func (p *textEditorStreamProjector) addedEvent() map[string]any {
@@ -556,9 +556,8 @@ func (p *textEditorStreamProjector) startLocal(arguments string, input string) [
 		return nil
 	}
 	p.added = true
-	item := textEditorLocalResultExecCommandCall(p.callID, p.entry.Name(), arguments, input)
+	item := localToolResultMessageItem(p.callID, input)
 	item["status"] = "in_progress"
-	delete(item, "arguments")
 	return []map[string]any{{
 		"type":         "response.output_item.added",
 		"item":         item,
@@ -602,26 +601,8 @@ func (p *textEditorStreamProjector) doneEvents(item codex.ResponseItem) []map[st
 	return events
 }
 
-func textEditorLocalResultCommand(toolName string, canonicalArguments string, input string) string {
-	command := "printf '%s\\n' " + shellSingleQuote(input)
-	if path := textEditorLocalResultPath(input); path != "" {
-		command += "; printf '%s\\n' '--- current file ---'; sed -n '1,200p' " + shellSingleQuote(path)
-	}
-	envelope := tools.RuntimeLocalResultEnvelopeWithoutOutput(toolName, canonicalArguments)
-	return command + "; printf '%s\\n' " + shellSingleQuote(envelope) + "; exit 0"
-}
-
 func textEditorInvalidArgumentsResult() string {
 	return tools.TextEditorInvalidArgumentsResult("")
-}
-
-func textEditorLocalResultPath(input string) string {
-	for _, line := range strings.Split(input, "\n") {
-		if path, ok := strings.CutPrefix(line, "path: "); ok {
-			return strings.TrimSpace(path)
-		}
-	}
-	return ""
 }
 
 func shellSingleQuote(value string) string {
