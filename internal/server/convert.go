@@ -24,9 +24,12 @@ type toolCallLocalResolver func(ctx context.Context, callID string, entry tools.
 
 func responseItemsFromMessage(ctx context.Context, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) []codex.ResponseItem {
 	if len(message.ToolCalls) > 0 {
-		items := make([]codex.ResponseItem, 0, len(message.ToolCalls))
+		items := make([]codex.ResponseItem, 0, len(message.ToolCalls)+2)
 		if item := reasoningItem(message.ReasoningContent); item != nil {
 			items = append(items, item)
+		}
+		if strings.TrimSpace(messageText(message.Content)) != "" {
+			items = append(items, assistantMessageItem(message.Content))
 		}
 		for _, call := range message.ToolCalls {
 			entry := toolCtx.Entry(call.Function.Name)
@@ -42,12 +45,16 @@ func responseItemsFromMessage(ctx context.Context, message providers.ChatMessage
 	if item := reasoningItem(message.ReasoningContent); item != nil {
 		items = append(items, item)
 	}
-	items = append(items, codex.ResponseItem{
+	items = append(items, assistantMessageItem(message.Content))
+	return items
+}
+
+func assistantMessageItem(content any) codex.ResponseItem {
+	return codex.ResponseItem{
 		"type":    "message",
 		"role":    "assistant",
-		"content": []map[string]string{{"type": "output_text", "text": messageText(message.Content)}},
-	})
-	return items
+		"content": []map[string]string{{"type": "output_text", "text": messageText(content)}},
+	}
 }
 
 type streamState struct {
@@ -169,6 +176,14 @@ func (s *streamState) Done() []codex.ResponseItem {
 				item["id"] = s.reasoningItemID
 			}
 			items = append(items, indexedResponseItem{index: s.itemIndex(s.reasoningIndex), item: item})
+		}
+		if s.textAdded || strings.TrimSpace(s.text) != "" {
+			items = append(items, indexedResponseItem{index: s.itemIndex(s.textIndex), item: codex.ResponseItem{
+				"id":      s.textItemID,
+				"type":    "message",
+				"role":    "assistant",
+				"content": []map[string]string{{"type": "output_text", "text": s.text}},
+			}})
 		}
 		for i := 0; i < len(s.toolCalls); i++ {
 			call, ok := s.toolCalls[i]

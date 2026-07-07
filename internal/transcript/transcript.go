@@ -52,6 +52,7 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	if note := tools.UnsupportedToolNote(req.Tools, runtime.HasSearch()); note != "" {
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: note})
 	}
+	messages = append(messages, providers.ChatMessage{Role: "system", Content: visibleProgressNote})
 	if textEditorTranslationNeeded(req.Tools, adapter) {
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: textEditorToolTranslationNote})
 	}
@@ -242,6 +243,10 @@ func replacePendingToolCall(calls []providers.ChatToolCall, replacement provider
 const textEditorToolTranslationNote = `CHAT_TOOL_TRANSLATION
 Codex native editing instructions may mention apply_patch. In this Chat profile that editing capability is exposed as operation-specific file editor functions.
 Read apply_patch instructions as write_file, replace_text, insert_text_at_line, insert_text_after_match, move_file, or delete_file calls with structured JSON arguments. There is no separate apply_patch tool in this translated tool surface, and the file editor tools do not accept patch-diff syntax.`
+
+const visibleProgressNote = `CHAT_VISIBLE_PROGRESS
+Codex App shows assistant content and tool events, but does not show reasoning_content.
+Before a meaningful batch of tool calls, write a brief assistant content sentence explaining what you are about to do. Group related reads, searches, or edits into one sentence. Do not put user-visible progress only in reasoning_content.`
 
 func textEditorTranslationNeeded(responseTools []codex.ResponseTool, adapter adapters.Adapter) bool {
 	if !adapters.UseTextEditorForApplyPatch(adapter) {
