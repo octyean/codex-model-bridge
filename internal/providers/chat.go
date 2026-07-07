@@ -310,10 +310,6 @@ func (c *OpenAIChatClient) Stream(ctx context.Context, req ChatCompletionRequest
 				return
 			}
 			out <- StreamEvent{Chunk: chunk}
-			if chatChunkFinished(chunk) {
-				out <- StreamEvent{Done: true}
-				return
-			}
 		}
 		if err := scanner.Err(); err != nil {
 			out <- StreamEvent{Err: err}
@@ -341,15 +337,6 @@ func estimateWireTokens(data []byte) int {
 		return 0
 	}
 	return len(data) / 4
-}
-
-func chatChunkFinished(chunk ChatCompletionChunk) bool {
-	for _, choice := range chunk.Choices {
-		if choice.FinishReason != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *OpenAIChatClient) doJSON(ctx context.Context, req ChatCompletionRequest, out any) error {

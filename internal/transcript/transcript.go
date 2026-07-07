@@ -52,7 +52,9 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	if note := tools.UnsupportedToolNote(req.Tools, runtime.HasSearch()); note != "" {
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: note})
 	}
-	messages = append(messages, providers.ChatMessage{Role: "system", Content: visibleProgressNote})
+	if !structuredOutputRequested(req.Raw) {
+		messages = append(messages, providers.ChatMessage{Role: "system", Content: visibleProgressNote})
+	}
 	if textEditorTranslationNeeded(req.Tools, adapter) {
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: textEditorToolTranslationNote})
 	}
@@ -247,6 +249,15 @@ Read apply_patch instructions as write_file, replace_text, insert_text_at_line, 
 const visibleProgressNote = `CHAT_VISIBLE_PROGRESS
 Codex App shows assistant content and tool events, but does not show reasoning_content.
 Before a meaningful batch of tool calls, write a brief assistant content sentence explaining what you are about to do. Group related reads, searches, or edits into one sentence. Do not put user-visible progress only in reasoning_content.`
+
+func structuredOutputRequested(raw map[string]any) bool {
+	text, ok := raw["text"].(map[string]any)
+	if !ok {
+		return false
+	}
+	format, ok := text["format"].(map[string]any)
+	return ok && format["type"] == "json_schema"
+}
 
 func textEditorTranslationNeeded(responseTools []codex.ResponseTool, adapter adapters.Adapter) bool {
 	if !adapters.UseTextEditorForApplyPatch(adapter) {

@@ -22,7 +22,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 	_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 
 	trace := &internalToolTrace{}
-	finalState, finalShape, err := s.streamInternalToolRounds(r, writer, respID, createdAt, chatReq, provider, toolCtx, adapter, requestID, sessionID, req.Model, profile, shape, trace, toollog.OutputContext{
+	finalState, finalShape, usage, err := s.streamInternalToolRounds(r, writer, respID, createdAt, chatReq, provider, toolCtx, adapter, requestID, sessionID, req.Model, profile, shape, trace, toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
 		UpstreamModel:  chatReq.Model,
@@ -39,11 +39,11 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		_ = writer.Event(map[string]any{"type": "response.failed", "response": map[string]any{"id": respID, "error": map[string]any{"message": err.Error(), "type": "server_error"}}})
 		return
 	}
-	items := finalState.Done()
+	items := enforceStructuredOutput(finalState.Done(), chatReq.ResponseFormat)
 	completedItems := append(append([]codex.ResponseItem{}, trace.items...), items...)
 	outputIndexOffset := len(trace.items)
 	if emptyOutput(completedItems) {
-		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "internal_tools": true, "output": outputSummary(completedItems, providers.NormalizedUsage{})}))
+		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "internal_tools": true, "output": outputSummary(completedItems, usage)}))
 	}
 	for i, item := range items {
 		alreadyAdded := finalState.eventsEmitted && ((item["id"] == finalState.textItemID && finalState.textAdded) || (item["id"] == finalState.reasoningItemID && finalState.reasoningAdded))
@@ -55,36 +55,40 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		"type": "response.completed",
 		"response": map[string]any{
 			"id": respID, "object": "response", "created_at": createdAt, "model": req.Model, "status": "completed", "output": completedItems,
+			"usage": codexUsage(usage),
 		},
 	}
 	_ = writer.Event(responseCompleted)
 	s.writeBridgeResponse(sessionID, requestID, req.Model, chatReq.Model, profile, responseCompleted["response"], map[string]any{"stream": true, "internal_tools": true})
-	s.logUsage(requestID, req.Model, profile, adapter, finalShape, providers.NormalizedUsage{})
+	s.logUsage(requestID, req.Model, profile, adapter, finalShape, usage)
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", finalState.ToolCallCount()))
 }
 
-func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, shape optimization.Shape, trace *internalToolTrace, logCtx toollog.OutputContext) (*streamState, optimization.Shape, error) {
+func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, shape optimization.Shape, trace *internalToolTrace, logCtx toollog.OutputContext) (*streamState, optimization.Shape, providers.NormalizedUsage, error) {
 	currentReq := chatReq
 	localResolver := s.localToolResultResolver(logCtx, toolCtx)
-	finalState, err := s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "initial", true, localResolver, false)
+	var totalUsage providers.NormalizedUsage
+	finalState, usage, err := s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "initial", true, localResolver, false)
 	if err != nil {
-		return nil, shape, err
+		return nil, shape, totalUsage, err
 	}
+	totalUsage = addUsage(totalUsage, usage)
 	sequence := 0
 	for {
 		trace.emit(writer, chatMessageFromStreamState(finalState), toolCtx)
 		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState), toolCtx, adapter, logCtx)
 		if !ok {
-			return finalState, shape, nil
+			return finalState, shape, totalUsage, nil
 		}
 		sequence++
 		s.writePromptRequest(sessionID, requestID, model, followUpReq.Model, profile, "internal_tool_followup", providers.PreparedChatRequest(followUpReq), map[string]any{"sequence": sequence, "stream": true})
 		shape = optimization.CaptureShape(followUpReq)
 		currentReq = followUpReq
-		finalState, err = s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "internal_tool_followup", true, localResolver, false)
+		finalState, usage, err = s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "internal_tool_followup", true, localResolver, false)
 		if err != nil {
-			return nil, shape, err
+			return nil, shape, totalUsage, err
 		}
+		totalUsage = addUsage(totalUsage, usage)
 	}
 }
 
@@ -124,18 +128,19 @@ func internalToolCallItem(call providers.ChatToolCall, toolCtx tools.Context) (c
 	}, true
 }
 
-func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, stage string, hideInternalTools bool, localResolver toolCallLocalResolver, emitEvents bool) (*streamState, error) {
+func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, stage string, hideInternalTools bool, localResolver toolCallLocalResolver, emitEvents bool) (*streamState, providers.NormalizedUsage, error) {
 	startedAt := time.Now()
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
 		s.writePromptFailure(sessionID, requestID, model, chatReq.Model, profile, stage, err.Error(), map[string]any{"stream": true})
-		return nil, err
+		return nil, providers.NormalizedUsage{}, err
 	}
 	s.logger.Info("upstream_stream_opened",
 		slog.String("request_id", requestID),
 		slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
 	)
 	state := newStreamState(r.Context(), toolCtx, adapter, requestID, model, profile, s.logger, localResolver)
+	var usage providers.NormalizedUsage
 	firstChunk := true
 	streamSeq := 0
 	heartbeat := time.NewTicker(3 * time.Second)
@@ -149,7 +154,7 @@ streamLoop:
 			}
 			if event.Err != nil {
 				s.writePromptFailure(sessionID, requestID, model, chatReq.Model, profile, stage, event.Err.Error(), map[string]any{"stream": true})
-				return nil, event.Err
+				return nil, usage, event.Err
 			}
 			if event.Done {
 				break streamLoop
@@ -163,6 +168,9 @@ streamLoop:
 					slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
 				)
 			}
+			if event.Chunk.Usage != nil {
+				usage = providers.NormalizeUsage(event.Chunk.Usage)
+			}
 			for _, out := range state.AddChunk(event.Chunk) {
 				if !emitEvents {
 					continue
@@ -174,7 +182,7 @@ streamLoop:
 				state.eventsEmitted = true
 			}
 		case <-r.Context().Done():
-			return nil, r.Context().Err()
+			return nil, usage, r.Context().Err()
 		case <-heartbeat.C:
 			_ = writer.Event(responseInProgressEvent(respID, createdAt, model))
 		}
@@ -183,8 +191,19 @@ streamLoop:
 		"stream":      true,
 		"chunk_count": streamSeq,
 		"message":     chatMessageFromStreamState(state),
+		"usage":       usage,
 	}, nil)
-	return state, nil
+	return state, usage, nil
+}
+
+func addUsage(total providers.NormalizedUsage, usage providers.NormalizedUsage) providers.NormalizedUsage {
+	total.InputTokens += usage.InputTokens
+	total.CachedInputTokens += usage.CachedInputTokens
+	total.FreshInputTokens += usage.FreshInputTokens
+	total.OutputTokens += usage.OutputTokens
+	total.ReasoningTokens += usage.ReasoningTokens
+	total.TotalTokens += usage.TotalTokens
+	return total
 }
 
 func isInternalToolEvent(event map[string]any) bool {

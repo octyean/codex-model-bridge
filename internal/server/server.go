@@ -53,13 +53,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.4.0"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.4.1"})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.4.0",
+		"version": "0.4.1",
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -166,12 +166,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	toolChoice := tools.ToolChoice(req.ToolChoice, toolCtx)
 	chatTools, toolChoice = tools.ApplyToolChoice(chatTools, toolChoice, adapter.ToolPolicy().RequiredToolChoice)
+	responseFormat := responseFormatFromText(req.Raw)
 	chatReq := providers.ChatCompletionRequest{
 		Model:          modelCfg.UpstreamModel,
-		Messages:       transcriptResult.Messages,
+		Messages:       structuredOutputMessages(transcriptResult.Messages, responseFormat),
 		Tools:          chatTools,
 		ToolChoice:     toolChoice,
-		ResponseFormat: responseFormatFromText(req.Raw),
+		ResponseFormat: responseFormat,
 		Stream:         req.Stream,
 	}
 	if req.ParallelToolCalls && !toolCtx.IsEmpty() {
@@ -277,6 +278,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	items := responseItemsFromMessage(r.Context(), resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger, s.localToolResultResolver(logCtx, toolCtx))
+	items = enforceStructuredOutput(items, chatReq.ResponseFormat)
 	usage := providers.NormalizeUsage(resp.Usage)
 	if emptyOutput(items) {
 		incidentlog.Write("empty_chat_response", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "output": outputSummary(items, usage)}))
@@ -489,7 +491,7 @@ streamOpened:
 		RequestSummary: incidentlog.RequestSummary(req.Raw),
 	}
 	state := newStreamState(r.Context(), toolCtx, adapter, requestID, req.Model, profile, s.logger, s.localToolResultResolver(logCtx, toolCtx))
-	emitStreamEvents := toolCtx.IsEmpty()
+	emitStreamEvents := toolCtx.IsEmpty() && !titleOnlyResponseFormat(chatReq.ResponseFormat)
 	var usage providers.NormalizedUsage
 	firstChunk := true
 	streamSeq := 0
@@ -547,6 +549,7 @@ streamLoop:
 		}
 	}
 	items := state.Done()
+	items = enforceStructuredOutput(items, chatReq.ResponseFormat)
 	s.writePromptResponse(sessionID, requestID, req.Model, chatReq.Model, profile, "initial", map[string]any{
 		"stream":      true,
 		"chunk_count": streamSeq,
@@ -734,6 +737,132 @@ func responseFormatFromText(raw map[string]any) any {
 		"type":        "json_schema",
 		"json_schema": jsonSchema,
 	}
+}
+
+const structuredOutputNote = `CHAT_STRUCTURED_OUTPUT
+The final assistant content must be one valid JSON object matching the requested response_format schema.
+Use exactly the JSON property names defined in the schema. Do not invent or rename keys.
+Do not include markdown, code fences, explanations, metadata, or any text outside the JSON object.`
+
+func structuredOutputMessages(messages []providers.ChatMessage, responseFormat any) []providers.ChatMessage {
+	if responseFormat == nil || hasStructuredOutputNote(messages) {
+		return messages
+	}
+	return append([]providers.ChatMessage{{Role: "system", Content: structuredOutputInstruction(responseFormat)}}, messages...)
+}
+
+func structuredOutputInstruction(responseFormat any) string {
+	schema := responseFormatSchema(responseFormat)
+	if schema == "" {
+		return structuredOutputNote
+	}
+	return structuredOutputNote + "\nJSON schema:\n" + schema
+}
+
+func responseFormatSchema(responseFormat any) string {
+	format, ok := responseFormat.(map[string]any)
+	if !ok {
+		return ""
+	}
+	jsonSchema, ok := format["json_schema"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	data, err := json.Marshal(jsonSchema["schema"])
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func enforceStructuredOutput(items []codex.ResponseItem, responseFormat any) []codex.ResponseItem {
+	if !titleOnlyResponseFormat(responseFormat) {
+		return items
+	}
+	for _, item := range items {
+		if item["type"] != "message" {
+			continue
+		}
+		text := strings.TrimSpace(messageOutputText(item))
+		if text == "" {
+			return items
+		}
+		if title, ok := titleFromJSON(text); ok {
+			setMessageOutputText(item, titleJSON(title))
+			return items
+		}
+		setMessageOutputText(item, titleJSON(text))
+		return items
+	}
+	return items
+}
+
+func titleOnlyResponseFormat(responseFormat any) bool {
+	format, ok := responseFormat.(map[string]any)
+	if !ok {
+		return false
+	}
+	jsonSchema, ok := format["json_schema"].(map[string]any)
+	if !ok {
+		return false
+	}
+	schema, ok := jsonSchema["schema"].(map[string]any)
+	if !ok || schema["type"] != "object" {
+		return false
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok || len(properties) != 1 {
+		return false
+	}
+	_, ok = properties["title"]
+	return ok && requiresTitle(schema["required"])
+}
+
+func requiresTitle(value any) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if item == "title" {
+			return true
+		}
+	}
+	return false
+}
+
+func titleFromJSON(text string) (string, bool) {
+	var obj map[string]string
+	if err := json.Unmarshal([]byte(text), &obj); err != nil {
+		return "", false
+	}
+	title := strings.TrimSpace(obj["title"])
+	return title, title != ""
+}
+
+func titleJSON(title string) string {
+	data, _ := json.Marshal(map[string]string{"title": strings.TrimSpace(title)})
+	return string(data)
+}
+
+func setMessageOutputText(item codex.ResponseItem, text string) {
+	content, _ := item["content"].([]map[string]string)
+	if len(content) == 0 {
+		return
+	}
+	content[0]["text"] = text
+}
+
+func hasStructuredOutputNote(messages []providers.ChatMessage) bool {
+	for _, message := range messages {
+		if message.Role != "system" {
+			continue
+		}
+		if text, ok := message.Content.(string); ok && strings.Contains(text, "CHAT_STRUCTURED_OUTPUT") {
+			return true
+		}
+	}
+	return false
 }
 
 func replaceResponseModel(value map[string]any, model string) {
