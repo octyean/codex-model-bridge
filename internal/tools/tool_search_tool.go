@@ -2,8 +2,9 @@ package tools
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -61,6 +62,9 @@ func ToolSearchOutputSummaryForCall(raw any, arguments string, ctx Context) stri
 		}
 		return strings.Join(lines, "\n")
 	}
+	lines = append(lines, "result_count: "+strconv.Itoa(toolSearchResultCount(results)))
+	lines = append(lines, "summary_limit: 30")
+	lines = append(lines, "schema_source: next_chat_tools")
 	count := 0
 	for _, result := range results {
 		count += appendToolSearchResultSummary(&lines, result)
@@ -143,6 +147,24 @@ func containsAny(text string, values ...string) bool {
 	return false
 }
 
+func toolSearchResultCount(results []map[string]any) int {
+	count := 0
+	for _, result := range results {
+		if nested, ok := result["tools"].([]any); ok {
+			for _, rawTool := range nested {
+				if _, ok := rawTool.(map[string]any); ok {
+					count++
+				}
+			}
+			continue
+		}
+		if name, _ := result["name"].(string); name != "" {
+			count++
+		}
+	}
+	return count
+}
+
 func appendToolSearchResultSummary(lines *[]string, result map[string]any) int {
 	name, _ := result["name"].(string)
 	description, _ := result["description"].(string)
@@ -155,11 +177,11 @@ func appendToolSearchResultSummary(lines *[]string, result map[string]any) int {
 			}
 			toolName, _ := tool["name"].(string)
 			if name != "" && !strings.Contains(toolName, "__") {
-				toolName = name + "__" + toolName
+				toolName = namespacedToolName(name, toolName)
 			}
 			toolDesc, _ := tool["description"].(string)
 			toolName, toolDesc = normalizedToolSearchSummary(toolName, toolDesc)
-			*lines = append(*lines, "- "+toolName+": "+clipToolSearchText(toolDesc, 220))
+			appendToolSearchResultLines(lines, toolName, toolDesc, tool)
 			count++
 			if count >= 30 {
 				break
@@ -171,12 +193,158 @@ func appendToolSearchResultSummary(lines *[]string, result map[string]any) int {
 		return 0
 	}
 	name, description = normalizedToolSearchSummary(name, description)
-	*lines = append(*lines, fmt.Sprintf("- %s: %s", name, clipToolSearchText(description, 220)))
+	appendToolSearchResultLines(lines, name, description, result)
 	return 1
 }
 
 func normalizedToolSearchSummary(name string, description string) (string, string) {
 	return normalizeExternalToolSummary(name, description)
+}
+
+func appendToolSearchResultLines(lines *[]string, name string, description string, tool map[string]any) {
+	args, required, source := toolSearchSchemaFields(name, description, tool)
+	*lines = append(*lines, "- name: "+name)
+	*lines = append(*lines, "  summary: "+clipToolSearchText(description, 260))
+	if len(args) > 0 {
+		*lines = append(*lines, "  args: "+strings.Join(args, ", "))
+	}
+	if len(required) > 0 {
+		*lines = append(*lines, "  required: "+strings.Join(required, ", "))
+	}
+	if effect := knownToolSearchSideEffect(name); effect != "" {
+		*lines = append(*lines, "  side_effect: "+effect)
+	}
+	*lines = append(*lines, "  source: "+source)
+	if hint := bridgeToolSearchHint(name); hint != "" {
+		*lines = append(*lines, "  bridge_hint: "+hint)
+	}
+}
+
+func toolSearchSchemaFields(name string, description string, tool map[string]any) ([]string, []string, string) {
+	if parameters := knownToolSearchParameters(name); parameters != nil {
+		return schemaFields(parameters, description, "next_chat_tools_schema")
+	}
+	parameters := toolSearchParametersMap(tool)
+	return schemaFields(parameters, description, "schema")
+}
+
+func schemaFields(parameters map[string]any, description string, schemaSource string) ([]string, []string, string) {
+	args := sortedStringKeys(parametersMap(parameters, "properties"))
+	required := stringArray(parameters["required"])
+	hasDescription := strings.TrimSpace(description) != ""
+	hasSchema := len(args) > 0 || len(required) > 0
+	source := "unknown"
+	if hasDescription {
+		source = "description"
+	}
+	if hasSchema {
+		source = schemaSource
+		if hasDescription {
+			source = "description+" + schemaSource
+		}
+	}
+	return args, required, source
+}
+
+func knownToolSearchParameters(name string) map[string]any {
+	switch externalToolBaseName(name) {
+	case mcpResourceProxyToolName:
+		return rawSchemaObject(mcpResourceParameters)
+	case FileSearchToolName:
+		return rawSchemaObject(fileSearchParameters)
+	case "tool_search":
+		return rawSchemaObject(toolSearchParameters)
+	case TextEditorWriteToolName, TextEditorReplaceToolName, TextEditorInsertLineToolName, TextEditorInsertMatchToolName, TextEditorMoveToolName, TextEditorDeleteToolName:
+		for _, spec := range TextEditorToolSpecs() {
+			if spec.Name == externalToolBaseName(name) {
+				return rawSchemaObject(spec.Parameters)
+			}
+		}
+	}
+	return nil
+}
+
+func rawSchemaObject(raw json.RawMessage) map[string]any {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	return obj
+}
+
+func toolSearchParametersMap(tool map[string]any) map[string]any {
+	if parameters, ok := tool["parameters"].(map[string]any); ok {
+		return parameters
+	}
+	if function, ok := tool["function"].(map[string]any); ok {
+		if parameters, ok := function["parameters"].(map[string]any); ok {
+			return parameters
+		}
+	}
+	return nil
+}
+
+func parametersMap(parameters map[string]any, key string) map[string]any {
+	if parameters == nil {
+		return nil
+	}
+	values, _ := parameters[key].(map[string]any)
+	return values
+}
+
+func sortedStringKeys(values map[string]any) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func stringArray(value any) []string {
+	if values, ok := value.([]string); ok {
+		return values
+	}
+	raw, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if text, ok := item.(string); ok && text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func knownToolSearchSideEffect(name string) string {
+	switch externalToolBaseName(name) {
+	case mcpResourceProxyToolName, FileSearchToolName, "tool_search":
+		return SideEffectRead
+	case TextEditorWriteToolName, TextEditorReplaceToolName, TextEditorInsertLineToolName, TextEditorInsertMatchToolName, TextEditorMoveToolName, TextEditorDeleteToolName:
+		return SideEffectWriteFiles
+	default:
+		return ""
+	}
+}
+
+func bridgeToolSearchHint(name string) string {
+	switch externalToolBaseName(name) {
+	case mcpResourceProxyToolName:
+		return "Read local files or MCP resources here; continue truncated local files with start_line=next_start_line."
+	case FileSearchToolName:
+		return "Search matching local files here, then read selected hits with codex_context_resource."
+	case TextEditorWriteToolName, TextEditorReplaceToolName, TextEditorInsertLineToolName, TextEditorInsertMatchToolName, TextEditorMoveToolName, TextEditorDeleteToolName:
+		return "Use this for file edits; inspect current file content first when replacing or inserting around existing text."
+	case "tool_search":
+		return "Use only for callable tools that are not already visible."
+	default:
+		return ""
+	}
 }
 
 func clipToolSearchText(text string, limit int) string {

@@ -230,9 +230,6 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 		ToolFailed:    failureKind != adapters.PatchFailureNone,
 		FailureKind:   string(failureKind),
 	})
-	if !shouldLogToolOutput(descriptor, rawArguments, rawOutput, outcome) {
-		return
-	}
 	record := map[string]any{
 		"time":             time.Now().Format(time.RFC3339Nano),
 		"event":            "tool_output",
@@ -250,6 +247,12 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 	record["diagnostic_level"] = level
 	if modelCall != nil {
 		record["model_call"] = modelCall
+		if namespace, _ := modelCall["namespace"].(string); strings.TrimSpace(namespace) != "" {
+			record["namespace"] = namespace
+		}
+		if originalName, _ := modelCall["original_name"].(string); strings.TrimSpace(originalName) != "" {
+			record["original_name"] = originalName
+		}
 	}
 	if ctx.RequestID != "" {
 		record["request_id"] = ctx.RequestID
@@ -327,15 +330,6 @@ func writeRecovery(record map[string]any) {
 	if sessionID := recordSessionID(out); sessionID != "" {
 		diagnostics.WriteSessionRecord(path, sessionID, "recoveries.jsonl", out)
 	}
-}
-
-func shouldLogToolOutput(descriptor adapters.ToolDescriptor, rawArguments string, rawOutput string, outcome toolruntime.Outcome) bool {
-	return isPatchWriteKind(descriptor.Kind) ||
-		descriptor.SideEffect == tools.SideEffectRead ||
-		descriptor.SideEffect == tools.SideEffectStatus ||
-		descriptor.Kind == tools.KindWebSearch ||
-		!outcome.OK ||
-		adapters.ClassifyToolFailureWithArguments(descriptor, rawArguments, rawOutput) != adapters.ToolFailureNone
 }
 
 func isPatchWriteKind(kind string) bool {
