@@ -97,6 +97,7 @@ curl -sS http://127.0.0.1:8787/health
 - [安装与运行](docs/installation.md)
 - [配置指南](docs/configuration.md)
 - [管理命令](docs/operations.md)
+- [维护者手册](docs/maintainer-guide.md)
 - [排障](docs/troubleshooting.md)
 
 ## 排障入口

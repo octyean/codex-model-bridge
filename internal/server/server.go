@@ -836,13 +836,28 @@ func titleFromJSON(text string) (string, bool) {
 	if err := json.Unmarshal([]byte(text), &obj); err != nil {
 		return "", false
 	}
-	title := strings.TrimSpace(obj["title"])
+	title := cleanTitle(obj["title"])
 	return title, title != ""
 }
 
 func titleJSON(title string) string {
-	data, _ := json.Marshal(map[string]string{"title": strings.TrimSpace(title)})
+	data, _ := json.Marshal(map[string]string{"title": cleanTitle(title)})
 	return string(data)
+}
+
+func cleanTitle(title string) string {
+	title = strings.TrimSpace(title)
+	title = strings.TrimPrefix(title, "```json")
+	title = strings.TrimPrefix(title, "```")
+	title = strings.TrimSuffix(strings.TrimSpace(title), "```")
+	title = strings.TrimSpace(title)
+	var obj map[string]string
+	if err := json.Unmarshal([]byte(title), &obj); err == nil {
+		if inner := strings.TrimSpace(obj["title"]); inner != "" {
+			return inner
+		}
+	}
+	return title
 }
 
 func setMessageOutputText(item codex.ResponseItem, text string) {
