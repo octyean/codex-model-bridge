@@ -16,11 +16,13 @@ Codex CLI / App
 - 让第三方模型在 Codex 里调用 `apply_patch`，能创建、修改、删除文件。
 - 让 `web_search`、`tool_search`、`local_shell`、`function`、`custom` 这些 Codex 原生能力继续可用。
 - 让 Codex App 识别模型目录里的 `display_name`、上下文窗口、工具能力和图片能力。
-- 自动读取上游 `/models`，把可请求的模型补进 Codex 模型目录。
+- 自动读取上游 `/models`，按确定顺序把模型分配到 Codex App 能稳定识别的兼容槽位。
+- 持久化模型槽位和逐模型真实能力结果，重启后不会因 `/models` 顺序变化而漂移，也不会拿一个模型的能力替整个 provider 做结论。
 - 让 text-only 模型也能接图片：先读图，再把内容转成文字交给模型。
 - 让 OpenAI 原生 GPT / o 系列模型走原生 `/responses`，保留 `reasoning` 和相关参数。
+- 让只支持 Responses function tools 的第三方模型继续走 `/responses`，只投影不兼容的 `apply_patch` 等工具。
 - 让不同模型按自己的脾气走不同 profile，减少工具调用和补丁格式的毛刺。
-- 安装时探测上游 `/responses` 和 `/chat/completions` 流式能力，自动选择更合适的协议。
+- 安装时同时探测上游的流式和工具调用能力，自动选择可用协议。
 
 ## 快速安装
 
@@ -86,6 +88,8 @@ input_modalities = ["text", "image"]
 
 ```bash
 codex-bridge config check --config ~/.codex-bridge/config.toml
+codex-bridge verify --config ~/.codex-bridge/config.toml --provider-name upstream \
+  --models kimi-for-coding,mimo-v2.5-pro
 systemctl --user restart codex-bridge.service
 curl -sS http://127.0.0.1:8787/health
 ```

@@ -34,8 +34,16 @@ func (defaultAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) pr
 	return prepareChatPatchRequest(req)
 }
 
+func (defaultAdapter) PrepareResponseMessages(messages []providers.ChatMessage) []providers.ChatMessage {
+	return messages
+}
+
 func (defaultAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
 	return req
+}
+
+func (defaultAdapter) ResponseDisciplineNote() string {
+	return ""
 }
 
 func (defaultAdapter) CustomToolDescription(tool ToolDescriptor) string {

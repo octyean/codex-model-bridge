@@ -141,6 +141,44 @@ rtk tail -n 80 "$LOG_DIR/incidents.jsonl" 2>/dev/null || true
 
 结构化标题请求要单独回归，确认最终仍是严格 JSON，并且结构化路径没有混入可见进度或语言提示。
 
+第三方 Responses 模型还要验证 probe 的组合能力：
+
+```bash
+codex-bridge probe \
+  --upstream-base-url https://api.example.com/v1 \
+  --upstream-api-key sk-xxx \
+  --model kimi-for-coding
+```
+
+推荐 Responses 至少要求 `responses_stream_ok`、`responses_tools_ok`、`responses_tool_stream_ok` 和 `responses_tool_continuation_ok` 全部为 `true`。`responses_structured_output_ok=false` 不会强制改走 Chat，Bridge 会使用 Projected Responses 的结构化输出兼容路径。
+
+已有多模型配置不要只跑一个 probe。用 `verify` 为每个 upstream model 写入独立能力记录：
+
+```bash
+rtk codex-bridge verify \
+  --config "$HOME/.codex-bridge/config.toml" \
+  --provider-name mcodex \
+  --models kimi-for-coding,mimo-v2.5-pro
+```
+
+检查配置目录下的 `model-capabilities.json`，确认每个模型都有自己的 `verified_at`、`recommended_protocol` 和失败阶段。检查 `model-slots.json`，确认重启或改变 `/models` 返回顺序后，已有模型仍使用原来的 Codex 兼容槽位。
+
+网页搜索回归后，检查 `prompt-requests.jsonl` 应出现 `projected_internal_tool_followup`，不应出现 Chat 的 `internal_tool_followup`。
+
+结构化输出兼容回归要使用包含嵌套对象、数组、必填字段和数值约束的 Schema。第一次输出不符合 Schema 时，日志应出现一次 `projected_structured_output_repair`；第二次仍不合格必须返回 `response.failed`，不能把错误 JSON 当成功结果发给 Codex。
+
+也可以直接运行真实 smoke 脚本。它调用当前 Codex CLI 和 Bridge，不使用 fake provider：
+
+```bash
+rtk scripts/real-codex-smoke.sh gpt-5.3-codex edit
+rtk scripts/real-codex-smoke.sh gpt-5.2 edit
+rtk scripts/real-codex-smoke.sh gpt-5.3-codex web
+rtk scripts/real-codex-smoke.sh gpt-5.2 instruction
+rtk scripts/real-codex-smoke.sh gpt-5.3-codex long
+```
+
+`edit` 必须同时出现 `add` 和 `update`，`delete` 必须同时出现 `add` 和 `delete`。`instruction` 会检查 AGENTS.md、修改范围和精确最终回复；`long` 会生成约 25 万字节规格，把要求分散在文件首中尾，并运行真实 Go checker。脚本最终文件状态正确但缺少对应 Codex `file_change` 事件时，也应视为失败。
+
 更多日志说明见 `diagnostics-and-local-debug.md`。
 
 ## Release 发版
@@ -168,7 +206,7 @@ dist/codex-bridge-windows-arm64.exe
 提交推送按用户要求使用 `git-tools`。发版前确认工作区干净、目标 tag 不存在：
 
 ```bash
-VERSION="0.4.2"
+VERSION="0.5.0"
 rtk git status --short
 rtk git tag -l "v$VERSION"
 rtk gh release view "v$VERSION" 2>&1 | head -c 4000

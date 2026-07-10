@@ -114,8 +114,8 @@ codex-bridge catalog generate --config config/config.toml
 先看 bridge 配置里的 `profile`，以及生成模型目录里的 `apply_patch_tool_type`。
 
 - `profile = "deepseek"`：适合 DeepSeek。
-- `profile = "kimi"`：适合 Kimi for Coding，Codex 的文件编辑能力会翻译成一组结构化 Chat 工具：`write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file`。
-- `profile = "mimo"`：适合 Mimo，保留图片输入能力，并使用结构化 Chat 文件编辑工具。
+- `profile = "kimi"`：适合 Kimi for Coding，Codex 的文件编辑能力会翻译成一组结构化 function tools：`write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file`。
+- `profile = "mimo"`：适合 Mimo，保留图片输入能力，并使用结构化 function 文件编辑工具。
 - `profile = "default"`：适合普通 OpenAI-compatible 模型。
 - `apply_patch_tool_type = "freeform"`：让 Codex 把 `apply_patch` 当成自由格式补丁来传。
 
@@ -129,7 +129,7 @@ codex-bridge catalog generate --config config/config.toml
 2. `capabilities.search.providers` 至少有一个可用 provider
 3. Codex 请求里带了 `web_search` 或 `web_search_preview`
 
-bridge 会把 Codex 的 `web_search` 转成同名 Chat function tool。工具名保持为 `web_search`，模型更容易按预期调用搜索。
+Projected Responses 会把 Codex 的搜索能力投影为 `codex_web_search` function tool，由 Bridge 执行后把结果继续提交给 `/responses`。检查会话的 `prompt-requests.jsonl`，正常情况下会出现 `projected_internal_tool_followup`。
 
 ## Windows 双击后没有看到 bridge 模型
 

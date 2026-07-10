@@ -30,7 +30,9 @@ type Adapter interface {
 	Optimization() optimization.Options
 	ToolPolicy() ToolPolicy
 	PrepareChatRequest(providers.ChatCompletionRequest) providers.ChatCompletionRequest
+	PrepareResponseMessages([]providers.ChatMessage) []providers.ChatMessage
 	PrepareResponseRequest(map[string]any) map[string]any
+	ResponseDisciplineNote() string
 	CustomToolDescription(tool ToolDescriptor) string
 	NormalizeCustomInput(name string, input string) string
 	NormalizePatchInput(input string) string

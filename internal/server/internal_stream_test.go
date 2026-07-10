@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"codex-bridge/internal/adapters"
@@ -18,10 +17,9 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-func TestStreamInternalToolRoundsRetriesUnmarkedContentOnlyFinal(t *testing.T) {
+func TestStreamInternalToolRoundsTreatsContentOnlyAsFinal(t *testing.T) {
 	provider := &streamSequenceProvider{streams: [][]providers.StreamEvent{
-		{streamTextChunk(t, "现在跑测试。")},
-		{streamTextChunk(t, "CHAT_RESPONSE_STATE: final\n阶段完成。")},
+		{streamTextChunk(t, "阶段完成。")},
 	}}
 	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	recorder := httptest.NewRecorder()
@@ -51,18 +49,8 @@ func TestStreamInternalToolRoundsRetriesUnmarkedContentOnlyFinal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("streamInternalToolRounds returned error: %v", err)
 	}
-	if len(provider.requests) != 2 {
-		t.Fatalf("stream calls = %d, want 2", len(provider.requests))
-	}
-	retryMessages := provider.requests[1].Messages
-	if len(retryMessages) < 2 {
-		t.Fatalf("retry request messages = %d, want at least 2", len(retryMessages))
-	}
-	if retryMessages[len(retryMessages)-2].Role != "assistant" || retryMessages[len(retryMessages)-2].Content != "现在跑测试。" {
-		t.Fatalf("retry request did not preserve previous assistant content: %#v", retryMessages[len(retryMessages)-2])
-	}
-	if retryMessages[len(retryMessages)-1].Role != "system" || !strings.Contains(fmt.Sprint(retryMessages[len(retryMessages)-1].Content), "CHAT_CONTENT_ONLY_RESPONSE_RETRY") {
-		t.Fatalf("retry request missing content-only retry note: %#v", retryMessages[len(retryMessages)-1])
+	if len(provider.requests) != 1 {
+		t.Fatalf("stream calls = %d, want 1", len(provider.requests))
 	}
 
 	items := state.Done()
@@ -71,7 +59,7 @@ func TestStreamInternalToolRoundsRetriesUnmarkedContentOnlyFinal(t *testing.T) {
 	}
 	text := responseItemText(t, items[0])
 	if text != "阶段完成。" {
-		t.Fatalf("final text = %q, want marker stripped final text", text)
+		t.Fatalf("final text = %q", text)
 	}
 }
 

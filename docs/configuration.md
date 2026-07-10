@@ -62,6 +62,13 @@ local_token = "codex-bridge-local-token"
 enabled = true
 mode = "merge"
 
+[verification]
+max_age_hours = 720
+
+[diagnostics]
+retention_days = 14
+max_total_mb = 1024
+
 [extensions.network]
 proxy_url = ""
 
@@ -125,7 +132,54 @@ supports_parallel_tool_calls = true
 apply_patch_tool_type = "freeform"
 ```
 
-这条路径会把 Codex 的 `/v1/responses` 请求原样转给上游 `/responses`，只替换 `model` 为 `upstream_model`，因此 `reasoning`、`verbosity` 和 Responses 原生工具语义不会被降级成 Chat Completions 字段。
+Bridge 有三种执行路径：
+
+- `native_responses`：OpenAI 原生 profile 直接转发 `/responses`，只替换模型名。
+- `projected_responses`：Kimi、Mimo 等第三方 profile 继续请求上游 `/responses`；把上游不接受的 `custom apply_patch` 投影为 `write_file`、`replace_text` 等 function tools，返回时再还原成 Codex 原生工具事件。
+- `chat_completions`：只有配置明确使用 `chat_completions` 时，才把 Responses 会话投影到 Chat Completions。
+
+第三方模型请求 Bridge 内置 `web_search` 时，Bridge 会在 Projected Responses 内执行搜索，把结果作为 `function_call_output` 继续提交给上游，不会切换到 Chat Completions。
+
+执行模式和 Responses 可选能力可以在模型级明确覆盖：
+
+```toml
+[models.gpt-5.3-codex]
+display_name = "Kimi for Coding"
+provider = "upstream"
+profile = "kimi"
+upstream_model = "kimi-for-coding"
+execution_mode = "projected_responses"
+supports_responses_options = true
+supports_responses_structured_output = true
+context_window = 192000
+supports_parallel_tool_calls = true
+apply_patch_tool_type = "freeform"
+```
+
+- `execution_mode` 可写 `native_responses`、`projected_responses` 或 `chat_completions`。不写时继续按 provider 协议、真实 `upstream_model` 和 profile 推导。
+- `supports_responses_options` 控制 reasoning 和 verbosity 是否向 Codex 宣告并发送给上游。
+- `supports_responses_structured_output` 控制是否原样发送 `text.format=json_schema`。设为 `false` 时仍走 Responses，Bridge 会改用 JSON Schema 指令并校正最终输出。
+- setup 只把实际 probe 过的模型能力写入生成配置，不会拿一个模型的可选能力替其他模型做结论。
+
+已有配置建议用 `verify` 逐模型实测：
+
+```bash
+codex-bridge verify \
+  --config ~/.codex-bridge/config.toml \
+  --provider-name upstream \
+  --models kimi-for-coding,mimo-v2.5-pro
+```
+
+`--models` 同时接受 Codex slug 和真实 `upstream_model`。必须显式传 `--models`，或者明确使用 `--all` 验证全部已配置模型；两者不能同时使用。结果默认写入配置文件同目录的 `model-capabilities.json`，不会修改 `config.toml`；provider 使用 `protocol = "auto"` 时，Bridge 会优先采用仍在有效期内的真实验证结果。
+
+能力缓存当前为 version 2。每条模型记录包含 `probe_version`、`verified_at` 和 `expires_at`；探测逻辑升级或记录过期后，Bridge 不会继续把旧结果当作当前能力。服务启动和 `config check` 会只针对第三方 profile 提示需要重新验证的模型。
+
+`model-capabilities.json` 和 `model-slots.json` 使用同一套跨进程状态写入规则：写入前获取锁，锁内重新读取并合并，再通过原子替换保存。多个 setup、verify 或服务进程同时运行时，不会用旧快照覆盖其他进程刚写入的模型记录。
+
+`[verification]` 可设置：
+
+- `cache_path`：能力缓存路径；相对路径按配置文件目录解析。
+- `max_age_hours`：缓存有效期；不写时为 720 小时。
 
 `profile` 当前支持：
 
@@ -135,7 +189,7 @@ apply_patch_tool_type = "freeform"
 - `mimo`
 
 `default` 适合普通 OpenAI-compatible 模型。`deepseek` 适合 DeepSeek 这类对工具调用和补丁格式更挑剔的模型。
-`kimi` 适合 Kimi for Coding，会把 Codex 的文件编辑能力翻译成 `write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file` 这组结构化 Chat 工具。
+`kimi` 适合 Kimi for Coding，会把 Codex 的文件编辑能力翻译成 `write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file` 这组结构化 function tools。
 `mimo` 适合 Mimo，保留图片输入能力，并使用和 Kimi 相同的结构化文件编辑工具。
 
 ## 自动发现模型
@@ -154,7 +208,9 @@ mode = "merge"
 - `merge`：保留手写模型，再把上游 `/models` 里新增的模型补进来。默认推荐这个。
 - `upstream`：只使用上游 `/models` 返回的模型，适合想完全免手写模型的人。
 
-自动发现的模型会使用对应 provider 的 `profile`，上下文窗口默认按保守值处理，`apply_patch_tool_type` 固定为 `freeform`。如果某个模型需要更准确的上下文、图片能力或专门 profile，再给它补一段手写 `[models.<slug>]` 覆盖即可。
+自动发现会按确定顺序把模型分配到 Codex App 能稳定识别的兼容槽位。槽位数量有限，超出的上游模型不会自动进入 App 目录；需要替换某个槽位时，手写对应的 `[models.<slug>]`。自动生成的模型使用对应 provider 的 `profile`，上下文窗口按保守值处理，`apply_patch_tool_type` 固定为 `freeform`。
+
+槽位分配默认保存在配置文件同目录的 `model-slots.json`。上游 `/models` 返回顺序变化或服务重启后，已有模型会优先恢复原槽位。可用 `model_discovery.state_path` 修改保存位置；`mode = "upstream"` 在多 provider 场景下只会统一清空一次，不会在处理下一个 provider 时覆盖前一个 provider 的结果。
 
 `codex-bridge codex configure` 和服务启动都会执行一次模型发现。`mode = "upstream"` 且没有手写模型时，只要上游 `/models` 可用，也能自动选出默认模型写入 Codex 配置。
 
@@ -164,11 +220,23 @@ Codex App 里看到的是模型目录，真正发给上游的是 `upstream_model
 
 三层名字各管一件事：
 
-- `models.<slug>`：Codex 侧选择模型时使用的模型 ID。建议使用真实模型名，例如 `deepseek-v4-flash`、`qwen3-coder`。
+- `models.<slug>`：Codex 侧选择模型时使用的模型 ID。Codex App 当前不能稳定显示任意 slug，setup 和自动发现会按确定规则使用少量 GPT 兼容槽位。
 - `display_name`：Codex App / CLI 里显示给人的名字，可以写成 `DeepSeek V4 Flash`、`Qwen3 Coder` 这类人能看懂的名称。
 - `upstream_model`：实际发给上游 API 的模型名，比如 `deepseek-v4-flash`。
 
-不要用 `gpt-*`、`o3*`、`o4*` 伪装第三方模型。Codex 会把这些名字当成 OpenAI 原生模型处理，可能错误展示 reasoning、verbosity、迁移提示或其它原生能力。
+兼容槽位只解决 Codex App 可见性，不参与上游模型身份和执行模式判断。日志中的 `model` 可能是 `gpt-5.3-codex`，`upstream_model` 仍是 `kimi-for-coding`；Bridge 根据 `upstream_model`、profile 和模型能力决定实际协议。模型发现会先排序，再优先分配真实 GPT、Kimi 和 Mimo，剩余模型按名称分配空槽位，避免 `/models` 返回顺序变化导致映射漂移。
+
+## 诊断日志保留
+
+Bridge 启动时只清理自己管理的 `sessions/` 目录，不会删除同级其他文件或用户目录：
+
+```toml
+[diagnostics]
+retention_days = 14
+max_total_mb = 1024
+```
+
+不配置时默认保留 14 天，session 目录总量上限为 1GB。清理结果会写入 `session_logs_pruned` 启动日志。全局 `tool-calls.jsonl`、`incidents.jsonl`、`recoveries.jsonl` 和 `sessions/index.jsonl` 单文件达到 64MB 后自动轮转，保留 3 份历史文件。
 
 示例：
 
@@ -308,7 +376,10 @@ proxy_url = "socks5h://127.0.0.1:7890"
 | `providers.*.base_url` | 上游 OpenAI-compatible 服务地址，可以是 host、`/v1` 或直接 `/chat/completions`。 |
 | `providers.*.api_key` | 上游模型服务密钥。 |
 | `providers.*.profile` | 模型 adapter。 |
-| `models.*.upstream_model` | 发给上游 Chat Completions 的真实模型名。 |
+| `models.*.upstream_model` | 发给上游的真实模型名。 |
+| `models.*.execution_mode` | 可选的模型级执行模式覆盖。 |
+| `models.*.supports_responses_options` | 上游 Responses 是否支持 reasoning 和 verbosity。 |
+| `models.*.supports_responses_structured_output` | 上游 Responses 是否原生支持 JSON Schema。 |
 | `models.*.context_window` | Codex 侧可见上下文窗口。 |
 | `models.*.apply_patch_tool_type` | Codex patch tool 类型，建议使用 `freeform`。 |
 | `capabilities.search.enabled` | 是否启用 bridge web search 兼容层。 |

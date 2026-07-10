@@ -25,16 +25,23 @@ type Options struct {
 }
 
 type Result struct {
-	Created           bool
-	Updated           bool
-	ConfigPath        string
-	ProviderName      string
-	DefaultModel      string
-	Protocol          string
-	Models            []string
-	ResponsesStream   bool
-	ChatStream        bool
-	ExistingPreserved bool
+	Created                   bool
+	Updated                   bool
+	ConfigPath                string
+	ProviderName              string
+	DefaultModel              string
+	Protocol                  string
+	Models                    []string
+	ResponsesStream           bool
+	ResponsesTools            bool
+	ResponsesToolStream       bool
+	ResponsesToolContinuation bool
+	ResponsesOptions          bool
+	ResponsesStructuredOutput bool
+	ChatStream                bool
+	ChatTools                 bool
+	ChatToolStream            bool
+	ExistingPreserved         bool
 }
 
 func Run(options Options, probe upstreamprobe.Result) (Result, error) {
@@ -73,26 +80,37 @@ func Run(options Options, probe upstreamprobe.Result) (Result, error) {
 	if err := os.WriteFile(options.ConfigPath, data, 0o600); err != nil {
 		return Result{}, fmt.Errorf("write config: %w", err)
 	}
-	models := append([]string(nil), probe.Models...)
+	models := make([]string, 0, len(cfg.Models))
+	for _, model := range cfg.Models {
+		models = append(models, model.UpstreamModel)
+	}
 	sort.Strings(models)
 	return Result{
-		Created:         true,
-		Updated:         true,
-		ConfigPath:      options.ConfigPath,
-		ProviderName:    "upstream",
-		DefaultModel:    cfg.Codex.DefaultModel,
-		Protocol:        cfg.Providers["upstream"].Protocol,
-		Models:          models,
-		ResponsesStream: probe.ResponsesStreamOK,
-		ChatStream:      probe.ChatStreamOK,
+		Created:                   true,
+		Updated:                   true,
+		ConfigPath:                options.ConfigPath,
+		ProviderName:              "upstream",
+		DefaultModel:              cfg.Codex.DefaultModel,
+		Protocol:                  cfg.Providers["upstream"].Protocol,
+		Models:                    models,
+		ResponsesStream:           probe.ResponsesStreamOK,
+		ResponsesTools:            probe.ResponsesToolsOK,
+		ResponsesToolStream:       probe.ResponsesToolStreamOK,
+		ResponsesToolContinuation: probe.ResponsesToolContinuationOK,
+		ResponsesOptions:          probe.ResponsesOptionsOK,
+		ResponsesStructuredOutput: probe.ResponsesStructuredOutputOK,
+		ChatStream:                probe.ChatStreamOK,
+		ChatTools:                 probe.ChatToolsOK,
+		ChatToolStream:            probe.ChatToolStreamOK,
 	}, nil
 }
 
 func buildConfig(options Options, probe upstreamprobe.Result) config.Config {
-	modelIDs := probe.Models
+	modelIDs := append([]string(nil), probe.Models...)
 	if len(modelIDs) == 0 {
 		modelIDs = []string{firstNonEmpty(options.DefaultModel, "upstream-model")}
 	}
+	sort.Strings(modelIDs)
 	defaultModel := firstNonEmpty(options.DefaultModel, modelIDs[0])
 	protocol := probe.RecommendedProtocol
 	if protocol == "" {
@@ -128,20 +146,18 @@ func buildConfig(options Options, probe upstreamprobe.Result) config.Config {
 		},
 		Models: map[string]config.ModelConfig{},
 	}
-	for _, id := range modelIDs {
-		slug := desktopSlug(id)
-		if _, exists := cfg.Models[slug]; exists {
-			continue
+	cfg.AddDiscoveredModels("upstream", modelIDs)
+	for slug, model := range cfg.Models {
+		id := model.UpstreamModel
+		model.Profile = profileForModel(id)
+		model.ExecutionMode = executionModeForModel(id, protocol)
+		if id == probe.ProbeModel && protocol == "responses" {
+			supportsOptions := probe.ResponsesOptionsOK
+			model.SupportsResponsesOptions = &supportsOptions
+			supportsStructuredOutput := probe.ResponsesStructuredOutputOK
+			model.SupportsResponsesStructuredOutput = &supportsStructuredOutput
 		}
-		cfg.Models[slug] = config.ModelConfig{
-			DisplayName:               id,
-			Provider:                  "upstream",
-			Profile:                   profileForModel(id),
-			UpstreamModel:             id,
-			ContextWindow:             contextWindowForModel(id),
-			SupportsParallelToolCalls: true,
-			ApplyPatchToolType:        "freeform",
-		}
+		cfg.Models[slug] = model
 	}
 	if _, ok := cfg.Models[defaultModel]; !ok {
 		for slug, model := range cfg.Models {
@@ -154,18 +170,15 @@ func buildConfig(options Options, probe upstreamprobe.Result) config.Config {
 	return cfg
 }
 
-func desktopSlug(model string) string {
-	value := strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case strings.Contains(value, "kimi"):
-		return "gpt-5.3-codex"
-	case strings.Contains(value, "mimo-v2.5-pro"):
-		return "gpt-5.2"
-	case strings.Contains(value, "mimo-v2.5"):
-		return "gpt-5.4-mini"
-	default:
-		return model
+func executionModeForModel(model string, protocol string) string {
+	if protocol != "responses" {
+		return config.ExecutionModeChatCompletions
 	}
+	value := strings.ToLower(strings.TrimSpace(model))
+	if strings.HasPrefix(value, "gpt-") || strings.HasPrefix(value, "o3") || strings.HasPrefix(value, "o4") {
+		return config.ExecutionModeNativeResponses
+	}
+	return config.ExecutionModeProjectedResponses
 }
 
 func profileForModel(model string) string {

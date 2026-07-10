@@ -342,7 +342,7 @@ func writeRecovery(record map[string]any) {
 	out := cloneRecord(record)
 	out["event"] = "tool_recovery"
 	out["time"] = time.Now().Format(time.RFC3339Nano)
-	diagnostics.WriteJSONL(filepath.Join(filepath.Dir(path), "recoveries.jsonl"), out)
+	diagnostics.WriteGlobalJSONL(filepath.Join(filepath.Dir(path), "recoveries.jsonl"), out)
 	if sessionID := recordSessionID(out); sessionID != "" {
 		diagnostics.WriteSessionRecord(path, sessionID, "recoveries.jsonl", out)
 	}
@@ -438,7 +438,7 @@ func appendRecord(record map[string]any) {
 	if sessionID := recordSessionID(record); sessionID != "" {
 		diagnostics.WriteSessionRecord(path, sessionID, "tool-calls.jsonl", record)
 	}
-	diagnostics.WriteJSONL(path, record)
+	diagnostics.WriteGlobalJSONL(path, record)
 }
 
 func attachRequestContext(record map[string]any) {

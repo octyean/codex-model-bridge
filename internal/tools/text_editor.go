@@ -196,6 +196,11 @@ func TextEditorPatchInputWithWorkspace(arguments string, workspace string) (stri
 			return result, nil
 		}
 		if info, err := os.Stat(fsPath); err == nil && !info.IsDir() {
+			if info.Size() <= maxTextEditorReadBytes {
+				if data, readErr := os.ReadFile(fsPath); readErr == nil && len(data) > 0 {
+					return replacePatch(path, fsPath, string(data), command.FileText), nil
+				}
+			}
 			return replaceWholeFilePatch(path, command.FileText), nil
 		}
 		return addFilePatch(path, command.FileText), nil

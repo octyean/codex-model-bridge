@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -284,7 +285,43 @@ func FormatToolOutputWithArguments(adapter Adapter, tool ToolDescriptor, argumen
 		}
 		return output + "\n\n" + recovery
 	}
-	return adapter.FormatToolOutput(tool, output)
+	formatted := adapter.FormatToolOutput(tool, output)
+	if tool.Kind == "read_file" {
+		return formatReadFileRange(arguments, formatted)
+	}
+	return formatted
+}
+
+func formatReadFileRange(arguments string, output string) string {
+	var request struct {
+		StartLine int `json:"start_line"`
+		LineLimit int `json:"line_limit"`
+	}
+	if json.Unmarshal([]byte(arguments), &request) != nil {
+		return output
+	}
+	if request.StartLine <= 0 {
+		request.StartLine = 1
+	}
+	if request.LineLimit <= 0 {
+		request.LineLimit = 240
+	}
+	lineCount := strings.Count(output, "\n")
+	if output != "" && !strings.HasSuffix(output, "\n") {
+		lineCount++
+	}
+	if lineCount < request.LineLimit {
+		return output
+	}
+	nextLine := request.StartLine + lineCount
+	return output + "\n\n" + strings.Join([]string{
+		"READ_FILE_RANGE_LIMIT_REACHED",
+		fmt.Sprintf("returned_start_line: %d", request.StartLine),
+		fmt.Sprintf("returned_end_line: %d", nextLine-1),
+		"complete_file_read_confirmed: false",
+		fmt.Sprintf("required_next_action_if_later_content_is_needed: call read_file with start_line=%d and a new line range", nextLine),
+		"forbidden_next_action: claim the complete file was read from this partial range",
+	}, "\n")
 }
 
 func ToolRecoveryText(kind ToolFailureKind) string {

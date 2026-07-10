@@ -21,12 +21,17 @@ type Config struct {
 	Server          ServerConfig              `toml:"server"`
 	Codex           CodexConfig               `toml:"codex"`
 	ModelDiscovery  ModelDiscoveryConfig      `toml:"model_discovery"`
+	Verification    VerificationConfig        `toml:"verification"`
+	Diagnostics     DiagnosticsConfig         `toml:"diagnostics"`
 	Extensions      ExtensionsConfig          `toml:"extensions"`
 	Capabilities    CapabilitiesConfig        `toml:"capabilities"`
 	SearchProviders map[string]SearchProvider `toml:"search_providers"`
 	VisionProviders map[string]VisionProvider `toml:"vision_providers"`
 	Providers       map[string]ProviderConfig `toml:"providers"`
 	Models          map[string]ModelConfig    `toml:"models"`
+
+	verifiedCapabilities modelCapabilityCache
+	discoveryAssignments modelDiscoveryAssignments
 }
 
 type ServerConfig struct {
@@ -48,8 +53,33 @@ type ProviderConfig struct {
 }
 
 type ModelDiscoveryConfig struct {
-	Enabled bool   `toml:"enabled"`
-	Mode    string `toml:"mode"`
+	Enabled   bool   `toml:"enabled"`
+	Mode      string `toml:"mode"`
+	StatePath string `toml:"state_path,omitempty"`
+}
+
+type VerificationConfig struct {
+	CachePath   string `toml:"cache_path,omitempty"`
+	MaxAgeHours int    `toml:"max_age_hours,omitempty"`
+}
+
+type DiagnosticsConfig struct {
+	RetentionDays int `toml:"retention_days,omitempty"`
+	MaxTotalMB    int `toml:"max_total_mb,omitempty"`
+}
+
+func (cfg *Config) DiagnosticsRetentionDays() int {
+	if cfg.Diagnostics.RetentionDays > 0 {
+		return cfg.Diagnostics.RetentionDays
+	}
+	return 14
+}
+
+func (cfg *Config) DiagnosticsMaxTotalBytes() int64 {
+	if cfg.Diagnostics.MaxTotalMB > 0 {
+		return int64(cfg.Diagnostics.MaxTotalMB) * 1024 * 1024
+	}
+	return 1024 * 1024 * 1024
 }
 
 type ExtensionsConfig struct {
@@ -97,14 +127,17 @@ type VisionProvider struct {
 }
 
 type ModelConfig struct {
-	DisplayName               string   `toml:"display_name"`
-	Provider                  string   `toml:"provider"`
-	Profile                   string   `toml:"profile"`
-	UpstreamModel             string   `toml:"upstream_model"`
-	ContextWindow             int64    `toml:"context_window"`
-	SupportsParallelToolCalls bool     `toml:"supports_parallel_tool_calls"`
-	ApplyPatchToolType        string   `toml:"apply_patch_tool_type"`
-	InputModalities           []string `toml:"input_modalities"`
+	DisplayName                       string   `toml:"display_name"`
+	Provider                          string   `toml:"provider"`
+	Profile                           string   `toml:"profile"`
+	UpstreamModel                     string   `toml:"upstream_model"`
+	ExecutionMode                     string   `toml:"execution_mode,omitempty"`
+	SupportsResponsesOptions          *bool    `toml:"supports_responses_options,omitempty"`
+	SupportsResponsesStructuredOutput *bool    `toml:"supports_responses_structured_output,omitempty"`
+	ContextWindow                     int64    `toml:"context_window"`
+	SupportsParallelToolCalls         bool     `toml:"supports_parallel_tool_calls"`
+	ApplyPatchToolType                string   `toml:"apply_patch_tool_type"`
+	InputModalities                   []string `toml:"input_modalities"`
 }
 
 type ModelsResponse struct {
@@ -168,6 +201,9 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := cfg.loadRuntimeState(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -239,9 +275,23 @@ func (cfg *Config) Validate() error {
 		if !adapters.Known(model.Profile) {
 			return fmt.Errorf("models.%s.profile %q is not supported", slug, model.Profile)
 		}
+		switch model.ExecutionMode {
+		case "", ExecutionModeNativeResponses, ExecutionModeProjectedResponses, ExecutionModeChatCompletions:
+		default:
+			return fmt.Errorf("models.%s.execution_mode must be native_responses, projected_responses, or chat_completions", slug)
+		}
 	}
 	if err := cfg.validateExtensions(); err != nil {
 		return err
+	}
+	if cfg.Verification.MaxAgeHours < 0 {
+		return fmt.Errorf("verification.max_age_hours must be zero or greater")
+	}
+	if cfg.Diagnostics.RetentionDays < 0 {
+		return fmt.Errorf("diagnostics.retention_days must be zero or greater")
+	}
+	if cfg.Diagnostics.MaxTotalMB < 0 {
+		return fmt.Errorf("diagnostics.max_total_mb must be zero or greater")
 	}
 	return nil
 }
@@ -350,55 +400,6 @@ func (cfg *Config) Provider(name string) (ProviderConfig, bool) {
 	return provider, ok
 }
 
-func (cfg *Config) AddDiscoveredModels(providerName string, ids []string) int {
-	mode := cfg.ModelDiscoveryMode()
-	if !cfg.ModelDiscovery.Enabled || mode == "config" || len(ids) == 0 {
-		return 0
-	}
-	if cfg.Models == nil || mode == "upstream" {
-		cfg.Models = map[string]ModelConfig{}
-	}
-	added := 0
-	slotIndex := 0
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		slug := id
-		if !desktopVisibleModel(id) {
-			for slotIndex < len(desktopModelSlots) {
-				candidate := desktopModelSlots[slotIndex]
-				slotIndex++
-				if _, exists := cfg.Models[candidate]; !exists {
-					slug = candidate
-					break
-				}
-			}
-			if !desktopVisibleModel(slug) {
-				continue
-			}
-		}
-		if mode == "merge" {
-			if _, exists := cfg.Models[slug]; exists {
-				continue
-			}
-		}
-		cfg.Models[slug] = ModelConfig{
-			DisplayName:               id,
-			Provider:                  providerName,
-			Profile:                   cfg.Providers[providerName].Profile,
-			UpstreamModel:             id,
-			ContextWindow:             DefaultContextWindowForModel(id),
-			SupportsParallelToolCalls: true,
-			ApplyPatchToolType:        "freeform",
-		}
-		added++
-	}
-	cfg.ensureDefaultModel()
-	return added
-}
-
 func DefaultContextWindowForModel(model string) int64 {
 	value := strings.ToLower(strings.TrimSpace(model))
 	switch {
@@ -413,7 +414,40 @@ func DefaultContextWindowForModel(model string) int64 {
 	}
 }
 
-var desktopModelSlots = []string{"gpt-5.3-codex", "gpt-5.2", "gpt-5.4-mini"}
+var desktopModelSlots = []string{"gpt-5.3-codex", "gpt-5.2", "gpt-5.4-mini", "gpt-5.5", "gpt-5.4"}
+
+func DesktopModelSlug(model string) string {
+	value := strings.ToLower(strings.TrimSpace(model))
+	if desktopVisibleModel(value) {
+		return value
+	}
+	switch {
+	case strings.Contains(value, "kimi"):
+		return "gpt-5.3-codex"
+	case strings.Contains(value, "mimo-v2.5-pro"):
+		return "gpt-5.2"
+	case strings.Contains(value, "mimo-v2.5"):
+		return "gpt-5.4-mini"
+	default:
+		return ""
+	}
+}
+
+func desktopModelPriority(model string) int {
+	value := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case desktopVisibleModel(value):
+		return 0
+	case strings.Contains(value, "kimi"):
+		return 1
+	case strings.Contains(value, "mimo-v2.5-pro"):
+		return 2
+	case strings.Contains(value, "mimo-v2.5"):
+		return 3
+	default:
+		return 4
+	}
+}
 
 func desktopVisibleModel(slug string) bool {
 	switch strings.TrimSpace(slug) {
@@ -422,6 +456,11 @@ func desktopVisibleModel(slug string) bool {
 	default:
 		return false
 	}
+}
+
+func (cfg *Config) desktopSlotOccupiedByOtherModel(slug string, upstreamModel string) bool {
+	model, ok := cfg.Models[slug]
+	return ok && model.UpstreamModel != upstreamModel
 }
 
 func (cfg *Config) ensureDefaultModel() {
@@ -459,6 +498,12 @@ func (cfg *Config) ProfileName(model ModelConfig, provider ProviderConfig) strin
 }
 
 func (cfg *Config) UpstreamProtocol(model ModelConfig, provider ProviderConfig) string {
+	switch model.ExecutionMode {
+	case ExecutionModeNativeResponses, ExecutionModeProjectedResponses:
+		return "responses"
+	case ExecutionModeChatCompletions:
+		return "chat_completions"
+	}
 	switch provider.Protocol {
 	case "responses", "chat_completions":
 		return provider.Protocol
@@ -517,7 +562,8 @@ func (cfg *Config) Catalog() ModelsResponse {
 	for _, slug := range slugs {
 		model := cfg.Models[slug]
 		provider := cfg.Providers[model.Provider]
-		adapter := adapters.Get(cfg.ProfileName(model, provider))
+		plan := cfg.ExecutionPlan(model, provider)
+		adapter := adapters.Get(plan.Profile)
 		caps := adapter.Capabilities()
 		inputModalities := model.InputModalities
 		if len(inputModalities) == 0 {
@@ -525,7 +571,7 @@ func (cfg *Config) Catalog() ModelsResponse {
 		}
 		inputModalities = adapters.NormalizeInputModalities(inputModalities)
 		contextWindow := model.ContextWindow
-		supportsResponsesOptions := cfg.UpstreamProtocol(model, provider) == "responses"
+		supportsResponsesOptions := plan.SupportsResponsesOptions
 		supportsSearchTool := cfg.Capabilities.Search.Enabled && caps.SupportsSearchTool
 		models = append(models, ModelInfo{
 			Slug:                       slug,

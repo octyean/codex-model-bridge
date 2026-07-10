@@ -24,9 +24,32 @@ codex-bridge probe \
 输出里重点看：
 
 - `models_ok`：上游 `/models` 是否可用。
-- `responses_stream_ok`：上游 `/responses` 是否支持流式。
-- `chat_stream_ok`：上游 `/chat/completions` 是否支持流式。
+- `responses_stream_ok`：上游 `/responses` 是否能完成一轮流式响应。
+- `responses_tools_ok`：上游 `/responses` 是否能返回非流式 function call。
+- `responses_tool_stream_ok`：上游 `/responses` 是否能完整流式返回 function call 名称和参数。
+- `responses_tool_continuation_ok`：提交 `function_call_output` 后，上游能否继续生成最终回答。
+- `responses_options_ok`：上游是否接受 Codex 使用的 reasoning 和 verbosity 选项。
+- `responses_structured_output_ok`：上游是否原生支持 `text.format=json_schema`。
+- `chat_stream_ok`：上游 `/chat/completions` 是否能完成一轮流式响应。
+- `chat_tools_ok`：上游 `/chat/completions` 是否能返回非流式 tool call。
+- `chat_tool_stream_ok`：上游是否能完整流式返回 tool call 名称和参数。
 - `recommended_protocol`：建议写入配置的协议。
+- `failures`：未通过的探测阶段和真实错误。部分可选能力失败时，仍可能推荐 Responses。
+
+## 验证已配置模型
+
+`probe` 用命令行传入的地址和 key 做一次临时检查；`verify` 读取现有配置，逐模型验证并更新能力缓存：
+
+```bash
+codex-bridge verify \
+  --config ~/.codex-bridge/config.toml \
+  --provider-name mcodex \
+  --models kimi-for-coding,mimo-v2.5-pro
+```
+
+`--models` 可写 Codex slug 或真实 upstream model。为避免误测其他模型，命令要求显式传 `--models`，或者明确传 `--all` 验证全部已配置模型；两者不能同时使用。输出是完整能力矩阵和缓存路径；任一模型的 Responses 与 Chat 主路径都不可用时，命令返回非 0。该命令不会修改 `config.toml` 或 Codex 默认模型。
+
+能力缓存记录 `probe_version`、`verified_at` 和 `expires_at`。探测版本变化或记录过期后，重新运行 `verify` 即可更新；Bridge 会保留旧记录用于诊断，但不会把它当作当前能力结论。
 
 ## 生成或更新配置
 
@@ -127,6 +150,8 @@ codex-bridge catalog generate --config config/config.toml
 - 修改 adapter 的能力声明后重新生成。
 
 普通对话请求不会修改模型目录。
+
+自动发现的兼容槽位记录在 `model-slots.json`，逐模型验证结果记录在 `model-capabilities.json`。两者默认和 Bridge 配置文件放在同一目录。
 
 ## Linux 服务命令
 

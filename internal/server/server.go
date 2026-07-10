@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"codex-bridge/internal/adapters"
+	"codex-bridge/internal/buildinfo"
 	"codex-bridge/internal/capabilities"
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/config"
@@ -53,13 +54,13 @@ func NewWithRuntime(cfg *config.Config, providerClients map[string]providers.Cha
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.4.2"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.Version})
 }
 
 func (s *Server) v1(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object":  "codex_bridge",
-		"version": "0.4.2",
+		"version": buildinfo.Version,
 		"routes":  []string{"/v1/responses", "/v1/models"},
 	})
 }
@@ -104,7 +105,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "provider is not configured: "+modelCfg.Provider)
 		return
 	}
-	profileName := s.cfg.ProfileName(modelCfg, providerCfg)
+	executionPlan := s.cfg.ExecutionPlan(modelCfg, providerCfg)
+	profileName := executionPlan.Profile
 	adapter := adapters.Get(profileName)
 	provider, ok := s.providers[modelCfg.Provider]
 	if !ok {
@@ -117,17 +119,21 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	toollog.RememberRequestSession(requestID, sessionID, req.Model, modelCfg.UpstreamModel, profileName, requestSummary)
 	defer toollog.ForgetRequestSession(requestID)
 	s.writeSessionLog(sessionID, "codex-requests.jsonl", map[string]any{
-		"event":           "codex_request",
-		"request_id":      requestID,
-		"model":           req.Model,
-		"upstream_model":  modelCfg.UpstreamModel,
-		"profile":         profileName,
-		"headers":         incidentlog.Headers(r.Header),
-		"request_summary": requestSummary,
-		"body":            req.Raw,
+		"event":                                "codex_request",
+		"request_id":                           requestID,
+		"model":                                req.Model,
+		"upstream_model":                       modelCfg.UpstreamModel,
+		"profile":                              profileName,
+		"execution_mode":                       executionPlan.Mode,
+		"upstream_protocol":                    executionPlan.Protocol,
+		"supports_responses_options":           executionPlan.SupportsResponsesOptions,
+		"supports_responses_structured_output": executionPlan.SupportsResponsesStructuredOutput,
+		"headers":                              incidentlog.Headers(r.Header),
+		"request_summary":                      requestSummary,
+		"body":                                 req.Raw,
 	})
 	dumpPath := ""
-	if shouldForwardResponses(s.cfg.UpstreamProtocol(modelCfg, providerCfg), adapter) {
+	if executionPlan.Mode == config.ExecutionModeNativeResponses {
 		responsesProvider, ok := provider.(providers.ResponsesProvider)
 		if !ok {
 			message := "provider does not support responses protocol: " + modelCfg.Provider
@@ -136,6 +142,17 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.forwardResponses(w, r, requestID, sessionID, req, modelCfg, responsesProvider, adapter, dumpPath)
+		return
+	}
+	if executionPlan.Mode == config.ExecutionModeProjectedResponses {
+		responsesProvider, ok := provider.(providers.ResponsesProvider)
+		if !ok {
+			message := "provider does not support responses protocol: " + modelCfg.Provider
+			s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusInternalServerError, message, nil)
+			writeError(w, http.StatusInternalServerError, message)
+			return
+		}
+		s.forwardProjectedResponses(w, r, requestID, sessionID, req, modelCfg, responsesProvider, adapter, executionPlan, workspace, dumpPath)
 		return
 	}
 
@@ -151,12 +168,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	chatTools, toolCtx := tools.FromCodex(req.Tools, adapter)
+	chatTools, toolCtx := transcriptResult.Tools, transcriptResult.ToolContext
 	toolCtx.Workspace = workspace
-	chatTools = append(chatTools, tools.FromAdditionalTools(transcriptResult.Items, adapter, &toolCtx)...)
-	chatTools = tools.AddReadFileProxy(chatTools, &toolCtx)
-	chatTools = tools.AddListFilesProxy(chatTools, &toolCtx)
-	chatTools = tools.AddFileSearchProxy(chatTools, &toolCtx)
 	chatTools = filterUnavailableRuntimeTools(chatTools, &toolCtx, transcriptResult.Messages)
 	if s.runtime.HasSearch() && tools.HasWebSearch(req.Tools) {
 		chatTools = tools.AddWebSearchProxy(chatTools, &toolCtx)
@@ -271,7 +284,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Profile:        profileName,
 		RequestSummary: requestSummary,
 	}
-	if followUp, followUpReq, ok := s.resolveInternalTools(r.Context(), provider, sessionID, chatReq, resp.Choices[0].Message, toolCtx, adapter, logCtx); ok {
+	if followUp, followUpReq, ok, err := s.resolveInternalTools(r.Context(), provider, sessionID, chatReq, resp.Choices[0].Message, toolCtx, adapter, logCtx); err != nil {
+		extra := map[string]any{"stream": false, "internal_tools": true}
+		s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusBadGateway, err.Error(), extra)
+		incidentlog.Write("internal_tool_followup_limit", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"error": err.Error(), "stream": false}))
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	} else if ok {
 		resp = followUp
 		shape = optimization.CaptureShape(followUpReq)
 		if len(resp.Choices) == 0 {
@@ -281,25 +300,6 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			incidentlog.Write("empty_chat_choices", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "after_internal_tool": true}))
 			writeError(w, http.StatusBadGateway, message)
 			return
-		}
-	}
-	if contentOnlyNeedsRetry(resp.Choices[0].Message, toolCtx) {
-		retryReq := contentOnlyRetryRequest(chatReq, resp.Choices[0].Message)
-		shape = optimization.CaptureShape(retryReq)
-		s.writePromptRequest(sessionID, requestID, req.Model, retryReq.Model, profileName, "content_only_retry", providers.PreparedChatRequest(retryReq), map[string]any{"stream": false})
-		retryResp, err := provider.Create(r.Context(), retryReq)
-		if err != nil {
-			s.logger.Error("content_only_retry_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
-			extra := map[string]any{"stream": false, "stage": "content_only_retry"}
-			s.writePromptFailure(sessionID, requestID, req.Model, retryReq.Model, profileName, "content_only_retry", err.Error(), extra)
-			s.writeBridgeFailure(sessionID, requestID, req.Model, retryReq.Model, profileName, http.StatusBadGateway, err.Error(), extra)
-			incidentlog.Write("content_only_retry_error", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"error": err.Error(), "stream": false}))
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		s.writePromptResponse(sessionID, requestID, req.Model, retryReq.Model, profileName, "content_only_retry", retryResp, nil)
-		if len(retryResp.Choices) > 0 {
-			resp = retryResp
 		}
 	}
 	items := responseItemsFromMessage(r.Context(), resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger, s.localToolResultResolver(logCtx, toolCtx))
@@ -327,10 +327,6 @@ func effectiveInputModalities(modelCfg config.ModelConfig, adapter adapters.Adap
 		return adapters.NormalizeInputModalities(modelCfg.InputModalities)
 	}
 	return adapters.NormalizeInputModalities(adapter.Capabilities().InputModalities)
-}
-
-func shouldForwardResponses(protocol string, adapter adapters.Adapter) bool {
-	return protocol == "responses" && adapter.Name() == adapters.OpenAIName
 }
 
 func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, requestID string, sessionID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter, dumpPath string) {
@@ -519,7 +515,7 @@ streamOpened:
 		RequestSummary: incidentlog.RequestSummary(req.Raw),
 	}
 	state := newStreamState(r.Context(), toolCtx, adapter, requestID, req.Model, profile, s.logger, s.localToolResultResolver(logCtx, toolCtx))
-	emitStreamEvents := toolCtx.IsEmpty() && !titleOnlyResponseFormat(chatReq.ResponseFormat)
+	emitStreamEvents := !titleOnlyResponseFormat(chatReq.ResponseFormat)
 	var usage providers.NormalizedUsage
 	firstChunk := true
 	streamSeq := 0
@@ -582,30 +578,6 @@ streamLoop:
 		"message":     chatMessageFromStreamState(state),
 		"usage":       usage,
 	}, nil)
-	if contentOnlyNeedsRetry(chatMessageFromStreamState(state), toolCtx) {
-		retryReq := contentOnlyRetryRequest(chatReq, chatMessageFromStreamState(state))
-		shape = optimization.CaptureShape(retryReq)
-		s.writePromptRequest(sessionID, requestID, req.Model, retryReq.Model, profile, "content_only_retry", providers.PreparedChatRequest(retryReq), map[string]any{"stream": true})
-		retryState, retryUsage, err := s.streamVisibleMessage(r, writer, respID, createdAt, retryReq, provider, toolCtx, adapter, requestID, sessionID, req.Model, profile, "content_only_retry", false, s.localToolResultResolver(logCtx, toolCtx), false)
-		if err != nil {
-			if requestCanceled(r, err) {
-				return
-			}
-			extra := map[string]any{"stream": true, "stage": "content_only_retry"}
-			s.writeBridgeFailure(sessionID, requestID, req.Model, retryReq.Model, profile, http.StatusBadGateway, err.Error(), extra)
-			incidentlog.Write("content_only_retry_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": err.Error(), "stream": true}))
-			_ = writer.Event(map[string]any{
-				"type": "response.failed",
-				"response": map[string]any{
-					"id":    respID,
-					"error": map[string]any{"message": err.Error(), "type": "server_error"},
-				},
-			})
-			return
-		}
-		usage = addUsage(usage, retryUsage)
-		state = retryState
-	}
 	items := state.Done()
 	items = enforceStructuredOutput(items, chatReq.ResponseFormat)
 	if emptyOutput(items) {
@@ -827,97 +799,21 @@ func responseFormatSchema(responseFormat any) string {
 	return string(data)
 }
 
-func enforceStructuredOutput(items []codex.ResponseItem, responseFormat any) []codex.ResponseItem {
-	if !titleOnlyResponseFormat(responseFormat) {
-		return items
-	}
-	for _, item := range items {
-		if item["type"] != "message" {
-			continue
-		}
-		text := strings.TrimSpace(messageOutputText(item))
-		if text == "" {
-			return items
-		}
-		if title, ok := titleFromJSON(text); ok {
-			setMessageOutputText(item, titleJSON(title))
-			return items
-		}
-		setMessageOutputText(item, titleJSON(text))
-		return items
-	}
-	return items
-}
-
-func titleOnlyResponseFormat(responseFormat any) bool {
-	format, ok := responseFormat.(map[string]any)
-	if !ok {
-		return false
-	}
-	jsonSchema, ok := format["json_schema"].(map[string]any)
-	if !ok {
-		return false
-	}
-	schema, ok := jsonSchema["schema"].(map[string]any)
-	if !ok || schema["type"] != "object" {
-		return false
-	}
-	properties, ok := schema["properties"].(map[string]any)
-	if !ok || len(properties) != 1 {
-		return false
-	}
-	_, ok = properties["title"]
-	return ok && requiresTitle(schema["required"])
-}
-
-func requiresTitle(value any) bool {
-	items, ok := value.([]any)
-	if !ok {
-		return false
-	}
-	for _, item := range items {
-		if item == "title" {
-			return true
-		}
-	}
-	return false
-}
-
-func titleFromJSON(text string) (string, bool) {
-	var obj map[string]string
-	if err := json.Unmarshal([]byte(text), &obj); err != nil {
-		return "", false
-	}
-	title := cleanTitle(obj["title"])
-	return title, title != ""
-}
-
-func titleJSON(title string) string {
-	data, _ := json.Marshal(map[string]string{"title": cleanTitle(title)})
-	return string(data)
-}
-
-func cleanTitle(title string) string {
-	title = strings.TrimSpace(title)
-	title = strings.TrimPrefix(title, "```json")
-	title = strings.TrimPrefix(title, "```")
-	title = strings.TrimSuffix(strings.TrimSpace(title), "```")
-	title = strings.TrimSpace(title)
-	var obj map[string]string
-	if err := json.Unmarshal([]byte(title), &obj); err == nil {
-		if inner := strings.TrimSpace(obj["title"]); inner != "" {
-			return inner
-		}
-	}
-	return title
-}
-
 func setMessageOutputText(item codex.ResponseItem, text string) {
-	content, _ := item["content"].([]map[string]string)
-	if len(content) == 0 {
-		return
+	switch content := item["content"].(type) {
+	case []map[string]string:
+		if len(content) > 0 {
+			content[0]["text"] = text
+		}
+	case []any:
+		for _, rawPart := range content {
+			part, _ := rawPart.(map[string]any)
+			if _, ok := part["text"]; ok {
+				part["text"] = text
+				return
+			}
+		}
 	}
-	content[0]["text"] = text
 }
 
 func hasStructuredOutputNote(messages []providers.ChatMessage) bool {

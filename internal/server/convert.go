@@ -4,13 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
@@ -21,18 +17,6 @@ import (
 )
 
 type toolCallLocalResolver func(ctx context.Context, callID string, entry tools.Entry, modelArguments string, canonicalArguments string, runtimeArguments string) (codex.ResponseItem, bool)
-
-const (
-	chatResponseStatePrefix  = "CHAT_RESPONSE_STATE:"
-	chatResponseStateFinal   = "final"
-	chatResponseStateBlocked = "blocked"
-)
-
-const contentOnlyRetryNote = `CHAT_CONTENT_ONLY_RESPONSE_RETRY
-Your previous assistant response contained visible content but no tool calls, and it did not declare CHAT_RESPONSE_STATE.
-If the task is complete, send a content-only response with CHAT_RESPONSE_STATE: final on the first line.
-If you are blocked and need user input, send a content-only response with CHAT_RESPONSE_STATE: blocked on the first line.
-If any repository or environment work remains, call the appropriate tools now instead of repeating progress text.`
 
 func responseItemsFromMessage(ctx context.Context, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) []codex.ResponseItem {
 	if len(message.ToolCalls) > 0 {
@@ -62,33 +46,11 @@ func responseItemsFromMessage(ctx context.Context, message providers.ChatMessage
 }
 
 func assistantMessageItem(content any) codex.ResponseItem {
-	text, _ := stripChatResponseState(messageText(content))
 	return codex.ResponseItem{
 		"type":    "message",
 		"role":    "assistant",
-		"content": []map[string]string{{"type": "output_text", "text": text}},
+		"content": []map[string]string{{"type": "output_text", "text": messageText(content)}},
 	}
-}
-
-func contentOnlyNeedsRetry(message providers.ChatMessage, toolCtx tools.Context) bool {
-	if toolCtx.IsEmpty() || len(message.ToolCalls) > 0 {
-		return false
-	}
-	text := strings.TrimSpace(messageText(message.Content))
-	if text == "" {
-		return false
-	}
-	_, state := stripChatResponseState(text)
-	return state == ""
-}
-
-func contentOnlyRetryRequest(req providers.ChatCompletionRequest, message providers.ChatMessage) providers.ChatCompletionRequest {
-	next := req
-	next.Messages = append(append([]providers.ChatMessage{}, req.Messages...),
-		providers.ChatMessage{Role: "assistant", Content: messageText(message.Content)},
-		providers.ChatMessage{Role: "system", Content: contentOnlyRetryNote},
-	)
-	return next
 }
 
 type streamState struct {
@@ -240,12 +202,11 @@ func (s *streamState) Done() []codex.ResponseItem {
 		items = append(items, indexedResponseItem{index: s.itemIndex(s.reasoningIndex), item: item})
 	}
 	if s.textAdded || s.text != "" {
-		text, _ := stripChatResponseState(s.text)
 		items = append(items, indexedResponseItem{index: s.itemIndex(s.textIndex), item: codex.ResponseItem{
 			"id":      s.textItemID,
 			"type":    "message",
 			"role":    "assistant",
-			"content": []map[string]string{{"type": "output_text", "text": text}},
+			"content": []map[string]string{{"type": "output_text", "text": s.text}},
 		}})
 	}
 	return sortedResponseItems(items)
@@ -453,428 +414,12 @@ func toolItemID(itemType string, callID string) string {
 	return prefix + "_" + strings.TrimPrefix(callID, prefix+"_")
 }
 
-type textEditorStreamProjector struct {
-	requestID string
-	callID    string
-	entry     tools.Entry
-	input     string
-	added     bool
-	local     bool
-}
-
-func newTextEditorStreamProjector(requestID string, callID string, entry tools.Entry) *textEditorStreamProjector {
-	return &textEditorStreamProjector{requestID: requestID, callID: callID, entry: entry}
-}
-
-func (p *textEditorStreamProjector) addedEvent() map[string]any {
-	return map[string]any{
-		"type":         "response.output_item.added",
-		"item":         inProgressTextEditorPatchItem(p.callID, p.entry),
-		"output_index": 0,
-	}
-}
-
-func (p *textEditorStreamProjector) update(arguments string, adapter adapters.Adapter) []map[string]any {
-	input, local, ok := p.project(arguments, adapter)
-	if !ok {
-		return nil
-	}
-	if local {
-		return p.startLocal(arguments, input)
-	}
-	return p.appendPatchInput(input)
-}
-
-func (p *textEditorStreamProjector) project(arguments string, adapter adapters.Adapter) (string, bool, bool) {
-	if input := tools.ExtractCustomToolInput(p.entry, arguments, adapter); input != "" {
-		return input, strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_"), true
-	}
-	return p.projectPartial(arguments, adapter)
-}
-
-func (p *textEditorStreamProjector) projectPartial(arguments string, adapter adapters.Adapter) (string, bool, bool) {
-	arguments = tools.TextEditorCanonicalArguments(p.entry.Name(), arguments)
-	fields := parseTextEditorArgumentPrefix(arguments)
-	command := tools.NormalizeTextEditorCommand(fields.value("command"))
-	path := fields.value("path")
-	if !isTextEditorStreamCommand(command) {
-		command = ""
-	}
-	if command == "" || path == "" || !fields.complete("command") || !fields.complete("path") {
-		return "", false, false
-	}
-	switch command {
-	case "write_file":
-		if textEditorStreamFileExists(path) {
-			return "", false, false
-		}
-		text, ok := fields.firstValue("file_text")
-		if !ok {
-			return "", false, false
-		}
-		return projectedPartialTextEditorInput(adapter, map[string]string{
-			"command":   command,
-			"path":      path,
-			"file_text": text,
-		})
-	case "str_replace":
-		oldText := fields.value("old_str")
-		if oldText == "" || !fields.complete("old_str") || textEditorStreamFileMissingOldText(path, oldText) {
-			return "", false, false
-		}
-		newText, ok := fields.firstValue("new_str")
-		if !ok {
-			return "", false, false
-		}
-		return projectedPartialTextEditorInput(adapter, map[string]string{
-			"command": command,
-			"path":    path,
-			"old_str": oldText,
-			"new_str": newText,
-		})
-	case "insert":
-		anchor := fields.value("old_str")
-		if anchor == "" {
-			return "", false, false
-		}
-		text, ok := fields.firstValue("insert_text")
-		if !ok {
-			return "", false, false
-		}
-		return projectedPartialTextEditorInput(adapter, map[string]string{
-			"command":     command,
-			"path":        path,
-			"old_str":     anchor,
-			"insert_text": text,
-		})
-	case "delete_file":
-		return projectedTextEditorInput(adapter, map[string]string{
-			"command": command,
-			"path":    path,
-		})
-	case "move_file":
-		destPath, ok := fields.firstValue("destination_path")
-		if !ok {
-			return "", false, false
-		}
-		values := map[string]string{
-			"command":          command,
-			"path":             path,
-			"destination_path": destPath,
-		}
-		if oldText := fields.value("old_str"); oldText != "" && fields.complete("old_str") {
-			newText, ok := fields.firstValue("new_str")
-			if !ok {
-				return "", false, false
-			}
-			values["old_str"] = oldText
-			values["new_str"] = newText
-		} else {
-			return "", false, false
-		}
-		return projectedTextEditorInput(adapter, values)
-	default:
-		return "", false, false
-	}
-}
-
-func (p *textEditorStreamProjector) appendPatchInput(input string) []map[string]any {
-	if p.local || !strings.HasPrefix(input, p.input) {
-		return nil
-	}
-	var events []map[string]any
-	if !p.added {
-		p.added = true
-		events = append(events, p.addedEvent())
-	}
-	delta := strings.TrimPrefix(input, p.input)
-	if delta == "" {
-		return events
-	}
-	p.input = input
-	return append(events, map[string]any{
-		"type":    "response.custom_tool_call_input.delta",
-		"item_id": toolItemID("custom_tool_call", p.callID),
-		"call_id": p.callID,
-		"delta":   delta,
-	})
-}
-
-func (p *textEditorStreamProjector) startLocal(arguments string, input string) []map[string]any {
-	p.local = true
-	if p.added {
-		return nil
-	}
-	p.added = true
-	item := localToolResultMessageItem(p.callID, input)
-	item["status"] = "in_progress"
-	return []map[string]any{{
-		"type":         "response.output_item.added",
-		"item":         item,
-		"output_index": 0,
-	}}
-}
-
-func (p *textEditorStreamProjector) doneEvents(item codex.ResponseItem) []map[string]any {
-	if !p.added {
-		if item["type"] == "custom_tool_call" {
-			p.added = true
-			return append([]map[string]any{p.addedEvent()}, p.doneEvents(item)...)
-		}
-		return []map[string]any{{
-			"type":         "response.output_item.added",
-			"item":         item,
-			"output_index": 0,
-		}}
-	}
-	if item["type"] != "custom_tool_call" {
-		return nil
-	}
-	input, _ := item["input"].(string)
-	var events []map[string]any
-	if strings.HasPrefix(input, p.input) {
-		if delta := strings.TrimPrefix(input, p.input); delta != "" {
-			events = append(events, map[string]any{
-				"type":    "response.custom_tool_call_input.delta",
-				"item_id": item["id"],
-				"call_id": item["call_id"],
-				"delta":   delta,
-			})
-		}
-	}
-	events = append(events, map[string]any{
-		"type":    "response.custom_tool_call_input.done",
-		"item_id": item["id"],
-		"call_id": item["call_id"],
-		"input":   input,
-	})
-	return events
-}
-
 func textEditorInvalidArgumentsResult() string {
 	return tools.TextEditorInvalidArgumentsResult("")
 }
 
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-type textEditorArgumentFields map[string]streamedJSONField
-
-type streamedJSONField struct {
-	value    string
-	seen     bool
-	complete bool
-}
-
-func (f textEditorArgumentFields) value(name string) string {
-	return f[name].value
-}
-
-func (f textEditorArgumentFields) complete(name string) bool {
-	field := f[name]
-	return field.seen && field.complete
-}
-
-func (f textEditorArgumentFields) firstValue(names ...string) (string, bool) {
-	for _, name := range names {
-		field := f[name]
-		if field.seen {
-			return field.value, true
-		}
-	}
-	return "", false
-}
-
-func parseTextEditorArgumentPrefix(arguments string) textEditorArgumentFields {
-	fields := textEditorArgumentFields{}
-	i := skipJSONSpace(arguments, 0)
-	if i >= len(arguments) || arguments[i] != '{' {
-		return fields
-	}
-	for i++; i < len(arguments); {
-		i = skipJSONSpace(arguments, i)
-		if i >= len(arguments) || arguments[i] == '}' {
-			return fields
-		}
-		if arguments[i] != '"' {
-			i++
-			continue
-		}
-		key, next, complete := scanJSONStringPrefix(arguments, i)
-		if !complete {
-			return fields
-		}
-		i = skipJSONSpace(arguments, next)
-		if i >= len(arguments) || arguments[i] != ':' {
-			return fields
-		}
-		i = skipJSONSpace(arguments, i+1)
-		if i >= len(arguments) {
-			return fields
-		}
-		if arguments[i] == '"' {
-			value, valueNext, valueComplete := scanJSONStringPrefix(arguments, i)
-			if isTextEditorStreamField(key) {
-				fields[key] = streamedJSONField{value: value, seen: true, complete: valueComplete}
-			}
-			if !valueComplete {
-				return fields
-			}
-			i = valueNext
-			continue
-		}
-		for i < len(arguments) && arguments[i] != ',' && arguments[i] != '}' {
-			i++
-		}
-		if i < len(arguments) && arguments[i] == ',' {
-			i++
-		}
-	}
-	return fields
-}
-
-func scanJSONStringPrefix(text string, start int) (string, int, bool) {
-	var out strings.Builder
-	i := start + 1
-	for i < len(text) {
-		ch := text[i]
-		switch ch {
-		case '"':
-			return out.String(), i + 1, true
-		case '\\':
-			decoded, next, ok := scanJSONEscapePrefix(text, i+1)
-			if !ok {
-				return out.String(), len(text), false
-			}
-			out.WriteString(decoded)
-			i = next
-		default:
-			r, size := rune(ch), 1
-			if ch >= utf8.RuneSelf {
-				r, size = utf8.DecodeRuneInString(text[i:])
-			}
-			out.WriteRune(r)
-			i += size
-		}
-	}
-	return out.String(), len(text), false
-}
-
-func scanJSONEscapePrefix(text string, start int) (string, int, bool) {
-	if start >= len(text) {
-		return "", len(text), false
-	}
-	switch text[start] {
-	case '"', '\\', '/':
-		return string(text[start]), start + 1, true
-	case 'b':
-		return "\b", start + 1, true
-	case 'f':
-		return "\f", start + 1, true
-	case 'n':
-		return "\n", start + 1, true
-	case 'r':
-		return "\r", start + 1, true
-	case 't':
-		return "\t", start + 1, true
-	case 'u':
-		if start+5 > len(text) {
-			return "", len(text), false
-		}
-		r, ok := decodeJSONUnicodeEscape(text[start+1 : start+5])
-		if !ok {
-			return "", start + 5, true
-		}
-		return string(r), start + 5, true
-	default:
-		return string(text[start]), start + 1, true
-	}
-}
-
-func decodeJSONUnicodeEscape(hexText string) (rune, bool) {
-	value, err := strconv.ParseInt(hexText, 16, 32)
-	if err != nil {
-		return unicode.ReplacementChar, false
-	}
-	r := rune(value)
-	if utf16.IsSurrogate(r) {
-		return unicode.ReplacementChar, false
-	}
-	return r, true
-}
-
-func skipJSONSpace(text string, index int) int {
-	for index < len(text) {
-		switch text[index] {
-		case ' ', '\n', '\r', '\t':
-			index++
-		default:
-			return index
-		}
-	}
-	return index
-}
-
-func isTextEditorStreamField(name string) bool {
-	switch name {
-	case "command", "path", "destination_path", "old_str", "new_str", "file_text", "insert_text":
-		return true
-	default:
-		return false
-	}
-}
-
-func isTextEditorStreamCommand(command string) bool {
-	switch command {
-	case "write_file", "str_replace", "insert", "move_file", "delete_file":
-		return true
-	default:
-		return false
-	}
-}
-
-func projectedTextEditorInput(adapter adapters.Adapter, values map[string]string) (string, bool, bool) {
-	data, _ := json.Marshal(values)
-	input, err := tools.TextEditorPatchInput(string(data))
-	if err != nil || input == "" {
-		return "", false, false
-	}
-	input = adapter.NormalizePatchInput(input)
-	return input, strings.HasPrefix(strings.TrimSpace(input), "TEXT_EDITOR_"), true
-}
-
-func projectedPartialTextEditorInput(adapter adapters.Adapter, values map[string]string) (string, bool, bool) {
-	input, local, ok := projectedTextEditorInput(adapter, values)
-	if !ok || local {
-		return input, local, ok
-	}
-	return strings.TrimSuffix(input, "\n*** End Patch"), false, true
-}
-
-func textEditorStreamFileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
-}
-
-func textEditorStreamFileContains(path string, text string) bool {
-	if text == "" {
-		return false
-	}
-	data, err := os.ReadFile(path)
-	return err == nil && strings.Contains(string(data), text)
-}
-
-func textEditorStreamFileMissingOldText(path string, oldText string) bool {
-	if oldText == "" {
-		return true
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	data, err := os.ReadFile(path)
-	return err == nil && !strings.Contains(string(data), oldText)
 }
 
 func isPatchWriteEntry(entry tools.Entry, arguments string) bool {
@@ -887,35 +432,7 @@ func logPatchWriteToolCall(requestID string, callID string, entry tools.Entry, a
 	}
 }
 
-func inProgressTextEditorPatchItem(callID string, entry tools.Entry) map[string]any {
-	return map[string]any{
-		"id":      toolItemID("custom_tool_call", callID),
-		"type":    "custom_tool_call",
-		"call_id": callID,
-		"name":    entry.OriginalName(),
-		"status":  "in_progress",
-	}
-}
-
 func outputDoneEvents(item codex.ResponseItem, outputIndex int, alreadyAdded bool) []map[string]any {
-	if projector, _ := item["_streamed_text_editor_projector"].(*textEditorStreamProjector); projector != nil {
-		delete(item, "_streamed_text_editor_projector")
-		events := projector.doneEvents(item)
-		if item["type"] == "function_call" {
-			events = append(events, map[string]any{
-				"type":      "response.function_call_arguments.done",
-				"item_id":   item["id"],
-				"call_id":   item["call_id"],
-				"arguments": item["arguments"],
-			})
-		}
-		events = append(events, map[string]any{
-			"type":         "response.output_item.done",
-			"item":         item,
-			"output_index": outputIndex,
-		})
-		return events
-	}
 	events := []map[string]any{}
 	if !alreadyAdded {
 		events = append(events, map[string]any{
@@ -1005,11 +522,24 @@ func ensureStreamItemIDs(items []codex.ResponseItem, requestID string) {
 }
 
 func messageOutputText(item codex.ResponseItem) string {
-	content, _ := item["content"].([]map[string]string)
-	if len(content) == 0 {
+	switch content := item["content"].(type) {
+	case []map[string]string:
+		var text strings.Builder
+		for _, part := range content {
+			text.WriteString(part["text"])
+		}
+		return text.String()
+	case []any:
+		var text strings.Builder
+		for _, rawPart := range content {
+			part, _ := rawPart.(map[string]any)
+			value, _ := part["text"].(string)
+			text.WriteString(value)
+		}
+		return text.String()
+	default:
 		return ""
 	}
-	return content[0]["text"]
 }
 
 func inProgressOutputItem(item codex.ResponseItem) codex.ResponseItem {
@@ -1063,27 +593,6 @@ func messageText(content any) string {
 		data, _ := json.Marshal(content)
 		return string(data)
 	}
-}
-
-func stripChatResponseState(text string) (string, string) {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(trimmed, chatResponseStatePrefix) {
-			return text, ""
-		}
-		state := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, chatResponseStatePrefix)))
-		if state != chatResponseStateFinal && state != chatResponseStateBlocked {
-			return text, ""
-		}
-		out := append([]string{}, lines[:i]...)
-		out = append(out, lines[i+1:]...)
-		return strings.TrimLeft(strings.Join(out, "\n"), "\n"), state
-	}
-	return text, ""
 }
 
 func reasoningItem(text string) codex.ResponseItem {

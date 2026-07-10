@@ -16,8 +16,10 @@ import (
 )
 
 type Result struct {
-	Messages []providers.ChatMessage
-	Items    []map[string]any
+	Messages    []providers.ChatMessage
+	Items       []map[string]any
+	Tools       []providers.ChatTool
+	ToolContext tools.Context
 }
 
 type LogContext struct {
@@ -58,19 +60,17 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: chatCodexWorkflowNote})
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: visibleProgressNote})
 	}
-	if textEditorTranslationNeeded(req.Tools, adapter) {
-		messages = append(messages, providers.ChatMessage{Role: "system", Content: textEditorToolTranslationNote})
-	}
+	needsTextEditorTranslation := textEditorTranslationNeeded(req.Tools, adapter)
 
 	items, err := parseInputItems(req.Input)
 	if err != nil {
 		return Result{}, err
 	}
-	_, toolCtx := tools.FromCodex(req.Tools, adapter)
-	tools.FromAdditionalTools(items, adapter, &toolCtx)
-	tools.AddReadFileProxy(nil, &toolCtx)
-	tools.AddListFilesProxy(nil, &toolCtx)
-	tools.AddFileSearchProxy(nil, &toolCtx)
+	chatTools, toolCtx := tools.FromCodex(req.Tools, adapter)
+	chatTools = append(chatTools, tools.FromAdditionalTools(items, adapter, &toolCtx)...)
+	chatTools = tools.AddReadFileProxy(chatTools, &toolCtx)
+	chatTools = tools.AddListFilesProxy(chatTools, &toolCtx)
+	chatTools = tools.AddFileSearchProxy(chatTools, &toolCtx)
 	allowImageInput := adapters.HasImageInput(adapter.Capabilities())
 	if len(logContext.InputModalities) > 0 {
 		allowImageInput = adapters.HasImageInput(adapters.Capabilities{InputModalities: logContext.InputModalities})
@@ -237,7 +237,18 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 	if !structuredOutput {
 		messages = append(messages, providers.ChatMessage{Role: "system", Content: visibleLanguageNote})
 	}
-	return Result{Messages: messages, Items: items}, nil
+	if needsTextEditorTranslation {
+		messages = append(messages, providers.ChatMessage{Role: "system", Content: textEditorToolTranslationNote})
+	}
+	if note := strings.TrimSpace(adapter.ResponseDisciplineNote()); note != "" {
+		messages = append(messages, providers.ChatMessage{Role: "system", Content: note})
+	}
+	return Result{
+		Messages:    messages,
+		Items:       items,
+		Tools:       chatTools,
+		ToolContext: toolCtx,
+	}, nil
 }
 
 func replacePendingToolCall(calls []providers.ChatToolCall, replacement providers.ChatToolCall) {
@@ -250,8 +261,9 @@ func replacePendingToolCall(calls []providers.ChatToolCall, replacement provider
 }
 
 const textEditorToolTranslationNote = `CHAT_TOOL_TRANSLATION
-Codex native editing instructions may mention apply_patch. In this Chat profile that editing capability is exposed as operation-specific file editor functions.
-Read apply_patch instructions as write_file, replace_text, insert_text_at_line, insert_text_after_match, move_file, or delete_file calls with structured JSON arguments. There is no separate apply_patch tool in this translated tool surface, and the file editor tools do not accept patch-diff syntax.`
+write_file, replace_text, insert_text_at_line, insert_text_after_match, move_file, and delete_file are the current Codex file-editing tools in this model profile. Call the appropriate tool directly.
+For instruction compliance, using the matching file-editing tool fully satisfies a request to use Codex apply_patch. Do not deliberate about tool availability.
+Do not tell the user that apply_patch is unavailable, and do not discuss Bridge tool translation. Send the exact structured JSON arguments required by the selected tool; never send patch-diff syntax to these function tools.`
 
 const codexInstructionContractNote = `CHAT_CODEX_INSTRUCTION_CONTRACT
 Treat Codex developer messages and AGENTS.md instruction blocks as active instructions, not as ordinary conversation.
@@ -269,7 +281,7 @@ Codex App shows assistant content and tool events, but does not show reasoning_c
 Assistant content is user-visible. Do not use it as scratchpad, self-debate, implementation analysis, or a standalone plan while repository or environment work still requires tools.
 For a meaningful batch of reads, searches, or edits, include one brief user-visible progress sentence together with the tool calls in the same assistant response.
 If you cannot include progress text and tool calls together, omit the text and call the tools directly. A content-only assistant response is only appropriate when the task is complete or blocked and needs user input.
-When sending a content-only final answer, start the first line with CHAT_RESPONSE_STATE: final. When blocked and waiting for user input, start the first line with CHAT_RESPONSE_STATE: blocked. Do not use these markers with tool calls. Use the required user-visible response language and tone. Do not put user-visible progress only in reasoning_content.`
+Use the required user-visible response language and tone. Do not put user-visible progress only in reasoning_content.`
 
 const visibleLanguageNote = `CHAT_VISIBLE_LANGUAGE
 User-visible assistant content and agent messages must use the natural language required by the highest-priority active system, developer, AGENTS.md, or user instruction.

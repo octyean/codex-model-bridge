@@ -5,10 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,13 +34,43 @@ type ResponseStreamEvent struct {
 	Err  error
 }
 
+type HTTPError struct {
+	StatusCode int
+	Body       string
+	RetryAfter time.Duration
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("upstream status %d: %s", e.StatusCode, e.Body)
+}
+
 type OpenAIChatClient struct {
-	baseURL   string
-	chatURL   string
-	respURL   string
-	modelsURL string
-	apiKey    string
-	client    *http.Client
+	baseURL    string
+	chatURL    string
+	respURL    string
+	modelsURL  string
+	apiKey     string
+	client     *http.Client
+	observerMu sync.RWMutex
+	observer   func(RetryEvent)
+	requests   atomic.Int64
+	retried    atomic.Int64
+	failures   atomic.Int64
+}
+
+type RetryEvent struct {
+	Action            string
+	Method            string
+	URL               string
+	RetryCount        int
+	Wait              time.Duration
+	TotalWait         time.Duration
+	StatusCode        int
+	Error             string
+	TotalRequests     int64
+	RetriedRequests   int64
+	FailedRequests    int64
+	ErrorRatePermille int64
 }
 
 type PreparedChatRequestStats struct {
@@ -57,6 +92,12 @@ func NewOpenAIChatClient(baseURL string, apiKey string) *OpenAIChatClient {
 			Timeout: 10 * time.Minute,
 		},
 	}
+}
+
+func (c *OpenAIChatClient) SetRetryObserver(observer func(RetryEvent)) {
+	c.observerMu.Lock()
+	c.observer = observer
+	c.observerMu.Unlock()
 }
 
 type ModelsResponse struct {
@@ -191,19 +232,11 @@ func (c *OpenAIChatClient) CreateResponse(ctx context.Context, req map[string]an
 }
 
 func (c *OpenAIChatClient) ListModels(ctx context.Context) (*ModelsResponse, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.modelsURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	c.applyHeaders(httpReq)
-	resp, err := c.client.Do(httpReq)
+	resp, err := c.doWithRetry(ctx, http.MethodGet, c.modelsURL, nil, "application/json")
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, readHTTPError(resp)
-	}
 	var out ModelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
@@ -218,18 +251,9 @@ func (c *OpenAIChatClient) StreamResponse(ctx context.Context, req map[string]an
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.respURL, bytes.NewReader(body))
+	resp, err := c.doWithRetry(ctx, http.MethodPost, c.respURL, body, "text/event-stream")
 	if err != nil {
 		return nil, err
-	}
-	c.applyHeaders(httpReq)
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		return nil, readHTTPError(resp)
 	}
 
 	out := make(chan ResponseStreamEvent, 32)
@@ -271,18 +295,9 @@ func (c *OpenAIChatClient) Stream(ctx context.Context, req ChatCompletionRequest
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatURL, bytes.NewReader(body))
+	resp, err := c.doWithRetry(ctx, http.MethodPost, c.chatURL, body, "text/event-stream")
 	if err != nil {
 		return nil, err
-	}
-	c.applyHeaders(httpReq)
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		return nil, readHTTPError(resp)
 	}
 
 	out := make(chan StreamEvent, 32)
@@ -344,19 +359,11 @@ func (c *OpenAIChatClient) doJSON(ctx context.Context, req ChatCompletionRequest
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	c.applyHeaders(httpReq)
-	resp, err := c.client.Do(httpReq)
+	resp, err := c.doWithRetry(ctx, http.MethodPost, c.chatURL, body, "application/json")
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return readHTTPError(resp)
-	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
@@ -365,31 +372,167 @@ func (c *OpenAIChatClient) doResponseJSON(ctx context.Context, req map[string]an
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.respURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	c.applyHeaders(httpReq)
-	resp, err := c.client.Do(httpReq)
+	resp, err := c.doWithRetry(ctx, http.MethodPost, c.respURL, body, "application/json")
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return readHTTPError(resp)
-	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-func (c *OpenAIChatClient) applyHeaders(req *http.Request) {
+func (c *OpenAIChatClient) applyHeaders(req *http.Request, accept string) {
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
+}
+
+func (c *OpenAIChatClient) doWithRetry(ctx context.Context, method string, url string, body []byte, accept string) (*http.Response, error) {
+	c.requests.Add(1)
+	retryCount := 0
+	totalWait := time.Duration(0)
+	for attempt := 0; attempt < 2; attempt++ {
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, reader)
+		if err != nil {
+			return nil, err
+		}
+		c.applyHeaders(req, accept)
+		resp, err := c.client.Do(req)
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if retryCount > 0 {
+				c.emitRetryEvent(RetryEvent{
+					Action:     "recovered",
+					Method:     method,
+					URL:        url,
+					RetryCount: retryCount,
+					TotalWait:  totalWait,
+				})
+			}
+			return resp, nil
+		}
+
+		var requestErr error
+		if err != nil {
+			requestErr = err
+		} else {
+			requestErr = readHTTPError(resp)
+			_ = resp.Body.Close()
+		}
+		if attempt == 1 || !retryableUpstreamError(ctx, requestErr) {
+			c.failures.Add(1)
+			c.emitRetryEvent(RetryEvent{
+				Action:     "failed",
+				Method:     method,
+				URL:        url,
+				RetryCount: retryCount,
+				TotalWait:  totalWait,
+				StatusCode: upstreamStatusCode(requestErr),
+				Error:      requestErr.Error(),
+			})
+			return nil, requestErr
+		}
+		delay := retryDelay(requestErr)
+		if retryCount == 0 {
+			c.retried.Add(1)
+		}
+		retryCount++
+		totalWait += delay
+		c.emitRetryEvent(RetryEvent{
+			Action:     "retry",
+			Method:     method,
+			URL:        url,
+			RetryCount: retryCount,
+			Wait:       delay,
+			TotalWait:  totalWait,
+			StatusCode: upstreamStatusCode(requestErr),
+			Error:      requestErr.Error(),
+		})
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("upstream request retry exhausted")
+}
+
+func (c *OpenAIChatClient) emitRetryEvent(event RetryEvent) {
+	event.TotalRequests = c.requests.Load()
+	event.RetriedRequests = c.retried.Load()
+	event.FailedRequests = c.failures.Load()
+	if event.TotalRequests > 0 {
+		event.ErrorRatePermille = event.FailedRequests * 1000 / event.TotalRequests
+	}
+	c.observerMu.RLock()
+	observer := c.observer
+	c.observerMu.RUnlock()
+	if observer != nil {
+		observer(event)
+	}
+}
+
+func upstreamStatusCode(err error) int {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode
+	}
+	return 0
 }
 
 func readHTTPError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	return &HTTPError{
+		StatusCode: resp.StatusCode,
+		Body:       strings.TrimSpace(string(data)),
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+	}
+}
+
+func retryableUpstreamError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		switch httpErr.StatusCode {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+func retryDelay(err error) time.Duration {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
+		if httpErr.RetryAfter > 2*time.Second {
+			return 2 * time.Second
+		}
+		return httpErr.RetryAfter
+	}
+	return 250 * time.Millisecond
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if retryAt, err := http.ParseTime(value); err == nil {
+		return time.Until(retryAt)
+	}
+	return 0
 }
 
 func chatCompletionsURL(baseURL string) string {

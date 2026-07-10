@@ -58,6 +58,10 @@ export CODEX_BRIDGE_LOG_STREAM_EVENTS=1
 
 `sessions/index.jsonl` 用来从会话 ID、请求 ID、模型和用户最后一段提示词反查。拿到 Codex 的 `thread_id` 后，优先看对应目录。
 
+服务启动时会按 `[diagnostics]` 清理 Bridge 自己管理的 session 目录，默认保留 14 天、总量不超过 1GB。启动日志 `session_logs_pruned` 会记录删除目录数和释放字节数。清理范围只限 `sessions/<session_id>/`，不会碰同级全局 JSONL 或用户其他目录。
+
+全局 `tool-calls.jsonl`、`incidents.jsonl`、`recoveries.jsonl` 和 `sessions/index.jsonl` 会在达到 64MB 时轮转，保留 3 份历史文件。session 目录仍按上面的时间和总容量规则清理，两套策略互不替代。
+
 会话日志默认会把大字段压成摘要，保留 hash、字节数、预览和关键计数；完整上游请求在 `upstream-requests/*.json.gz` 里按需查。dump 目录会自动清理，默认最多保留 7 天或 512MiB，避免长会话把磁盘打满。
 
 `prompt-stream-events.jsonl` 只在设置 `CODEX_BRIDGE_LOG_STREAM_EVENTS=1` 时保存上游流式原始 chunk；`prompt-responses.jsonl` 保存同一轮流式响应聚合后的 message、事件计数或上游失败对象，排查时先看聚合，再按需开启 chunk 细查时序。`bridge-responses.jsonl` 保存 Bridge 最终返回给 Codex 的成功响应或失败对象；过大的响应会在会话日志中转成摘要。
@@ -100,15 +104,19 @@ export CODEX_BRIDGE_LOG_STREAM_EVENTS=1
 
 这个 Broker 不限制 MCP 或 Responses 原生工具的能力边界。未知工具默认允许，所有工具都走同一套签名账本。它不判断用户“该用哪个工具”，只阻止同一工具签名在没有进展后继续原样重放。停止时，bridge 会让 Codex 侧执行一个本地载体命令，但在上游 Chat 历史里会还原成“原工具调用 + 原工具结果”，避免模型把 `exec_command` 当成下一步策略。
 
-Chat fallback 的工具适配边界：
+工具适配边界：
 
-| 工具来源 | OpenAI Responses 直转 | Chat fallback |
+| 工具来源 | Native Responses | Projected Responses / Chat Completions |
 | --- | --- | --- |
-| `function`、`custom`、`apply_patch`、`tool_search`、`local_shell`、namespace MCP function | 由上游 Responses 协议处理 | bridge 转换为 Chat tools，再投射回 Codex Responses item |
+| `function`、`custom`、`apply_patch`、`tool_search`、`local_shell`、namespace MCP function | 由上游 Responses 协议处理 | bridge 转换为 function tools，再投射回 Codex Responses item |
 | MCP resource proxy、bridge 内置 `web_search` proxy、`file_search` -> `search_files` proxy | 不需要直转 | bridge 转成本地可执行工具或代理工具 |
-| `computer`、`image_generation`、`code_interpreter` 等 hosted tools | 上游支持时原样直转 | 不能在 Chat fallback 中凭空执行，只能记录为 unsupported 并提示可替代路径 |
+| `computer`、`image_generation`、`code_interpreter` 等 hosted tools | 上游支持时原样直转 | 不能凭空执行，只能记录为 unsupported 并提示可替代路径 |
 
-Chat fallback 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 `read_file`、`list_files` 和 `search_files`。这三个是给第三方 Chat 模型看的逻辑工具，返回 Codex Harness 时会投影成原生 `exec_command`；App 因此显示 `command_execution`。需要读取完整文件时继续用 `read_file`，不要把本地路径伪装成 MCP resource。
+Projected Responses 和 Chat Completions 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 `read_file`、`list_files` 和 `search_files`。这三个是给第三方模型看的逻辑工具，返回 Codex Harness 时会投影成原生 `exec_command`；App 因此显示 `command_execution`。需要读取完整文件时继续用 `read_file`，不要把本地路径伪装成 MCP resource。
+
+Bridge 内置 `web_search` 需要服务端执行和模型续答。Projected Responses 会在内部执行 `codex_web_search`，把结果作为 `function_call_output` 再次提交给 `/responses`；私有 function call 不会泄漏给 Codex Harness。对应日志阶段是 `projected_internal_tool_followup`。
+
+`codex-requests.jsonl` 会记录 `execution_mode`、`upstream_protocol`、`supports_responses_options` 和 `supports_responses_structured_output`。排查协议选择时先看这四个字段，再看 `prompt-requests.jsonl` 的实际 stage。
 
 `tool_search` 只用于发现可调用工具，不读取本地文件或 MCP resource。搜索意图已经被当前可见工具覆盖时，历史回灌只保留对应工具提示，不附带低相关工具列表。
 
@@ -119,6 +127,9 @@ Chat fallback 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 
 | `tool_call_frame` | 工具调用三视图，包含 `model_arguments`、`canonical_arguments`、`runtime_arguments`、`transformer`、`argument_mode`、`schema_quality` |
 | `tool_broker_decision` | Broker 对模型工具调用的运行时决策，包含 `action`、`reason`、`profiled_tool`、`progress_key` |
 | `runtime_outcome` | 工具输出观察结果，挂在 `tool_output` 中，包含 `ok`、`category`、`progress`、`output_hash` |
+| `upstream_retry_status` | 上游请求重试和累计状态，包含 `action`、`retry_count`、`wait_ms`、`total_wait_ms`、`status_code`、`total_requests`、`retried_requests`、`failed_requests`、`error_rate_permille` |
+
+`upstream_retry_status` 的 `action=retry` 表示本次请求仍会重试，`action=failed` 表示重试预算已经耗尽。排查偶发 502 时先按 `upstream_model` 和时间查看这条事件，再进入对应 session 的 `prompt-responses.jsonl` 和请求 dump。
 
 排查工具重复调用时，优先看：
 

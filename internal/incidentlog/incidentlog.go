@@ -49,7 +49,7 @@ func Write(event string, record map[string]any) {
 	}
 	record["time"] = time.Now().Format(time.RFC3339Nano)
 	record["event"] = event
-	diagnostics.WriteJSONL(path, record)
+	diagnostics.WriteGlobalJSONL(path, record)
 	if sessionID := recordSessionID(record); sessionID != "" {
 		diagnostics.WriteSessionRecord(path, sessionID, "incidents.jsonl", record)
 	}

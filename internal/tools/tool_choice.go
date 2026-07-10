@@ -49,9 +49,18 @@ func SoftRequiredToolChoiceNote(value any, supportsRequired bool) string {
 	if supportsRequired {
 		return ""
 	}
+	if value == "required" {
+		return "CHAT_REQUIRED_TOOL_CHOICE\nThis Codex turn requires one of the available tools. Call an appropriate tool instead of answering in normal text. Continue from the tool result in the next turn."
+	}
 	obj, ok := value.(map[string]any)
 	toolType, _ := obj["type"].(string)
-	if !ok || toolType != "function" {
+	if !ok {
+		return ""
+	}
+	if toolType == "allowed_tools" && obj["mode"] == "required" {
+		return "CHAT_REQUIRED_TOOL_CHOICE\nThis Codex turn requires one of the allowed tools. Call an appropriate allowed tool instead of answering in normal text. Continue from the tool result in the next turn."
+	}
+	if toolType != "function" {
 		return ""
 	}
 	name := choiceFunctionName(obj)
@@ -118,6 +127,9 @@ func (ctx Context) upstreamName(name string) (string, bool) {
 }
 
 func ApplyToolChoice(chatTools []providers.ChatTool, value any, supportsRequired bool) ([]providers.ChatTool, any) {
+	if value == "required" && !supportsRequired {
+		return chatTools, "auto"
+	}
 	obj, ok := value.(map[string]any)
 	if !ok || len(chatTools) == 0 {
 		return chatTools, value
@@ -147,6 +159,9 @@ func ApplyToolChoice(chatTools []providers.ChatTool, value any, supportsRequired
 		}
 		mode, _ := obj["mode"].(string)
 		if mode != "required" {
+			mode = "auto"
+		}
+		if !supportsRequired {
 			mode = "auto"
 		}
 		return filterChatTools(chatTools, names), mode

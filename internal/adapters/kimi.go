@@ -41,6 +41,18 @@ func (kimiAdapter) PrepareChatRequest(req providers.ChatCompletionRequest) provi
 	return req
 }
 
+func (kimiAdapter) PrepareResponseMessages(messages []providers.ChatMessage) []providers.ChatMessage {
+	return repairToolPairing(messages)
+}
+
 func (kimiAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
 	return req
+}
+
+func (kimiAdapter) ResponseDisciplineNote() string {
+	return `KIMI_CODEX_RESPONSE_DISCIPLINE
+When an active instruction says the final response must contain only or exactly specific text, output exactly that text with no prefix, suffix, verification summary, or restatement of completed work.
+Do not weaken an exact final-response constraint merely because the requested repository work succeeded.
+When read_file output contains READ_FILE_RANGE_LIMIT_REACHED, the file is not fully read. Continue from the required start_line before claiming full-file review or deriving conclusions from the partial range.
+After a failed command, check, test, or incomplete edit, do not end the turn with a content-only progress message. Call the next corrective tool in the same response unless user input is genuinely required.`
 }

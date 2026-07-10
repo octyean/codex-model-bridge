@@ -18,7 +18,7 @@ func TestVisibleProgressNoteKeepsBriefProgressWithToolCalls(t *testing.T) {
 	if !strings.Contains(visibleProgressNote, "A content-only assistant response is only appropriate when the task is complete or blocked and needs user input") {
 		t.Fatalf("visible progress note must reserve content-only responses for final or blocked states")
 	}
-	if !strings.Contains(visibleProgressNote, "CHAT_RESPONSE_STATE: final") || !strings.Contains(visibleProgressNote, "CHAT_RESPONSE_STATE: blocked") {
-		t.Fatalf("visible progress note must require machine-readable content-only states")
+	if strings.Contains(visibleProgressNote, "CHAT_RESPONSE_STATE") {
+		t.Fatalf("visible progress note must not require private response markers")
 	}
 }

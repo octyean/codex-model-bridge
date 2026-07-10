@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"codex-bridge/internal/buildinfo"
 	base "codex-bridge/internal/capabilities"
 )
 
@@ -84,7 +85,7 @@ func (p *MCPProvider) initialize(ctx context.Context) error {
 		"params": map[string]any{
 			"protocolVersion": "2025-03-26",
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "codex-bridge", "version": "0.4.2"},
+			"clientInfo":      map[string]any{"name": "codex-bridge", "version": buildinfo.Version},
 		},
 	})
 	if err != nil {

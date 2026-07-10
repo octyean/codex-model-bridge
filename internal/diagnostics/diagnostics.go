@@ -4,17 +4,23 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 )
 
 const (
-	SessionInlineMaxBytes = 16 * 1024
-	DefaultPreviewRunes   = 1200
+	SessionInlineMaxBytes  = 16 * 1024
+	DefaultPreviewRunes    = 1200
+	GlobalJSONLMaxBytes    = 64 * 1024 * 1024
+	GlobalJSONLRetainFiles = 3
 )
+
+var globalJSONLMu sync.Mutex
 
 func CheckJSONL(path string) (string, error) {
 	if path == "" {
@@ -49,6 +55,38 @@ func WriteJSONL(path string, record map[string]any) {
 	_, _ = file.Write(append(data, '\n'))
 }
 
+func WriteGlobalJSONL(path string, record map[string]any) {
+	if path == "" {
+		return
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	globalJSONLMu.Lock()
+	defer globalJSONLMu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	if info, err := os.Stat(path); err == nil && info.Size()+int64(len(data)+1) > GlobalJSONLMaxBytes {
+		rotateGlobalJSONL(path)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.Write(append(data, '\n'))
+}
+
+func rotateGlobalJSONL(path string) {
+	_ = os.Remove(path + "." + fmt.Sprint(GlobalJSONLRetainFiles))
+	for index := GlobalJSONLRetainFiles - 1; index >= 1; index-- {
+		_ = os.Rename(path+"."+fmt.Sprint(index), path+"."+fmt.Sprint(index+1))
+	}
+	_ = os.Rename(path, path+".1")
+}
+
 func WriteSessionRecord(basePath string, sessionID string, fileName string, record map[string]any) {
 	path := SessionLogPath(basePath, sessionID, fileName)
 	if path == "" {
@@ -61,7 +99,7 @@ func WriteSessionIndex(basePath string, record map[string]any) {
 	if basePath == "" {
 		return
 	}
-	WriteJSONL(filepath.Join(filepath.Dir(basePath), "sessions", "index.jsonl"), record)
+	WriteGlobalJSONL(filepath.Join(filepath.Dir(basePath), "sessions", "index.jsonl"), record)
 }
 
 func SessionLogPath(basePath string, sessionID string, fileName string) string {
