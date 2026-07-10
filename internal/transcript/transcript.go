@@ -266,7 +266,10 @@ Do not create scratch files for analysis, drafts, or temporary notes unless the 
 
 const visibleProgressNote = `CHAT_VISIBLE_PROGRESS
 Codex App shows assistant content and tool events, but does not show reasoning_content.
-Before a meaningful batch of tool calls, write a brief assistant content sentence explaining what you are about to do. Group related reads, searches, or edits into one sentence. Use the required user-visible response language and tone. Do not put user-visible progress only in reasoning_content.`
+Assistant content is user-visible. Do not use it as scratchpad, self-debate, implementation analysis, or a standalone plan while repository or environment work still requires tools.
+For a meaningful batch of reads, searches, or edits, include one brief user-visible progress sentence together with the tool calls in the same assistant response.
+If you cannot include progress text and tool calls together, omit the text and call the tools directly. A content-only assistant response is only appropriate when the task is complete or blocked and needs user input.
+When sending a content-only final answer, start the first line with CHAT_RESPONSE_STATE: final. When blocked and waiting for user input, start the first line with CHAT_RESPONSE_STATE: blocked. Do not use these markers with tool calls. Use the required user-visible response language and tone. Do not put user-visible progress only in reasoning_content.`
 
 const visibleLanguageNote = `CHAT_VISIBLE_LANGUAGE
 User-visible assistant content and agent messages must use the natural language required by the highest-priority active system, developer, AGENTS.md, or user instruction.

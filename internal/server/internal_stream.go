@@ -74,12 +74,29 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 	}
 	totalUsage = addUsage(totalUsage, usage)
 	sequence := 0
+	contentOnlyRetried := false
 	for {
-		trace.emit(writer, chatMessageFromStreamState(finalState), toolCtx)
-		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, chatMessageFromStreamState(finalState), toolCtx, adapter, logCtx)
+		message := chatMessageFromStreamState(finalState)
+		trace.emit(writer, message, toolCtx)
+		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, message, toolCtx, adapter, logCtx)
 		if !ok {
+			if !contentOnlyRetried && contentOnlyNeedsRetry(message, toolCtx) {
+				contentOnlyRetried = true
+				retryReq := contentOnlyRetryRequest(currentReq, message)
+				sequence++
+				s.writePromptRequest(sessionID, requestID, model, retryReq.Model, profile, "content_only_retry", providers.PreparedChatRequest(retryReq), map[string]any{"sequence": sequence, "stream": true, "internal_tools": true})
+				shape = optimization.CaptureShape(retryReq)
+				currentReq = retryReq
+				finalState, usage, err = s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "content_only_retry", true, localResolver, false)
+				if err != nil {
+					return nil, shape, totalUsage, err
+				}
+				totalUsage = addUsage(totalUsage, usage)
+				continue
+			}
 			return finalState, shape, totalUsage, nil
 		}
+		contentOnlyRetried = false
 		sequence++
 		s.writePromptRequest(sessionID, requestID, model, followUpReq.Model, profile, "internal_tool_followup", providers.PreparedChatRequest(followUpReq), map[string]any{"sequence": sequence, "stream": true})
 		shape = optimization.CaptureShape(followUpReq)

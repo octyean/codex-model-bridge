@@ -586,6 +586,9 @@ func reasoningLevelsForModel(model ModelConfig, enabled bool) []ReasoningEffortP
 	if enabled {
 		levels = append(levels, ReasoningEffortPreset{Effort: "xhigh", Description: "Maximum reasoning for the hardest coding tasks"})
 	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model.UpstreamModel)), "gpt-5.6") {
+		levels = append(levels, ReasoningEffortPreset{Effort: "max", Description: "Maximum reasoning for the hardest GPT-5.6 tasks"})
+	}
 	return levels
 }
 

@@ -240,20 +240,27 @@ func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescri
 		FailureKind:   string(failureKind),
 	})
 	record := map[string]any{
-		"time":             time.Now().Format(time.RFC3339Nano),
-		"event":            "tool_output",
-		"call_id":          callID,
-		"tool":             descriptor.Name,
-		"kind":             descriptor.Kind,
-		"original_type":    descriptor.OriginalType,
-		"raw_arguments":    rawArguments,
-		"failure_kind":     failureKind,
-		"raw_output":       rawOutput,
-		"formatted_output": formattedOutput,
-		"runtime_outcome":  outcome,
+		"time":            time.Now().Format(time.RFC3339Nano),
+		"event":           "tool_output",
+		"call_id":         callID,
+		"tool":            descriptor.Name,
+		"kind":            descriptor.Kind,
+		"original_type":   descriptor.OriginalType,
+		"raw_arguments":   rawArguments,
+		"failure_kind":    failureKind,
+		"runtime_outcome": outcome,
 	}
 	level := diagnosticLevel(failureKind, outcome)
 	record["diagnostic_level"] = level
+	if level == "ok" {
+		record["raw_output_summary"] = diagnostics.TextSummary(rawOutput, 1200)
+		if formattedOutput != rawOutput {
+			record["formatted_output_summary"] = diagnostics.TextSummary(formattedOutput, 1200)
+		}
+	} else {
+		record["raw_output"] = rawOutput
+		record["formatted_output"] = formattedOutput
+	}
 	if modelCall != nil {
 		record["model_call"] = modelCall
 		if namespace, _ := modelCall["namespace"].(string); strings.TrimSpace(namespace) != "" {

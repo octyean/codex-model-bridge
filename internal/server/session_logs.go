@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os"
+	"strings"
 	"time"
 
 	"codex-bridge/internal/diagnostics"
@@ -20,6 +22,7 @@ func (s *Server) writeSessionLog(sessionID string, fileName string, record map[s
 	if _, ok := record["time"]; !ok {
 		record["time"] = time.Now().Format(time.RFC3339Nano)
 	}
+	record = diagnostics.CompactLargeFields(record, diagnostics.SessionInlineMaxBytes, "body")
 	diagnostics.WriteSessionRecord(path, sessionID, fileName, record)
 }
 
@@ -50,30 +53,35 @@ func (s *Server) writeBridgeFailure(sessionID string, requestID string, model st
 }
 
 func (s *Server) writePromptStreamEvent(sessionID string, requestID string, model string, upstreamModel string, profile string, stage string, sequence int, body any) {
+	if !logStreamEvents() {
+		return
+	}
 	record := sessionLogRecord("prompt_stream_event", requestID, model, upstreamModel, profile, stage, body, map[string]any{"sequence": sequence})
 	s.writeSessionLog(sessionID, "prompt-stream-events.jsonl", record)
 }
 
 func (s *Server) writeToolCatalog(sessionID string, requestID string, model string, upstreamModel string, profile string, chatTools []providers.ChatTool, toolCtx tools.Context, toolChoice any) {
 	entries := make([]map[string]any, 0, len(chatTools))
+	names := make([]string, 0, len(chatTools))
 	for _, tool := range chatTools {
 		name := tool.Function.Name
+		names = append(names, name)
 		entry := toolCtx.Entry(name)
 		entries = append(entries, map[string]any{
-			"name":           name,
-			"description":    tool.Function.Description,
-			"parameters":     tool.Function.Parameters,
-			"kind":           entry.Kind(),
-			"original_name":  entry.OriginalName(),
-			"original_type":  entry.OriginalType(),
-			"namespace":      entry.Namespace,
-			"side_effect":    entry.Descriptor.SideEffect,
-			"argument_mode":  entry.ArgumentMode,
-			"schema_quality": entry.SchemaQuality,
-			"contract_id":    entry.ContractID(),
+			"name":                name,
+			"description_summary": diagnostics.TextSummary(tool.Function.Description, 240),
+			"parameters_summary":  diagnostics.ValueSummary(tool.Function.Parameters, 400),
+			"kind":                entry.Kind(),
+			"original_name":       entry.OriginalName(),
+			"original_type":       entry.OriginalType(),
+			"namespace":           entry.Namespace,
+			"side_effect":         entry.Descriptor.SideEffect,
+			"argument_mode":       entry.ArgumentMode,
+			"schema_quality":      entry.SchemaQuality,
+			"contract_id":         entry.ContractID(),
 		})
 	}
-	record := sessionLogRecord("tool_catalog", requestID, model, upstreamModel, profile, "", entries, map[string]any{"tool_choice": toolChoice})
+	record := sessionLogRecord("tool_catalog", requestID, model, upstreamModel, profile, "", entries, map[string]any{"tool_choice": toolChoice, "tool_count": len(chatTools), "tool_names": names})
 	s.writeSessionLog(sessionID, "tool-catalog.jsonl", record)
 }
 
@@ -106,4 +114,13 @@ func failureLogBody(message string, extra map[string]any) map[string]any {
 		body[key] = value
 	}
 	return body
+}
+
+func logStreamEvents() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_BRIDGE_LOG_STREAM_EVENTS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

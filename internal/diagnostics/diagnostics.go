@@ -6,8 +6,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
+)
+
+const (
+	SessionInlineMaxBytes = 16 * 1024
+	DefaultPreviewRunes   = 1200
 )
 
 func CheckJSONL(path string) (string, error) {
@@ -85,6 +91,113 @@ func SafeName(name string) string {
 }
 
 func Hash(text string) string {
-	sum := sha256.Sum256([]byte(text))
+	return HashBytes([]byte(text))
+}
+
+func HashBytes(data []byte) string {
+	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])
+}
+
+func CompactLargeFields(record map[string]any, maxBytes int, fields ...string) map[string]any {
+	if record == nil {
+		return nil
+	}
+	out := make(map[string]any, len(record)+len(fields))
+	for key, value := range record {
+		out[key] = value
+	}
+	for _, field := range fields {
+		value, ok := out[field]
+		if !ok || value == nil {
+			continue
+		}
+		data, err := json.Marshal(value)
+		if err != nil || len(data) <= maxBytes {
+			continue
+		}
+		out[field+"_summary"] = summaryFromJSON(value, data, DefaultPreviewRunes)
+		delete(out, field)
+	}
+	return out
+}
+
+func ValueSummary(value any, previewRunes int) map[string]any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{
+			"type": "unserializable",
+		}
+	}
+	return summaryFromJSON(value, data, previewRunes)
+}
+
+func TextSummary(text string, previewRunes int) map[string]any {
+	runes := []rune(text)
+	out := map[string]any{
+		"type":  "string",
+		"chars": len(runes),
+		"bytes": len([]byte(text)),
+		"hash":  Hash(text),
+	}
+	if previewRunes > 0 {
+		out["preview"] = previewRunesText(runes, previewRunes)
+	}
+	return out
+}
+
+func summaryFromJSON(value any, data []byte, previewRunes int) map[string]any {
+	out := map[string]any{
+		"type":  valueType(value),
+		"bytes": len(data),
+		"hash":  HashBytes(data),
+	}
+	switch v := value.(type) {
+	case []any:
+		out["items"] = len(v)
+	case map[string]any:
+		out["keys"] = sortedKeys(v, 20)
+	}
+	if previewRunes > 0 {
+		out["preview"] = previewRunesText([]rune(string(data)), previewRunes)
+	}
+	return out
+}
+
+func valueType(value any) string {
+	switch value.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "string"
+	case bool:
+		return "bool"
+	case float64, float32, int, int64, int32, uint, uint64, uint32:
+		return "number"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	default:
+		return "object"
+	}
+}
+
+func sortedKeys(values map[string]any, limit int) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if limit > 0 && len(keys) > limit {
+		return keys[:limit]
+	}
+	return keys
+}
+
+func previewRunesText(runes []rune, limit int) string {
+	if limit <= 0 || len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit])
 }

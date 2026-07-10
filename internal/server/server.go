@@ -186,7 +186,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	shape := optimization.CaptureShape(chatReq)
 	stats := providers.ChatRequestStats(chatReq)
 	preparedRequest := providers.PreparedChatRequest(chatReq)
-	s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, "initial", preparedRequest, map[string]any{
+	requestBodyHash := requestdump.Hash(preparedRequest)
+	promptExtra := map[string]any{
 		"message_count":     stats.MessageCount,
 		"tool_count":        stats.ToolCount,
 		"body_bytes":        stats.BodyBytes,
@@ -198,9 +199,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		"prefix_hash":       shape.PrefixHash,
 		"system_hash":       shape.SystemHash,
 		"tools_hash":        shape.ToolsHash,
-		"request_body_hash": requestdump.Hash(preparedRequest),
-	})
-	s.writeToolCatalog(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, chatTools, toolCtx, toolChoice)
+		"request_body_hash": requestBodyHash,
+	}
 
 	s.logger.Info("request_started",
 		slog.String("request_id", requestID),
@@ -226,12 +226,15 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		)
 	} else if path != "" {
 		dumpPath = path
+		promptExtra["upstream_request_dump"] = path
 		s.logger.Info("upstream_request_dumped",
 			slog.String("request_id", requestID),
 			slog.String("path", path),
-			slog.String("body_hash", requestdump.Hash(preparedRequest)),
+			slog.String("body_hash", requestBodyHash),
 		)
 	}
+	s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, "initial", preparedRequest, promptExtra)
+	s.writeToolCatalog(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, chatTools, toolCtx, toolChoice)
 
 	if req.Stream {
 		if s.hasInternalTools(toolCtx) {
@@ -280,6 +283,25 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if contentOnlyNeedsRetry(resp.Choices[0].Message, toolCtx) {
+		retryReq := contentOnlyRetryRequest(chatReq, resp.Choices[0].Message)
+		shape = optimization.CaptureShape(retryReq)
+		s.writePromptRequest(sessionID, requestID, req.Model, retryReq.Model, profileName, "content_only_retry", providers.PreparedChatRequest(retryReq), map[string]any{"stream": false})
+		retryResp, err := provider.Create(r.Context(), retryReq)
+		if err != nil {
+			s.logger.Error("content_only_retry_failed", slog.String("request_id", requestID), slog.String("error", err.Error()))
+			extra := map[string]any{"stream": false, "stage": "content_only_retry"}
+			s.writePromptFailure(sessionID, requestID, req.Model, retryReq.Model, profileName, "content_only_retry", err.Error(), extra)
+			s.writeBridgeFailure(sessionID, requestID, req.Model, retryReq.Model, profileName, http.StatusBadGateway, err.Error(), extra)
+			incidentlog.Write("content_only_retry_error", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"error": err.Error(), "stream": false}))
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		s.writePromptResponse(sessionID, requestID, req.Model, retryReq.Model, profileName, "content_only_retry", retryResp, nil)
+		if len(retryResp.Choices) > 0 {
+			resp = retryResp
+		}
+	}
 	items := responseItemsFromMessage(r.Context(), resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger, s.localToolResultResolver(logCtx, toolCtx))
 	items = enforceStructuredOutput(items, chatReq.ResponseFormat)
 	usage := providers.NormalizeUsage(resp.Usage)
@@ -315,10 +337,11 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 	upstreamReq := cloneResponseRequest(req.Raw)
 	upstreamReq["model"] = modelCfg.UpstreamModel
 	upstreamReq = adapter.PrepareResponseRequest(upstreamReq)
-	s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", upstreamReq, map[string]any{
+	requestBodyHash := requestdump.Hash(upstreamReq)
+	promptExtra := map[string]any{
 		"stream":            req.Stream,
-		"request_body_hash": requestdump.Hash(upstreamReq),
-	})
+		"request_body_hash": requestBodyHash,
+	}
 	if path, err := requestdump.Write(requestID, req.Model, adapter.Name(), upstreamReq); err != nil {
 		s.logger.Warn("upstream_request_dump_failed",
 			slog.String("request_id", requestID),
@@ -327,12 +350,14 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 		)
 	} else if path != "" {
 		dumpPath = path
+		promptExtra["upstream_request_dump"] = path
 		s.logger.Info("upstream_request_dumped",
 			slog.String("request_id", requestID),
 			slog.String("path", path),
-			slog.String("body_hash", requestdump.Hash(upstreamReq)),
+			slog.String("body_hash", requestBodyHash),
 		)
 	}
+	s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", upstreamReq, promptExtra)
 	if req.Stream {
 		stream, err := provider.StreamResponse(r.Context(), upstreamReq)
 		if err != nil {
@@ -551,14 +576,38 @@ streamLoop:
 			_ = writer.Event(responseInProgressEvent(respID, createdAt, req.Model))
 		}
 	}
-	items := state.Done()
-	items = enforceStructuredOutput(items, chatReq.ResponseFormat)
 	s.writePromptResponse(sessionID, requestID, req.Model, chatReq.Model, profile, "initial", map[string]any{
 		"stream":      true,
 		"chunk_count": streamSeq,
 		"message":     chatMessageFromStreamState(state),
 		"usage":       usage,
 	}, nil)
+	if contentOnlyNeedsRetry(chatMessageFromStreamState(state), toolCtx) {
+		retryReq := contentOnlyRetryRequest(chatReq, chatMessageFromStreamState(state))
+		shape = optimization.CaptureShape(retryReq)
+		s.writePromptRequest(sessionID, requestID, req.Model, retryReq.Model, profile, "content_only_retry", providers.PreparedChatRequest(retryReq), map[string]any{"stream": true})
+		retryState, retryUsage, err := s.streamVisibleMessage(r, writer, respID, createdAt, retryReq, provider, toolCtx, adapter, requestID, sessionID, req.Model, profile, "content_only_retry", false, s.localToolResultResolver(logCtx, toolCtx), false)
+		if err != nil {
+			if requestCanceled(r, err) {
+				return
+			}
+			extra := map[string]any{"stream": true, "stage": "content_only_retry"}
+			s.writeBridgeFailure(sessionID, requestID, req.Model, retryReq.Model, profile, http.StatusBadGateway, err.Error(), extra)
+			incidentlog.Write("content_only_retry_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": err.Error(), "stream": true}))
+			_ = writer.Event(map[string]any{
+				"type": "response.failed",
+				"response": map[string]any{
+					"id":    respID,
+					"error": map[string]any{"message": err.Error(), "type": "server_error"},
+				},
+			})
+			return
+		}
+		usage = addUsage(usage, retryUsage)
+		state = retryState
+	}
+	items := state.Done()
+	items = enforceStructuredOutput(items, chatReq.ResponseFormat)
 	if emptyOutput(items) {
 		incidentlog.Write("empty_stream_response", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"stream": true, "output": outputSummary(items, usage)}))
 	}

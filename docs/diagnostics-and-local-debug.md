@@ -23,6 +23,12 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 
 `CODEX_BRIDGE_INCIDENT_LOG` 可以不显式设置。未设置时，bridge 会优先从 `CODEX_BRIDGE_TOOL_LOG` 推导出同目录下的 `incidents.jsonl`。
 
+默认不会逐条保存上游流式 chunk。只有排查流式时序问题时，再临时设置：
+
+```bash
+export CODEX_BRIDGE_LOG_STREAM_EVENTS=1
+```
+
 ## 日志文件
 
 全局日志：
@@ -31,7 +37,7 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 ~/.codex-bridge/logs/tool-calls.jsonl
 ~/.codex-bridge/logs/recoveries.jsonl
 ~/.codex-bridge/logs/incidents.jsonl
-~/.codex-bridge/logs/upstream-requests/
+~/.codex-bridge/logs/upstream-requests/*.json.gz
 ```
 
 按 Codex 会话拆分后的日志：
@@ -52,7 +58,9 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 
 `sessions/index.jsonl` 用来从会话 ID、请求 ID、模型和用户最后一段提示词反查。拿到 Codex 的 `thread_id` 后，优先看对应目录。
 
-`prompt-stream-events.jsonl` 保存上游流式原始 chunk；`prompt-responses.jsonl` 保存同一轮流式响应聚合后的 message、事件计数或上游失败对象，排查时先看聚合，再回到 chunk 细查时序。`bridge-responses.jsonl` 保存 Bridge 最终返回给 Codex 的成功响应或失败对象。
+会话日志默认会把大字段压成摘要，保留 hash、字节数、预览和关键计数；完整上游请求在 `upstream-requests/*.json.gz` 里按需查。dump 目录会自动清理，默认最多保留 7 天或 512MiB，避免长会话把磁盘打满。
+
+`prompt-stream-events.jsonl` 只在设置 `CODEX_BRIDGE_LOG_STREAM_EVENTS=1` 时保存上游流式原始 chunk；`prompt-responses.jsonl` 保存同一轮流式响应聚合后的 message、事件计数或上游失败对象，排查时先看聚合，再按需开启 chunk 细查时序。`bridge-responses.jsonl` 保存 Bridge 最终返回给 Codex 的成功响应或失败对象；过大的响应会在会话日志中转成摘要。
 
 ## 关键字段
 
@@ -160,7 +168,7 @@ rg "关键词|模型名|request_id" "$HOME/.codex-bridge/logs/sessions/index.jso
 REQ_ID="req_xxx"
 rg "$REQ_ID" "$HOME/.codex-bridge/logs/tool-calls.jsonl"
 rg "$REQ_ID" "$HOME/.codex-bridge/logs/incidents.jsonl"
-find "$HOME/.codex-bridge/logs/upstream-requests" -type f -name "*$REQ_ID*" -print
+find "$HOME/.codex-bridge/logs/upstream-requests" -type f -name "*$REQ_ID*.json.gz" -print
 ```
 
 看工具链时，按这个顺序读：

@@ -22,6 +22,18 @@ import (
 
 type toolCallLocalResolver func(ctx context.Context, callID string, entry tools.Entry, modelArguments string, canonicalArguments string, runtimeArguments string) (codex.ResponseItem, bool)
 
+const (
+	chatResponseStatePrefix  = "CHAT_RESPONSE_STATE:"
+	chatResponseStateFinal   = "final"
+	chatResponseStateBlocked = "blocked"
+)
+
+const contentOnlyRetryNote = `CHAT_CONTENT_ONLY_RESPONSE_RETRY
+Your previous assistant response contained visible content but no tool calls, and it did not declare CHAT_RESPONSE_STATE.
+If the task is complete, send a content-only response with CHAT_RESPONSE_STATE: final on the first line.
+If you are blocked and need user input, send a content-only response with CHAT_RESPONSE_STATE: blocked on the first line.
+If any repository or environment work remains, call the appropriate tools now instead of repeating progress text.`
+
 func responseItemsFromMessage(ctx context.Context, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) []codex.ResponseItem {
 	if len(message.ToolCalls) > 0 {
 		items := make([]codex.ResponseItem, 0, len(message.ToolCalls)+2)
@@ -50,11 +62,33 @@ func responseItemsFromMessage(ctx context.Context, message providers.ChatMessage
 }
 
 func assistantMessageItem(content any) codex.ResponseItem {
+	text, _ := stripChatResponseState(messageText(content))
 	return codex.ResponseItem{
 		"type":    "message",
 		"role":    "assistant",
-		"content": []map[string]string{{"type": "output_text", "text": messageText(content)}},
+		"content": []map[string]string{{"type": "output_text", "text": text}},
 	}
+}
+
+func contentOnlyNeedsRetry(message providers.ChatMessage, toolCtx tools.Context) bool {
+	if toolCtx.IsEmpty() || len(message.ToolCalls) > 0 {
+		return false
+	}
+	text := strings.TrimSpace(messageText(message.Content))
+	if text == "" {
+		return false
+	}
+	_, state := stripChatResponseState(text)
+	return state == ""
+}
+
+func contentOnlyRetryRequest(req providers.ChatCompletionRequest, message providers.ChatMessage) providers.ChatCompletionRequest {
+	next := req
+	next.Messages = append(append([]providers.ChatMessage{}, req.Messages...),
+		providers.ChatMessage{Role: "assistant", Content: messageText(message.Content)},
+		providers.ChatMessage{Role: "system", Content: contentOnlyRetryNote},
+	)
+	return next
 }
 
 type streamState struct {
@@ -206,11 +240,12 @@ func (s *streamState) Done() []codex.ResponseItem {
 		items = append(items, indexedResponseItem{index: s.itemIndex(s.reasoningIndex), item: item})
 	}
 	if s.textAdded || s.text != "" {
+		text, _ := stripChatResponseState(s.text)
 		items = append(items, indexedResponseItem{index: s.itemIndex(s.textIndex), item: codex.ResponseItem{
 			"id":      s.textItemID,
 			"type":    "message",
 			"role":    "assistant",
-			"content": []map[string]string{{"type": "output_text", "text": s.text}},
+			"content": []map[string]string{{"type": "output_text", "text": text}},
 		}})
 	}
 	return sortedResponseItems(items)
@@ -263,7 +298,7 @@ func responseItemFromToolCall(ctx context.Context, callID string, entry tools.En
 		Profile:            profile,
 		CallID:             callID,
 		Tool:               runtimeToolInfo(entry, canonicalArguments),
-		CanReturnLocalText: toolCtx.Has("exec_command"),
+		CanReturnLocalText: false,
 	}); decision.ShouldRecord {
 		toollog.BrokerDecision(requestID, model, profile, callID, entry, canonicalArguments, decision)
 		if decision.Action == toolruntime.DecisionStop {
@@ -1028,6 +1063,27 @@ func messageText(content any) string {
 		data, _ := json.Marshal(content)
 		return string(data)
 	}
+}
+
+func stripChatResponseState(text string) (string, string) {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, chatResponseStatePrefix) {
+			return text, ""
+		}
+		state := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, chatResponseStatePrefix)))
+		if state != chatResponseStateFinal && state != chatResponseStateBlocked {
+			return text, ""
+		}
+		out := append([]string{}, lines[:i]...)
+		out = append(out, lines[i+1:]...)
+		return strings.TrimLeft(strings.Join(out, "\n"), "\n"), state
+	}
+	return text, ""
 }
 
 func reasoningItem(text string) codex.ResponseItem {
