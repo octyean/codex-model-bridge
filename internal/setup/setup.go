@@ -1,8 +1,6 @@
 package setup
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,7 +69,11 @@ func Run(options Options, probe upstreamprobe.Result) (Result, error) {
 	} else if err != nil && !os.IsNotExist(err) {
 		return Result{}, fmt.Errorf("stat config: %w", err)
 	}
-	cfg := buildConfig(options, probe)
+	localToken, err := config.RandomLocalToken()
+	if err != nil {
+		return Result{}, fmt.Errorf("generate local token: %w", err)
+	}
+	cfg := buildConfig(options, probe, localToken)
 	cfg.Path = options.ConfigPath
 	data, err := toml.Marshal(cfg)
 	if err != nil {
@@ -105,7 +107,7 @@ func Run(options Options, probe upstreamprobe.Result) (Result, error) {
 	}, nil
 }
 
-func buildConfig(options Options, probe upstreamprobe.Result) config.Config {
+func buildConfig(options Options, probe upstreamprobe.Result, localToken string) config.Config {
 	modelIDs := append([]string(nil), probe.Models...)
 	if len(modelIDs) == 0 {
 		modelIDs = []string{firstNonEmpty(options.DefaultModel, "upstream-model")}
@@ -121,7 +123,7 @@ func buildConfig(options Options, probe upstreamprobe.Result) config.Config {
 		Codex: config.CodexConfig{
 			ModelCatalogPath: filepath.ToSlash(filepath.Join(options.CodexHome, "models.codex-bridge.json")),
 			DefaultModel:     defaultModel,
-			LocalToken:       randomToken(),
+			LocalToken:       localToken,
 		},
 		ModelDiscovery: config.ModelDiscoveryConfig{Enabled: true, Mode: "merge"},
 		Extensions:     config.ExtensionsConfig{},
@@ -197,14 +199,6 @@ func profileForModel(model string) string {
 
 func contextWindowForModel(model string) int64 {
 	return config.DefaultContextWindowForModel(model)
-}
-
-func randomToken() string {
-	var data [20]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		return "codex-bridge-local-token"
-	}
-	return hex.EncodeToString(data[:])
 }
 
 func firstNonEmpty(values ...string) string {

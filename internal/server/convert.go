@@ -106,7 +106,13 @@ func newStreamState(ctx context.Context, toolCtx tools.Context, adapter adapters
 func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string]any {
 	var events []map[string]any
 	for _, choice := range chunk.Choices {
-		if choice.Delta.ReasoningContent != "" {
+		reasoningDelta := choice.Delta.ReasoningContent
+		contentDelta := choice.Delta.Content
+		if s.toolCtx.Has(tools.TaskEndToolName) {
+			reasoningDelta = sanitizeTaskProtocolText(reasoningDelta)
+			contentDelta = sanitizeTaskProtocolText(contentDelta)
+		}
+		if reasoningDelta != "" {
 			if !s.reasoningAdded {
 				s.reasoningAdded = true
 				s.reasoningIndex = s.nextOutputIndex
@@ -117,9 +123,9 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 					"output_index": s.reasoningIndex,
 				})
 			}
-			s.reasoning += choice.Delta.ReasoningContent
+			s.reasoning += reasoningDelta
 		}
-		if choice.Delta.Content != "" {
+		if contentDelta != "" {
 			if !s.textAdded {
 				s.textAdded = true
 				s.textIndex = s.nextOutputIndex
@@ -131,13 +137,13 @@ func (s *streamState) AddChunk(chunk providers.ChatCompletionChunk) []map[string
 				})
 				events = append(events, contentPartAddedEvent(s.textItemID, s.textIndex))
 			}
-			s.text += choice.Delta.Content
+			s.text += contentDelta
 			events = append(events, map[string]any{
 				"type":          "response.output_text.delta",
 				"item_id":       s.textItemID,
 				"output_index":  s.textIndex,
 				"content_index": 0,
-				"delta":         choice.Delta.Content,
+				"delta":         contentDelta,
 			})
 		}
 		for _, delta := range choice.Delta.ToolCalls {

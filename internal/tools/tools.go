@@ -23,6 +23,7 @@ const (
 	KindShell       = "shell"
 	KindHarnessUI   = "harness_ui"
 	KindImageView   = "image_view"
+	KindTaskEnd     = "task_end"
 
 	InputModeJSON     = "json"
 	InputModeFreeform = "freeform"

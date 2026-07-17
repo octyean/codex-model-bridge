@@ -635,7 +635,13 @@ func emptyContent(content any) bool {
 func NormalizeUsage(raw any) NormalizedUsage {
 	usage := usageObject(raw)
 	inputTokens := intValue(usage, "prompt_tokens")
+	if inputTokens == 0 {
+		inputTokens = intValue(usage, "input_tokens")
+	}
 	outputTokens := intValue(usage, "completion_tokens")
+	if outputTokens == 0 {
+		outputTokens = intValue(usage, "output_tokens")
+	}
 	totalTokens := intValue(usage, "total_tokens")
 	cachedTokens := intValue(usage, "prompt_cache_hit_tokens")
 	freshTokens := intValue(usage, "prompt_cache_miss_tokens")
@@ -643,11 +649,20 @@ func NormalizeUsage(raw any) NormalizedUsage {
 	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok && cachedTokens == 0 {
 		cachedTokens = intValue(details, "cached_tokens")
 	}
+	if details, ok := usage["input_tokens_details"].(map[string]any); ok && cachedTokens == 0 {
+		cachedTokens = intValue(details, "cached_tokens")
+	}
 	if details, ok := usage["completion_tokens_details"].(map[string]any); ok {
 		reasoningTokens = intValue(details, "reasoning_tokens")
 	}
-	if freshTokens == 0 && cachedTokens > 0 && inputTokens > cachedTokens {
+	if details, ok := usage["output_tokens_details"].(map[string]any); ok && reasoningTokens == 0 {
+		reasoningTokens = intValue(details, "reasoning_tokens")
+	}
+	if freshTokens == 0 && inputTokens >= cachedTokens {
 		freshTokens = inputTokens - cachedTokens
+	}
+	if totalTokens == 0 {
+		totalTokens = inputTokens + outputTokens
 	}
 	return NormalizedUsage{
 		InputTokens:       inputTokens,

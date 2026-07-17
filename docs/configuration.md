@@ -56,7 +56,7 @@ listen = "127.0.0.1:8787"
 [codex]
 model_catalog_path = "/home/you/.codex/models.codex-bridge.json"
 default_model = "deepseek-v4-flash"
-local_token = "codex-bridge-local-token"
+local_token = "replace-with-a-unique-random-token"
 
 [model_discovery]
 enabled = true
@@ -140,6 +140,10 @@ Bridge 有三种执行路径：
 
 第三方模型请求 Bridge 内置 `web_search` 时，Bridge 会在 Projected Responses 内执行搜索，把结果作为 `function_call_output` 继续提交给上游，不会切换到 Chat Completions。
 
+对于非 GPT 的第三方模型，Projected Responses 和 Chat Completions 会额外启用显式任务终止协议。模型继续工作时必须调用普通 Codex 工具；完成或真实阻塞时必须调用 Bridge 内部的 `codex_bridge_task_end`。Bridge 会隐藏这个内部工具，并把它的 `result` 转成最终 assistant 消息。纯文本不会再被当成任务完成：Bridge 会纠正一次，第二次仍违反协议时返回 `model_behavior_error`。结构化输出请求不启用该协议。
+
+GPT 系列始终保持原协议透传。判断同时依据 profile 和真实 `upstream_model`；即使 GPT 模型配置为 `profile = "default"`，也不会注入终止工具、拦截普通文本或增加纠正请求。
+
 执行模式和 Responses 可选能力可以在模型级明确覆盖：
 
 ```toml
@@ -151,6 +155,8 @@ upstream_model = "kimi-for-coding"
 execution_mode = "projected_responses"
 supports_responses_options = true
 supports_responses_structured_output = true
+default_reasoning_level = "high"
+supported_reasoning_levels = ["high", "max"]
 context_window = 192000
 supports_parallel_tool_calls = true
 apply_patch_tool_type = "freeform"
@@ -159,6 +165,8 @@ apply_patch_tool_type = "freeform"
 - `execution_mode` 可写 `native_responses`、`projected_responses` 或 `chat_completions`。不写时继续按 provider 协议、真实 `upstream_model` 和 profile 推导。
 - `supports_responses_options` 控制 reasoning 和 verbosity 是否向 Codex 宣告并发送给上游。
 - `supports_responses_structured_output` 控制是否原样发送 `text.format=json_schema`。设为 `false` 时仍走 Responses，Bridge 会改用 JSON Schema 指令并校正最终输出。
+- `default_reasoning_level` 控制 Codex 默认思考强度；不写时默认使用 `high`。
+- `supported_reasoning_levels` 按顺序声明模型真实支持的思考档位。不写时使用 `low`、`medium`、`high`；`xhigh`、`max` 等额外能力应写在模型配置中，不再通过模型名硬编码。
 - setup 只把实际 probe 过的模型能力写入生成配置，不会拿一个模型的可选能力替其他模型做结论。
 
 已有配置建议用 `verify` 逐模型实测：
@@ -172,7 +180,7 @@ codex-bridge verify \
 
 `--models` 同时接受 Codex slug 和真实 `upstream_model`。必须显式传 `--models`，或者明确使用 `--all` 验证全部已配置模型；两者不能同时使用。结果默认写入配置文件同目录的 `model-capabilities.json`，不会修改 `config.toml`；provider 使用 `protocol = "auto"` 时，Bridge 会优先采用仍在有效期内的真实验证结果。
 
-能力缓存当前为 version 2。每条模型记录包含 `probe_version`、`verified_at` 和 `expires_at`；探测逻辑升级或记录过期后，Bridge 不会继续把旧结果当作当前能力。服务启动和 `config check` 会只针对第三方 profile 提示需要重新验证的模型。
+能力缓存当前为 version 3。每条模型记录包含 `probe_version`、`verified_at`、`expires_at`，以及凭据和有效 profile 的不可逆指纹；缓存文件不会保存 API key 明文。探测逻辑升级、记录过期、凭据变化或 profile 变化后，Bridge 不会继续把旧结果当作当前能力。服务启动和 `config check` 会只针对第三方 profile 提示需要重新验证的模型。
 
 `model-capabilities.json` 和 `model-slots.json` 使用同一套跨进程状态写入规则：写入前获取锁，锁内重新读取并合并，再通过原子替换保存。多个 setup、verify 或服务进程同时运行时，不会用旧快照覆盖其他进程刚写入的模型记录。
 
@@ -380,6 +388,8 @@ proxy_url = "socks5h://127.0.0.1:7890"
 | `models.*.execution_mode` | 可选的模型级执行模式覆盖。 |
 | `models.*.supports_responses_options` | 上游 Responses 是否支持 reasoning 和 verbosity。 |
 | `models.*.supports_responses_structured_output` | 上游 Responses 是否原生支持 JSON Schema。 |
+| `models.*.default_reasoning_level` | Codex 默认思考强度；默认 `high`。 |
+| `models.*.supported_reasoning_levels` | 模型实际支持的思考档位，顺序会保留到 Codex 模型目录。 |
 | `models.*.context_window` | Codex 侧可见上下文窗口。 |
 | `models.*.apply_patch_tool_type` | Codex patch tool 类型，建议使用 `freeform`。 |
 | `capabilities.search.enabled` | 是否启用 bridge web search 兼容层。 |

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Request, requestID string, sessionID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter, executionPlan config.ModelExecutionPlan, workspace string, dumpPath string) {
 	transcriptResult, err := transcript.ToChatMessagesWithRuntime(r.Context(), req, adapter, s.runtime, transcript.LogContext{
 		RequestID:       requestID,
+		SessionID:       sessionID,
 		Model:           req.Model,
 		UpstreamModel:   modelCfg.UpstreamModel,
 		Profile:         adapter.Name(),
@@ -47,6 +49,11 @@ func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Reques
 	if structuredOutputFallback {
 		transcriptResult.Messages = structuredOutputMessages(transcriptResult.Messages, responseFormat)
 	}
+	explicitTaskEnd := responseFormat == nil && adapters.UseExplicitTaskEnd(adapter, modelCfg.UpstreamModel)
+	if explicitTaskEnd {
+		chatTools = tools.AddTaskEndTool(chatTools, &toolCtx)
+		transcriptResult.Messages = append(transcriptResult.Messages, providers.ChatMessage{Role: "system", Content: taskProtocolInstruction})
+	}
 	toolChoice := tools.ToolChoice(req.ToolChoice, toolCtx)
 	if note := tools.SoftRequiredToolChoiceNote(toolChoice, adapter.ToolPolicy().RequiredToolChoice); note != "" {
 		transcriptResult.Messages = append(transcriptResult.Messages, providers.ChatMessage{Role: "system", Content: note})
@@ -69,7 +76,7 @@ func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Reques
 		delete(upstreamReq, "tools")
 		delete(upstreamReq, "tool_choice")
 	}
-	if toolCtx.Has(tools.WebSearchProxyToolName) {
+	if toolCtx.Has(tools.WebSearchProxyToolName) || explicitTaskEnd {
 		upstreamReq["parallel_tool_calls"] = false
 	}
 	upstreamReq = adapter.PrepareResponseRequest(upstreamReq)
@@ -124,6 +131,51 @@ func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Reques
 		s.projectedResponseFailure(w, r, requestID, sessionID, req, modelCfg, adapter, dumpPath, false, err)
 		return
 	}
+	taskProtocolRetry := false
+	taskProtocolRetries := 0
+	taskEndStatus := ""
+	if explicitTaskEnd {
+		for {
+			status, result, ended, protocolErr := projectedTaskEndResult(resp, toolCtx)
+			if protocolErr == nil {
+				if ended {
+					taskEndStatus = status
+					resp = projectedTaskEndResponse(resp, result)
+				} else {
+					resp = projectedWithoutTaskEndCalls(resp, toolCtx)
+				}
+				break
+			}
+			if taskProtocolRetries >= maxTaskProtocolRetries {
+				violation := taskProtocolViolation(protocolErr)
+				s.writeTaskProtocolFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), violation.Error(), projectedResponseAssistantText(resp), false)
+				s.projectedResponseFailure(w, r, requestID, sessionID, req, modelCfg, adapter, dumpPath, false, violation)
+				return
+			}
+			taskProtocolRetry = true
+			taskProtocolRetries++
+			s.writeTaskProtocolRetry(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), protocolErr.Error(), projectedResponseAssistantText(resp), false)
+			retryReq := projectedTaskProtocolRetryRequest(finalReq, resp, adapter.ToolPolicy().RequiredToolChoice)
+			s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "projected_task_protocol_retry", retryReq, map[string]any{"sequence": taskProtocolRetries})
+			retried, retryErr := provider.CreateResponse(r.Context(), retryReq)
+			if retryErr != nil {
+				s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "projected_task_protocol_retry", retryErr.Error(), map[string]any{"sequence": taskProtocolRetries})
+				s.projectedResponseFailure(w, r, requestID, sessionID, req, modelCfg, adapter, dumpPath, false, retryErr)
+				return
+			}
+			s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "projected_task_protocol_retry", retried, map[string]any{"sequence": taskProtocolRetries})
+			var retryUsage providers.NormalizedUsage
+			var retryInternalTools bool
+			retried, finalReq, retryUsage, retryInternalTools, retryErr = s.resolveProjectedInternalTools(r.Context(), provider, sessionID, retryReq, retried, toolCtx, adapter, logCtx)
+			if retryErr != nil {
+				s.projectedResponseFailure(w, r, requestID, sessionID, req, modelCfg, adapter, dumpPath, false, retryErr)
+				return
+			}
+			resp = retried
+			totalUsage = addUsage(totalUsage, retryUsage)
+			internalTools = internalTools || retryInternalTools
+		}
+	}
 	projected := projectResponseObject(r.Context(), resp, req.Model, toolCtx, adapter, requestID, s.logger, nil, nil)
 	if structuredOutputFallback {
 		if err := enforceProjectedResponseStructuredOutput(projected, responseFormat); err != nil {
@@ -147,13 +199,13 @@ func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
-	if internalTools || structuredOutputFallback {
+	if internalTools || taskProtocolRetry || structuredOutputFallback {
 		projected["usage"] = codexUsage(totalUsage)
 	}
 	if nativeResponseEmpty(projected) {
 		incidentlog.Write("empty_projected_response", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"stream": false}))
 	}
-	s.writeBridgeResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), projected, map[string]any{"stream": false, "projected_responses": true, "internal_tools": internalTools})
+	s.writeBridgeResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), projected, map[string]any{"stream": false, "projected_responses": true, "internal_tools": internalTools, "task_protocol_retry": taskProtocolRetry, "task_end_status": taskEndStatus})
 	writeJSON(w, http.StatusOK, projected)
 }
 
@@ -287,7 +339,11 @@ func (s *Server) projectedInternalToolFollowUpRequest(ctx context.Context, req m
 			continue
 		}
 		name, _ := item["name"].(string)
-		if toolCtx.Entry(name).Kind() != tools.KindWebSearch {
+		kind := toolCtx.Entry(name).Kind()
+		if kind == tools.KindTaskEnd {
+			continue
+		}
+		if kind != tools.KindWebSearch {
 			return nil, false
 		}
 		calls = append(calls, item)
@@ -337,6 +393,9 @@ func (s *Server) projectedInternalToolFollowUpRequest(ctx context.Context, req m
 	followUp := cloneResponseRequest(req)
 	followUp["input"] = nextInput
 	followUp["tool_choice"] = "auto"
+	if toolCtx.Has(tools.TaskEndToolName) && adapter.ToolPolicy().RequiredToolChoice {
+		followUp["tool_choice"] = "required"
+	}
 	followUp["parallel_tool_calls"] = false
 	return followUp, true
 }
@@ -344,9 +403,15 @@ func (s *Server) projectedInternalToolFollowUpRequest(ctx context.Context, req m
 func (s *Server) streamProjectedResponses(w http.ResponseWriter, r *http.Request, requestID string, sessionID string, req codex.ResponsesRequest, modelCfg config.ModelConfig, provider providers.ResponsesProvider, adapter adapters.Adapter, toolCtx tools.Context, upstreamReq map[string]any, responseFormat any, structuredOutputFallback bool, dumpPath string) {
 	writer := codex.NewSSEWriter(w)
 	currentReq := upstreamReq
+	explicitTaskEnd := toolCtx.Has(tools.TaskEndToolName)
 	streamState := newProjectedStreamState(writer, r.Context(), toolCtx, adapter, requestID, req.Model, s.logger, !structuredOutputFallback)
+	streamState.emitWorkTools = explicitTaskEnd
 	var totalUsage providers.NormalizedUsage
 	internalTools := false
+	taskProtocolRetry := false
+	taskProtocolRetries := 0
+	taskEndStatus := ""
+	stage := config.ExecutionModeProjectedResponses
 	logCtx := toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
@@ -355,9 +420,7 @@ func (s *Server) streamProjectedResponses(w http.ResponseWriter, r *http.Request
 		RequestSummary: incidentlog.RequestSummary(req.Raw),
 	}
 	for sequence := 0; ; sequence++ {
-		stage := config.ExecutionModeProjectedResponses
 		if sequence > 0 {
-			stage = "projected_internal_tool_followup"
 			s.writePromptRequest(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), stage, currentReq, map[string]any{"sequence": sequence, "stream": true})
 		}
 		response, eventCount, responseID, err := s.streamProjectedResponseRound(r, streamState, requestID, sessionID, req.Model, modelCfg.UpstreamModel, adapter, provider, currentReq, stage, sequence)
@@ -396,10 +459,52 @@ func (s *Server) streamProjectedResponses(w http.ResponseWriter, r *http.Request
 			}
 			internalTools = true
 			currentReq = followUp
+			stage = "projected_internal_tool_followup"
 			continue
+		}
+		taskEnded := false
+		taskEndResult := ""
+		if explicitTaskEnd {
+			status, result, ended, protocolErr := projectedTaskEndResult(response, toolCtx)
+			if protocolErr != nil {
+				if taskProtocolRetries >= maxTaskProtocolRetries {
+					violation := taskProtocolViolation(protocolErr)
+					s.writeTaskProtocolFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), violation.Error(), projectedResponseAssistantText(response), true)
+					extra := map[string]any{"stream": true, "stage": stage, "task_protocol_retry": true}
+					s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), stage, violation.Error(), extra)
+					s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), http.StatusBadGateway, violation.Error(), extra)
+					incidentlog.Write("projected_task_protocol_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": violation.Error(), "stream": true}))
+					_ = writer.Event(map[string]any{"type": "response.failed", "response": map[string]any{"id": streamState.responseID, "error": map[string]any{"message": violation.Error(), "type": responseFailureType(violation)}}})
+					return
+				} else {
+					taskProtocolRetry = true
+					taskProtocolRetries++
+					s.writeTaskProtocolRetry(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), protocolErr.Error(), projectedResponseAssistantText(response), true)
+					currentReq = projectedTaskProtocolRetryRequest(currentReq, response, adapter.ToolPolicy().RequiredToolChoice)
+					stage = "projected_task_protocol_retry"
+					continue
+				}
+			}
+			if ended {
+				taskEnded = true
+				taskEndStatus = status
+				visibleText := projectedResponseAssistantText(streamState.completedResponse(response))
+				if visibleText == "" {
+					taskEndResult = result
+				}
+			}
 		}
 
 		projected := streamState.completedResponse(response)
+		var taskEndProjected map[string]any
+		if taskEndResult != "" {
+			taskEndResponse := projectedTaskEndResponse(response, taskEndResult)
+			taskEndProjected = projectResponseObject(r.Context(), taskEndResponse, req.Model, toolCtx, adapter, requestID, s.logger, nil, nil)
+			if streamState.responseID != "" {
+				taskEndProjected["id"] = streamState.responseID
+			}
+			projected = taskEndProjected
+		}
 		if structuredOutputFallback {
 			projected = projectResponseObject(r.Context(), response, req.Model, toolCtx, adapter, requestID, s.logger, nil, nil)
 			if validationErr := enforceProjectedResponseStructuredOutput(projected, responseFormat); validationErr != nil {
@@ -432,39 +537,43 @@ func (s *Server) streamProjectedResponses(w http.ResponseWriter, r *http.Request
 				}
 			}
 			emitProjectedResponseItems(writer, projected)
+		} else if explicitTaskEnd && taskEnded && taskEndProjected != nil {
+			emitProjectedResponseItems(writer, taskEndProjected)
 		}
 		if streamState.responseID != "" {
 			projected["id"] = streamState.responseID
 		}
-		if internalTools || structuredOutputFallback {
+		if internalTools || taskProtocolRetry || structuredOutputFallback {
 			projected["usage"] = codexUsage(totalUsage)
 		}
 		completed := map[string]any{"type": "response.completed", "response": projected}
 		_ = writer.Event(completed)
-		s.writeBridgeResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), projected, map[string]any{"stream": true, "projected_responses": true, "internal_tools": internalTools})
+		s.writeBridgeResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), projected, map[string]any{"stream": true, "projected_responses": true, "internal_tools": internalTools, "task_protocol_retry": taskProtocolRetry, "task_end_status": taskEndStatus})
 		return
 	}
 }
 
 type projectedStreamState struct {
-	writer       *codex.SSEWriter
-	ctx          context.Context
-	toolCtx      tools.Context
-	adapter      adapters.Adapter
-	requestID    string
-	model        string
-	logger       *slog.Logger
-	emitOutput   bool
-	responseID   string
-	items        []any
-	itemIndexes  map[string]int
-	nextItemSlot int
+	writer        *codex.SSEWriter
+	ctx           context.Context
+	toolCtx       tools.Context
+	adapter       adapters.Adapter
+	requestID     string
+	model         string
+	logger        *slog.Logger
+	emitOutput    bool
+	emitWorkTools bool
+	responseID    string
+	items         []any
+	itemIndexes   map[string]int
+	nextItemSlot  int
 }
 
 type projectedStreamRound struct {
-	sequence int
-	indexes  map[int]int
-	hidden   map[int]bool
+	sequence      int
+	hideNarrative bool
+	indexes       map[int]int
+	hidden        map[int]bool
 }
 
 func newProjectedStreamState(writer *codex.SSEWriter, ctx context.Context, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, logger *slog.Logger, emitOutput bool) *projectedStreamState {
@@ -486,7 +595,12 @@ func (s *Server) streamProjectedResponseRound(r *http.Request, state *projectedS
 	if err != nil {
 		return nil, 0, "", err
 	}
-	round := projectedStreamRound{sequence: sequence, indexes: map[int]int{}, hidden: map[int]bool{}}
+	round := projectedStreamRound{
+		sequence:      sequence,
+		hideNarrative: stage == "projected_task_protocol_retry",
+		indexes:       map[int]int{},
+		hidden:        map[int]bool{},
+	}
 	eventCount := 0
 	responseID := ""
 	for event := range stream {
@@ -548,11 +662,15 @@ func (state *projectedStreamState) handleEvent(event map[string]any, round *proj
 	case "response.output_item.added":
 		item, _ := event["item"].(map[string]any)
 		upstreamIndex := intValue(event["output_index"])
-		if state.internalWebCall(item) {
+		if state.internalBridgeCall(item) {
 			round.hidden[upstreamIndex] = true
 			return
 		}
 		if item["type"] == "function_call" {
+			return
+		}
+		if round.hideNarrative {
+			round.hidden[upstreamIndex] = true
 			return
 		}
 		index := state.reserveItem(item, round, upstreamIndex)
@@ -561,14 +679,14 @@ func (state *projectedStreamState) handleEvent(event map[string]any, round *proj
 	case "response.output_item.done":
 		item, _ := event["item"].(map[string]any)
 		upstreamIndex := intValue(event["output_index"])
-		if round.hidden[upstreamIndex] || state.internalWebCall(item) {
+		if round.hidden[upstreamIndex] || state.internalBridgeCall(item) {
 			round.hidden[upstreamIndex] = true
 			return
 		}
 		if item["type"] == "function_call" {
 			projected := projectFunctionCallItem(state.ctx, item, state.toolCtx, state.adapter, state.requestID, state.model, state.adapter.Name(), state.logger, nil)
 			index := state.storeProjectedItem(projected, round, upstreamIndex)
-			if state.emitOutput {
+			if state.emitOutput || state.emitWorkTools {
 				for _, projectedEvent := range outputDoneEvents(projected, index, false) {
 					_ = state.writer.Event(projectedEvent)
 				}
@@ -581,6 +699,10 @@ func (state *projectedStreamState) handleEvent(event map[string]any, round *proj
 	}
 
 	if upstreamIndex, ok := eventOutputIndex(event); ok {
+		if round.hideNarrative {
+			round.hidden[upstreamIndex] = true
+			return
+		}
 		if round.hidden[upstreamIndex] {
 			return
 		}
@@ -598,7 +720,10 @@ func (state *projectedStreamState) absorbCompletedResponse(response map[string]a
 	output, _ := response["output"].([]any)
 	for upstreamIndex, rawItem := range output {
 		item, ok := rawItem.(map[string]any)
-		if !ok || round.hidden[upstreamIndex] || state.internalWebCall(item) {
+		if !ok || round.hidden[upstreamIndex] || state.internalBridgeCall(item) {
+			continue
+		}
+		if round.hideNarrative && item["type"] != "function_call" {
 			continue
 		}
 		if item["type"] == "function_call" {
@@ -608,7 +733,7 @@ func (state *projectedStreamState) absorbCompletedResponse(response map[string]a
 			}
 			projected := projectFunctionCallItem(state.ctx, item, state.toolCtx, state.adapter, state.requestID, state.model, state.adapter.Name(), state.logger, nil)
 			index := state.storeProjectedItem(projected, round, upstreamIndex)
-			if state.emitOutput {
+			if state.emitOutput || state.emitWorkTools {
 				for _, projectedEvent := range outputDoneEvents(projected, index, false) {
 					_ = state.writer.Event(projectedEvent)
 				}
@@ -617,12 +742,13 @@ func (state *projectedStreamState) absorbCompletedResponse(response map[string]a
 		}
 		index, exists := state.itemIndex(item, round, upstreamIndex)
 		if exists {
-			state.items[index] = cloneResponseRequest(item)
+			state.items[index] = state.outputItem(item)
 			continue
 		}
 		index = state.storeItem(item, round, upstreamIndex)
 		if state.emitOutput {
-			for _, projectedEvent := range outputDoneEvents(codex.ResponseItem(item), index, false) {
+			stored, _ := state.items[index].(map[string]any)
+			for _, projectedEvent := range outputDoneEvents(codex.ResponseItem(stored), index, false) {
 				_ = state.writer.Event(projectedEvent)
 			}
 		}
@@ -644,8 +770,9 @@ func (state *projectedStreamState) reserveItem(item map[string]any, round *proje
 	index := state.nextItemSlot
 	state.nextItemSlot++
 	round.indexes[upstreamIndex] = index
-	state.items = append(state.items, cloneResponseRequest(item))
-	if key := projectedItemKey(item); key != "" {
+	stored := state.outputItem(item)
+	state.items = append(state.items, stored)
+	if key := projectedItemKey(stored); key != "" {
 		state.itemIndexes[key] = index
 	}
 	return index
@@ -653,11 +780,19 @@ func (state *projectedStreamState) reserveItem(item map[string]any, round *proje
 
 func (state *projectedStreamState) storeItem(item map[string]any, round *projectedStreamRound, upstreamIndex int) int {
 	index := state.reserveItem(item, round, upstreamIndex)
-	state.items[index] = cloneResponseRequest(item)
-	if key := projectedItemKey(item); key != "" {
+	stored := state.outputItem(item)
+	state.items[index] = stored
+	if key := projectedItemKey(stored); key != "" {
 		state.itemIndexes[key] = index
 	}
 	return index
+}
+
+func (state *projectedStreamState) outputItem(item map[string]any) map[string]any {
+	if state.toolCtx.Has(tools.TaskEndToolName) {
+		return sanitizeTaskProtocolItem(item)
+	}
+	return cloneResponseRequest(item)
 }
 
 func (state *projectedStreamState) storeProjectedItem(item codex.ResponseItem, round *projectedStreamRound, upstreamIndex int) int {
@@ -680,12 +815,13 @@ func (state *projectedStreamState) itemIndex(item map[string]any, round *project
 	return index, ok
 }
 
-func (state *projectedStreamState) internalWebCall(item map[string]any) bool {
+func (state *projectedStreamState) internalBridgeCall(item map[string]any) bool {
 	if item["type"] != "function_call" {
 		return false
 	}
 	name, _ := item["name"].(string)
-	return state.toolCtx.Entry(name).Kind() == tools.KindWebSearch
+	kind := state.toolCtx.Entry(name).Kind()
+	return kind == tools.KindWebSearch || kind == tools.KindTaskEnd
 }
 
 func (state *projectedStreamState) emitOutputEvent(event map[string]any, outputIndex int) {
@@ -699,6 +835,9 @@ func (state *projectedStreamState) emitOutputEvent(event map[string]any, outputI
 
 func (state *projectedStreamState) emitEvent(event map[string]any) {
 	projected := cloneResponseRequest(event)
+	if state.toolCtx.Has(tools.TaskEndToolName) {
+		projected = sanitizeTaskProtocolEvent(projected)
+	}
 	replaceResponseModel(projected, state.model)
 	if response, ok := projected["response"].(map[string]any); ok {
 		response = cloneResponseRequest(response)
@@ -749,6 +888,10 @@ func (s *Server) projectedResponseFailure(w http.ResponseWriter, r *http.Request
 	s.writePromptFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), config.ExecutionModeProjectedResponses, err.Error(), extra)
 	s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), http.StatusBadGateway, err.Error(), extra)
 	incidentlog.Write("upstream_projected_response_error", s.incidentRecord(r, req, requestID, adapter.Name(), dumpPath, map[string]any{"error": err.Error(), "stream": stream}))
+	if errors.Is(err, errTaskProtocolViolation) {
+		writeErrorType(w, http.StatusBadGateway, err.Error(), responseFailureType(err))
+		return
+	}
 	writeError(w, http.StatusBadGateway, err.Error())
 }
 

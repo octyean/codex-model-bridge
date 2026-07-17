@@ -158,6 +158,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 
 	transcriptResult, err := transcript.ToChatMessagesWithRuntime(r.Context(), req, adapter, s.runtime, transcript.LogContext{
 		RequestID:       requestID,
+		SessionID:       sessionID,
 		Model:           req.Model,
 		UpstreamModel:   modelCfg.UpstreamModel,
 		Profile:         profileName,
@@ -177,12 +178,17 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if s.writeForcedLocalToolChoice(w, requestID, req, toolCtx, adapter) {
 		return
 	}
+	responseFormat := responseFormatFromText(req.Raw)
+	explicitTaskEnd := responseFormat == nil && adapters.UseExplicitTaskEnd(adapter, modelCfg.UpstreamModel)
+	if explicitTaskEnd {
+		chatTools = tools.AddTaskEndTool(chatTools, &toolCtx)
+		transcriptResult.Messages = append(transcriptResult.Messages, providers.ChatMessage{Role: "system", Content: taskProtocolInstruction})
+	}
 	toolChoice := tools.ToolChoice(req.ToolChoice, toolCtx)
 	if note := tools.SoftRequiredToolChoiceNote(toolChoice, adapter.ToolPolicy().RequiredToolChoice); note != "" {
 		transcriptResult.Messages = append(transcriptResult.Messages, providers.ChatMessage{Role: "system", Content: note})
 	}
 	chatTools, toolChoice = tools.ApplyToolChoice(chatTools, toolChoice, adapter.ToolPolicy().RequiredToolChoice)
-	responseFormat := responseFormatFromText(req.Raw)
 	chatReq := providers.ChatCompletionRequest{
 		Model:          modelCfg.UpstreamModel,
 		Messages:       structuredOutputMessages(transcriptResult.Messages, responseFormat),
@@ -191,7 +197,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		ResponseFormat: responseFormat,
 		Stream:         req.Stream,
 	}
-	if req.ParallelToolCalls && !toolCtx.IsEmpty() {
+	if explicitTaskEnd {
+		disabled := false
+		chatReq.ParallelToolCalls = &disabled
+	} else if req.ParallelToolCalls && !toolCtx.IsEmpty() {
 		enabled := !toolCtx.HasFileWriteTool() && !s.hasInternalTools(toolCtx)
 		chatReq.ParallelToolCalls = &enabled
 	}
@@ -284,10 +293,14 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Profile:        profileName,
 		RequestSummary: requestSummary,
 	}
-	if followUp, followUpReq, ok, err := s.resolveInternalTools(r.Context(), provider, sessionID, chatReq, resp.Choices[0].Message, toolCtx, adapter, logCtx); err != nil {
+	if followUp, followUpReq, ok, err := s.resolveInternalTools(r.Context(), provider, sessionID, chatReq, resp, toolCtx, adapter, logCtx); err != nil {
 		extra := map[string]any{"stream": false, "internal_tools": true}
 		s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusBadGateway, err.Error(), extra)
 		incidentlog.Write("internal_tool_followup_limit", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"error": err.Error(), "stream": false}))
+		if errors.Is(err, errTaskProtocolViolation) {
+			writeErrorType(w, http.StatusBadGateway, err.Error(), responseFailureType(err))
+			return
+		}
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	} else if ok {
@@ -717,8 +730,12 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
+	writeErrorType(w, status, message, "invalid_request_error")
+}
+
+func writeErrorType(w http.ResponseWriter, status int, message string, errorType string) {
 	writeJSON(w, status, codex.ErrorResponse{
-		Error: codex.ErrorBody{Message: message, Type: "invalid_request_error"},
+		Error: codex.ErrorBody{Message: message, Type: errorType},
 	})
 }
 

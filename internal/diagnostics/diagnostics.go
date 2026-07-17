@@ -18,9 +18,10 @@ const (
 	DefaultPreviewRunes    = 1200
 	GlobalJSONLMaxBytes    = 64 * 1024 * 1024
 	GlobalJSONLRetainFiles = 3
+	jsonlLockStripes       = 64
 )
 
-var globalJSONLMu sync.Mutex
+var jsonlLocks [jsonlLockStripes]sync.Mutex
 
 func CheckJSONL(path string) (string, error) {
 	if path == "" {
@@ -40,11 +41,14 @@ func WriteJSONL(path string, record map[string]any) {
 	if path == "" {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return
-	}
 	data, err := json.Marshal(record)
 	if err != nil {
+		return
+	}
+	lock := jsonlPathLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -63,8 +67,9 @@ func WriteGlobalJSONL(path string, record map[string]any) {
 	if err != nil {
 		return
 	}
-	globalJSONLMu.Lock()
-	defer globalJSONLMu.Unlock()
+	lock := jsonlPathLock(path)
+	lock.Lock()
+	defer lock.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return
 	}
@@ -77,6 +82,15 @@ func WriteGlobalJSONL(path string, record map[string]any) {
 	}
 	defer file.Close()
 	_, _ = file.Write(append(data, '\n'))
+}
+
+func jsonlPathLock(path string) *sync.Mutex {
+	normalized, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		normalized = filepath.Clean(path)
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return &jsonlLocks[int(sum[0])%len(jsonlLocks)]
 }
 
 func rotateGlobalJSONL(path string) {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"codex-bridge/internal/diagnostics"
@@ -17,8 +18,15 @@ import (
 const EnvPath = "CODEX_BRIDGE_DUMP_UPSTREAM_REQUEST"
 
 const (
-	maxDumpAge   = 7 * 24 * time.Hour
-	maxDumpBytes = 512 * 1024 * 1024
+	maxDumpAge    = 7 * 24 * time.Hour
+	maxDumpBytes  = 512 * 1024 * 1024
+	pruneInterval = 5 * time.Minute
+)
+
+var (
+	pruneMu      sync.Mutex
+	lastPruneDir string
+	lastPruneAt  time.Time
 )
 
 type dumpFile struct {
@@ -71,7 +79,7 @@ func Write(requestID string, model string, profile string, body any) (string, er
 	if err := file.Close(); err != nil {
 		return path, err
 	}
-	pruneDumpDir(dir)
+	maybePruneDumpDir(dir)
 	return path, nil
 }
 
@@ -82,6 +90,19 @@ func Hash(body any) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])
+}
+
+func maybePruneDumpDir(dir string) {
+	now := time.Now()
+	pruneMu.Lock()
+	if dir == lastPruneDir && now.Sub(lastPruneAt) < pruneInterval {
+		pruneMu.Unlock()
+		return
+	}
+	lastPruneDir = dir
+	lastPruneAt = now
+	pruneMu.Unlock()
+	pruneDumpDir(dir)
 }
 
 func pruneDumpDir(dir string) {

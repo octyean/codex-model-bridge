@@ -17,20 +17,57 @@ const maxInternalToolRounds = 4
 
 func (s *Server) hasInternalTools(toolCtx tools.Context) bool {
 	for _, entry := range toolCtx.Tools {
-		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource {
+		if entry.Kind() == tools.KindWebSearch || entry.Kind() == tools.KindTextEditor || entry.Kind() == tools.KindMCPResource || entry.Kind() == tools.KindTaskEnd {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, sessionID string, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool, error) {
-	current := message
+func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, sessionID string, req providers.ChatCompletionRequest, response *providers.ChatCompletionResponse, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool, error) {
+	current := response.Choices[0].Message
 	currentReq := req
-	var resp *providers.ChatCompletionResponse
+	resp := response
 	handled := false
 	sequence := 0
+	taskProtocolRetries := 0
+	explicitTaskEnd := toolCtx.Has(tools.TaskEndToolName)
 	for {
+		if explicitTaskEnd {
+			_, result, ended, protocolErr := chatTaskEndResult(current, toolCtx)
+			if protocolErr != nil {
+				if taskProtocolRetries >= maxTaskProtocolRetries {
+					violation := taskProtocolViolation(protocolErr)
+					s.writeTaskProtocolFailure(sessionID, logCtx.RequestID, logCtx.Model, currentReq.Model, logCtx.Profile, violation.Error(), messageText(current.Content), false)
+					return nil, providers.ChatCompletionRequest{}, false, violation
+				}
+				taskProtocolRetries++
+				handled = true
+				sequence++
+				followUp := chatTaskProtocolRetryRequest(currentReq, current, adapter.ToolPolicy().RequiredToolChoice, adapter.PrepareChatRequest)
+				s.writeTaskProtocolRetry(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, protocolErr.Error(), messageText(current.Content), false)
+				s.writePromptRequest(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "task_protocol_retry", providers.PreparedChatRequest(followUp), map[string]any{"sequence": sequence})
+				next, err := provider.Create(ctx, followUp)
+				if err != nil {
+					s.writePromptFailure(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "task_protocol_retry", err.Error(), map[string]any{"sequence": sequence})
+					return nil, providers.ChatCompletionRequest{}, false, err
+				}
+				s.writePromptResponse(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "task_protocol_retry", next, map[string]any{"sequence": sequence})
+				if len(next.Choices) == 0 {
+					return next, followUp, true, nil
+				}
+				resp = next
+				currentReq = followUp
+				current = next.Choices[0].Message
+				continue
+			}
+			if ended {
+				resp.Choices[0].Message = providers.ChatMessage{Role: "assistant", Content: sanitizeTaskProtocolText(result)}
+				return resp, currentReq, true, nil
+			}
+			current = chatWithoutTaskEndCalls(current, toolCtx)
+			resp.Choices[0].Message = current
+		}
 		followUp, ok := s.internalToolFollowUpRequest(ctx, currentReq, current, toolCtx, adapter, logCtx)
 		if !ok {
 			break
@@ -103,6 +140,9 @@ func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.
 	}
 	followUp := req
 	followUp.ToolChoice = "auto"
+	if toolCtx.Has(tools.TaskEndToolName) && adapter.ToolPolicy().RequiredToolChoice {
+		followUp.ToolChoice = "required"
+	}
 	followUp.Messages = append(append(followUp.Messages, internalMessage), outputs...)
 	followUp = adapter.PrepareChatRequest(followUp)
 	return followUp, true

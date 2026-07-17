@@ -2,32 +2,93 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestReasoningLevelsForModelAddsMaxForGPT56Upstream(t *testing.T) {
+func TestReasoningLevelsDoNotDependOnUpstreamModelName(t *testing.T) {
 	levels := reasoningLevelsForModel(ModelConfig{UpstreamModel: "gpt-5.6-sol"}, true)
 	efforts := make([]string, 0, len(levels))
 	for _, level := range levels {
 		efforts = append(efforts, level.Effort)
 	}
 
-	want := []string{"low", "medium", "high", "xhigh", "max"}
+	want := []string{"low", "medium", "high"}
 	if !reflect.DeepEqual(efforts, want) {
 		t.Fatalf("reasoning efforts = %v, want %v", efforts, want)
 	}
 }
 
-func TestReasoningLevelsForModelKeepsMaxOffNonGPT56Models(t *testing.T) {
-	levels := reasoningLevelsForModel(ModelConfig{UpstreamModel: "gpt-5.4-mini"}, true)
-	efforts := make([]string, 0, len(levels))
-	for _, level := range levels {
-		efforts = append(efforts, level.Effort)
+func TestK3ReasoningUsesGenericDefaultsWithoutModelNameHardCoding(t *testing.T) {
+	model := ModelConfig{UpstreamModel: "k3"}
+	if got := defaultReasoningLevel(model, true); got != "high" {
+		t.Fatalf("default reasoning level = %q, want high", got)
 	}
 
-	want := []string{"low", "medium", "high", "xhigh"}
-	if !reflect.DeepEqual(efforts, want) {
-		t.Fatalf("reasoning efforts = %v, want %v", efforts, want)
+	levels := reasoningLevelsForModel(model, true)
+	want := []ReasoningEffortPreset{
+		{Effort: "low", Description: "Fast responses with lighter reasoning"},
+		{Effort: "medium", Description: "Balanced reasoning for coding tasks"},
+		{Effort: "high", Description: "Deeper reasoning for complex changes"},
+	}
+	if !reflect.DeepEqual(levels, want) {
+		t.Fatalf("reasoning levels = %#v, want %#v", levels, want)
+	}
+}
+
+func TestReasoningLevelsUseModelConfiguration(t *testing.T) {
+	model := ModelConfig{
+		UpstreamModel:            "k3",
+		DefaultReasoningLevel:    "high",
+		SupportedReasoningLevels: []string{"high", "max"},
+	}
+	if got := defaultReasoningLevel(model, true); got != "high" {
+		t.Fatalf("default reasoning level = %q, want high", got)
+	}
+
+	levels := reasoningLevelsForModel(model, true)
+	want := []ReasoningEffortPreset{
+		{Effort: "high", Description: "Deeper reasoning for complex changes"},
+		{Effort: "max", Description: "Maximum provider-supported reasoning"},
+	}
+	if !reflect.DeepEqual(levels, want) {
+		t.Fatalf("reasoning levels = %#v, want %#v", levels, want)
+	}
+}
+
+func TestValidateRejectsReasoningDefaultOutsideSupportedLevels(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Listen: "127.0.0.1:8787"},
+		Codex: CodexConfig{
+			ModelCatalogPath: "/tmp/models.json",
+			DefaultModel:     "test-model",
+			LocalToken:       "local-token",
+		},
+		Providers: map[string]ProviderConfig{
+			"test": {
+				Type:    "openai_compatible",
+				BaseURL: "https://example.com/v1",
+				APIKey:  "test-key",
+				Profile: "default",
+			},
+		},
+		Models: map[string]ModelConfig{
+			"test-model": {
+				DisplayName:              "Test Model",
+				Provider:                 "test",
+				Profile:                  "default",
+				UpstreamModel:            "test-model",
+				DefaultReasoningLevel:    "max",
+				SupportedReasoningLevels: []string{"high"},
+				ContextWindow:            64000,
+				ApplyPatchToolType:       "freeform",
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "default_reasoning_level") {
+		t.Fatalf("Validate() error = %v, want default_reasoning_level error", err)
 	}
 }
 

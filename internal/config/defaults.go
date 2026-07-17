@@ -1,19 +1,25 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 )
 
-func DefaultConfigText(homeDir string) string {
+func DefaultConfigText(homeDir string) (string, error) {
 	catalogPath := filepath.ToSlash(filepath.Join(homeDir, ".codex", "models.codex-bridge.json"))
+	localToken, err := RandomLocalToken()
+	if err != nil {
+		return "", fmt.Errorf("generate local token: %w", err)
+	}
 	return fmt.Sprintf(`[server]
 listen = "127.0.0.1:8787"
 
 [codex]
 model_catalog_path = "%s"
 default_model = "deepseek-v4-flash"
-local_token = "codex-bridge-local-token"
+local_token = "%s"
 
 [model_discovery]
 enabled = true
@@ -61,5 +67,13 @@ upstream_model = "deepseek-v4-flash"
 context_window = 64000
 supports_parallel_tool_calls = true
 apply_patch_tool_type = "freeform"
-`, catalogPath)
+`, catalogPath, localToken), nil
+}
+
+func RandomLocalToken() (string, error) {
+	var data [20]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(data[:]), nil
 }

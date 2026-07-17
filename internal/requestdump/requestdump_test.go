@@ -4,8 +4,10 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWriteStoresGzipJSON(t *testing.T) {
@@ -37,5 +39,41 @@ func TestWriteStoresGzipJSON(t *testing.T) {
 	}
 	if body["message"] != "hello" {
 		t.Fatalf("unexpected body: %#v", body)
+	}
+}
+
+func TestMaybePruneDumpDirIsRateLimited(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "expired.json.gz")
+	if err := os.WriteFile(path, []byte("expired"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expiredAt := time.Now().Add(-maxDumpAge - time.Hour)
+	if err := os.Chtimes(path, expiredAt, expiredAt); err != nil {
+		t.Fatal(err)
+	}
+
+	pruneMu.Lock()
+	lastPruneDir = dir
+	lastPruneAt = time.Now()
+	pruneMu.Unlock()
+	t.Cleanup(func() {
+		pruneMu.Lock()
+		lastPruneDir = ""
+		lastPruneAt = time.Time{}
+		pruneMu.Unlock()
+	})
+
+	maybePruneDumpDir(dir)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("rate-limited prune removed file: %v", err)
+	}
+
+	pruneMu.Lock()
+	lastPruneAt = time.Time{}
+	pruneMu.Unlock()
+	maybePruneDumpDir(dir)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expired dump should be removed, stat error = %v", err)
 	}
 }

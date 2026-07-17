@@ -37,7 +37,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 		extra := map[string]any{"stream": true, "internal_tools": true}
 		s.writeBridgeFailure(sessionID, requestID, req.Model, chatReq.Model, profile, http.StatusBadGateway, err.Error(), extra)
 		incidentlog.Write("upstream_stream_event_error", s.incidentRecord(r, req, requestID, profile, dumpPath, map[string]any{"error": err.Error(), "stream": true, "internal_tools": true}))
-		_ = writer.Event(map[string]any{"type": "response.failed", "response": map[string]any{"id": respID, "error": map[string]any{"message": err.Error(), "type": "server_error"}}})
+		_ = writer.Event(map[string]any{"type": "response.failed", "response": map[string]any{"id": respID, "error": map[string]any{"message": err.Error(), "type": responseFailureType(err)}}})
 		return
 	}
 	items := enforceStructuredOutput(finalState.Done(), chatReq.ResponseFormat)
@@ -69,19 +69,61 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 	currentReq := chatReq
 	localResolver := s.localToolResultResolver(logCtx, toolCtx)
 	var totalUsage providers.NormalizedUsage
-	finalState, usage, err := s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "initial", true, localResolver, false)
+	finalState, usage, err := s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "initial", true, localResolver, true, 0)
 	if err != nil {
 		return nil, shape, totalUsage, err
 	}
 	totalUsage = addUsage(totalUsage, usage)
 	sequence := 0
+	taskProtocolRetries := 0
+	explicitTaskEnd := toolCtx.Has(tools.TaskEndToolName)
 	for {
 		message := chatMessageFromStreamState(finalState)
-		trace.emit(writer, message, toolCtx)
+		if explicitTaskEnd {
+			_, result, ended, protocolErr := chatTaskEndResult(message, toolCtx)
+			if protocolErr != nil {
+				if taskProtocolRetries == 0 && finalState.eventsEmitted {
+					trace.captureNarrative(writer, finalState)
+				}
+				if taskProtocolRetries >= maxTaskProtocolRetries {
+					violation := taskProtocolViolation(protocolErr)
+					s.writeTaskProtocolFailure(sessionID, requestID, model, currentReq.Model, profile, violation.Error(), messageText(message.Content), true)
+					return nil, shape, totalUsage, violation
+				}
+				taskProtocolRetries++
+				sequence++
+				followUpReq := chatTaskProtocolRetryRequest(currentReq, message, adapter.ToolPolicy().RequiredToolChoice, adapter.PrepareChatRequest)
+				s.writeTaskProtocolRetry(sessionID, requestID, model, followUpReq.Model, profile, protocolErr.Error(), messageText(message.Content), true)
+				s.writePromptRequest(sessionID, requestID, model, followUpReq.Model, profile, "task_protocol_retry", providers.PreparedChatRequest(followUpReq), map[string]any{"sequence": sequence, "stream": true})
+				shape = optimization.CaptureShape(followUpReq)
+				currentReq = followUpReq
+				finalState, usage, err = s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "task_protocol_retry", true, localResolver, false, len(trace.items))
+				if err != nil {
+					return nil, shape, totalUsage, err
+				}
+				totalUsage = addUsage(totalUsage, usage)
+				continue
+			}
+			if ended {
+				if finalState.textAdded || finalState.reasoningAdded {
+					trace.captureNarrative(writer, finalState)
+				}
+				if len(trace.items) > 0 {
+					return emptyStreamState(r, toolCtx, adapter, requestID, model, profile, s.logger, localResolver), shape, totalUsage, nil
+				}
+				completed := newStreamState(r.Context(), toolCtx, adapter, requestID, model, profile, s.logger, localResolver)
+				completed.text = sanitizeTaskProtocolText(result)
+				return completed, shape, totalUsage, nil
+			}
+		}
 		followUpReq, ok := s.internalToolFollowUpRequest(r.Context(), currentReq, message, toolCtx, adapter, logCtx)
 		if !ok {
 			return finalState, shape, totalUsage, nil
 		}
+		if finalState.eventsEmitted {
+			trace.captureNarrative(writer, finalState)
+		}
+		trace.emit(writer, message, toolCtx)
 		if sequence >= maxInternalToolRounds {
 			return nil, shape, totalUsage, fmt.Errorf("internal tool follow-up exceeded %d rounds", maxInternalToolRounds)
 		}
@@ -89,7 +131,7 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 		s.writePromptRequest(sessionID, requestID, model, followUpReq.Model, profile, "internal_tool_followup", providers.PreparedChatRequest(followUpReq), map[string]any{"sequence": sequence, "stream": true})
 		shape = optimization.CaptureShape(followUpReq)
 		currentReq = followUpReq
-		finalState, usage, err = s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "internal_tool_followup", true, localResolver, false)
+		finalState, usage, err = s.streamVisibleMessage(r, writer, respID, createdAt, currentReq, provider, toolCtx, adapter, requestID, sessionID, model, profile, "internal_tool_followup", true, localResolver, true, len(trace.items))
 		if err != nil {
 			return nil, shape, totalUsage, err
 		}
@@ -99,6 +141,31 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 
 type internalToolTrace struct {
 	items []codex.ResponseItem
+}
+
+func (t *internalToolTrace) captureNarrative(writer *codex.SSEWriter, state *streamState) {
+	var narrative []indexedResponseItem
+	if item := reasoningItem(state.reasoning); item != nil {
+		if state.reasoningAdded {
+			item["id"] = state.reasoningItemID
+		}
+		narrative = append(narrative, indexedResponseItem{index: state.itemIndex(state.reasoningIndex), item: item})
+	}
+	if state.textAdded || state.text != "" {
+		narrative = append(narrative, indexedResponseItem{index: state.itemIndex(state.textIndex), item: codex.ResponseItem{
+			"id":      state.textItemID,
+			"type":    "message",
+			"role":    "assistant",
+			"content": []map[string]string{{"type": "output_text", "text": state.text}},
+		}})
+	}
+	for _, item := range sortedResponseItems(narrative) {
+		outputIndex := len(t.items)
+		t.items = append(t.items, item)
+		for _, event := range outputDoneEvents(item, outputIndex, state.eventsEmitted) {
+			_ = writer.Event(event)
+		}
+	}
 }
 
 func (t *internalToolTrace) emit(writer *codex.SSEWriter, message providers.ChatMessage, toolCtx tools.Context) {
@@ -133,7 +200,7 @@ func internalToolCallItem(call providers.ChatToolCall, toolCtx tools.Context) (c
 	}, true
 }
 
-func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, stage string, hideInternalTools bool, localResolver toolCallLocalResolver, emitEvents bool) (*streamState, providers.NormalizedUsage, error) {
+func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, respID string, createdAt int64, chatReq providers.ChatCompletionRequest, provider providers.ChatProvider, toolCtx tools.Context, adapter adapters.Adapter, requestID string, sessionID string, model string, profile string, stage string, hideInternalTools bool, localResolver toolCallLocalResolver, emitEvents bool, outputIndexOffset int) (*streamState, providers.NormalizedUsage, error) {
 	startedAt := time.Now()
 	stream, err := provider.Stream(r.Context(), chatReq)
 	if err != nil {
@@ -145,6 +212,11 @@ func (s *Server) streamVisibleMessage(r *http.Request, writer *codex.SSEWriter, 
 		slog.Int64("elapsed_ms", time.Since(startedAt).Milliseconds()),
 	)
 	state := newStreamState(r.Context(), toolCtx, adapter, requestID, model, profile, s.logger, localResolver)
+	state.nextOutputIndex = outputIndexOffset
+	if outputIndexOffset > 0 {
+		state.textItemID = fmt.Sprintf("msg_%s_%d", requestID, outputIndexOffset)
+		state.reasoningItemID = fmt.Sprintf("rs_%s_%d", requestID, outputIndexOffset)
+	}
 	var usage providers.NormalizedUsage
 	firstChunk := true
 	streamSeq := 0
@@ -201,6 +273,10 @@ streamLoop:
 	return state, usage, nil
 }
 
+func emptyStreamState(r *http.Request, toolCtx tools.Context, adapter adapters.Adapter, requestID string, model string, profile string, logger *slog.Logger, localResolver toolCallLocalResolver) *streamState {
+	return newStreamState(r.Context(), toolCtx, adapter, requestID, model, profile, logger, localResolver)
+}
+
 func addUsage(total providers.NormalizedUsage, usage providers.NormalizedUsage) providers.NormalizedUsage {
 	total.InputTokens += usage.InputTokens
 	total.CachedInputTokens += usage.CachedInputTokens
@@ -214,7 +290,7 @@ func addUsage(total providers.NormalizedUsage, usage providers.NormalizedUsage) 
 func isInternalToolEvent(event map[string]any) bool {
 	item, _ := event["item"].(map[string]any)
 	name, _ := item["name"].(string)
-	return name == tools.WebSearchProxyToolName || name == tools.ReadFileToolName || name == tools.ListFilesToolName || name == tools.FileSearchToolName
+	return name == tools.WebSearchProxyToolName || name == tools.TaskEndToolName || name == tools.ReadFileToolName || name == tools.ListFilesToolName || name == tools.FileSearchToolName
 }
 
 func chatMessageFromStreamState(state *streamState) providers.ChatMessage {

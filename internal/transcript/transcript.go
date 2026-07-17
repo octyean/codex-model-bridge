@@ -24,6 +24,7 @@ type Result struct {
 
 type LogContext struct {
 	RequestID       string
+	SessionID       string
 	Model           string
 	UpstreamModel   string
 	Profile         string
@@ -108,7 +109,7 @@ func ToChatMessagesWithRuntime(ctx context.Context, req codex.ResponsesRequest, 
 				continue
 			}
 			call := functionToolCall(item, toolCtx)
-			call = logicalProxyHistoryToolCall(call)
+			call = logicalProxyHistoryToolCall(call, logContext.SessionID)
 			pendingToolCalls = append(pendingToolCalls, call)
 			toolCallsByID[call.ID] = call
 		case "custom_tool_call":
@@ -527,11 +528,11 @@ func functionToolCall(item map[string]any, toolCtx tools.Context) providers.Chat
 	}
 }
 
-func logicalProxyHistoryToolCall(call providers.ChatToolCall) providers.ChatToolCall {
+func logicalProxyHistoryToolCall(call providers.ChatToolCall, sessionID string) providers.ChatToolCall {
 	if call.Function.Name != "exec_command" {
 		return call
 	}
-	logical, ok := toollog.RememberedLogicalToolCall(call.ID)
+	logical, ok := toollog.RememberedLogicalToolCall(sessionID, call.ID)
 	if !ok || !tools.IsNativeCommandProxyToolName(logical.Name) {
 		return call
 	}

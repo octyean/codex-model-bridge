@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -12,7 +14,7 @@ import (
 )
 
 const (
-	modelCapabilityCacheVersion = 2
+	modelCapabilityCacheVersion = 3
 	defaultCapabilityMaxAge     = 30 * 24 * time.Hour
 )
 
@@ -20,6 +22,8 @@ type VerifiedModelCapability struct {
 	Provider                    string            `json:"provider"`
 	BaseURL                     string            `json:"base_url"`
 	Model                       string            `json:"model"`
+	CredentialFingerprint       string            `json:"credential_fingerprint"`
+	ProfileFingerprint          string            `json:"profile_fingerprint"`
 	ProbeVersion                int               `json:"probe_version"`
 	VerifiedAt                  time.Time         `json:"verified_at"`
 	ExpiresAt                   time.Time         `json:"expires_at"`
@@ -67,6 +71,12 @@ func (cfg *Config) VerifiedCapability(model ModelConfig, provider ProviderConfig
 	if strings.TrimRight(capability.BaseURL, "/") != strings.TrimRight(provider.BaseURL, "/") {
 		return VerifiedModelCapability{}, false
 	}
+	if capability.CredentialFingerprint != providerCredentialFingerprint(provider) {
+		return VerifiedModelCapability{}, false
+	}
+	if capability.ProfileFingerprint != cfg.providerProfileFingerprint(model.Provider, model.UpstreamModel, provider) {
+		return VerifiedModelCapability{}, false
+	}
 	if capability.ProbeVersion != upstreamprobe.ProbeVersion {
 		return VerifiedModelCapability{}, false
 	}
@@ -91,6 +101,8 @@ func (cfg *Config) UpdateVerifiedCapability(providerName string, provider Provid
 		Provider:                    providerName,
 		BaseURL:                     strings.TrimRight(provider.BaseURL, "/"),
 		Model:                       result.ProbeModel,
+		CredentialFingerprint:       providerCredentialFingerprint(provider),
+		ProfileFingerprint:          cfg.providerProfileFingerprint(providerName, result.ProbeModel, provider),
 		ProbeVersion:                upstreamprobe.ProbeVersion,
 		VerifiedAt:                  verifiedAt,
 		ExpiresAt:                   verifiedAt.Add(cfg.CapabilityMaxAge()),
@@ -160,9 +172,16 @@ func (cfg *Config) CapabilityWarnings(now time.Time) []string {
 			if !cfg.usesThirdPartyProfile(providerName, modelName) {
 				continue
 			}
+			provider, ok := cfg.Providers[providerName]
+			if !ok {
+				continue
+			}
 			switch {
 			case capability.ProbeVersion != upstreamprobe.ProbeVersion:
 				warnings = append(warnings, fmt.Sprintf("%s/%s uses probe version %d; run verify again", providerName, modelName, capability.ProbeVersion))
+			case capability.CredentialFingerprint != providerCredentialFingerprint(provider) ||
+				capability.ProfileFingerprint != cfg.providerProfileFingerprint(providerName, modelName, provider):
+				warnings = append(warnings, fmt.Sprintf("%s/%s provider credentials or profile changed; run verify again", providerName, modelName))
 			case capability.VerifiedAt.IsZero() || now.Sub(capability.VerifiedAt) > cfg.CapabilityMaxAge():
 				warnings = append(warnings, fmt.Sprintf("%s/%s capability verification expired; run verify again", providerName, modelName))
 			}
@@ -192,6 +211,38 @@ func normalizeCapabilityCache(cache *modelCapabilityCache) {
 	if cache.Models == nil {
 		cache.Models = map[string]map[string]VerifiedModelCapability{}
 	}
+}
+
+func providerCredentialFingerprint(provider ProviderConfig) string {
+	return cacheFingerprint("credential", strings.TrimSpace(provider.APIKey))
+}
+
+func (cfg *Config) providerProfileFingerprint(providerName string, upstreamModel string, provider ProviderConfig) string {
+	profiles := map[string]struct{}{}
+	for _, model := range cfg.Models {
+		if model.Provider != providerName || model.UpstreamModel != upstreamModel {
+			continue
+		}
+		profiles[cfg.ProfileName(model, provider)] = struct{}{}
+	}
+	if len(profiles) == 0 {
+		profiles[adapters.Normalize(provider.Profile)] = struct{}{}
+	}
+	values := make([]string, 0, len(profiles)+3)
+	values = append(values,
+		"provider_type="+strings.TrimSpace(provider.Type),
+		"protocol="+strings.TrimSpace(provider.Protocol),
+	)
+	for profile := range profiles {
+		values = append(values, "profile="+profile)
+	}
+	sort.Strings(values)
+	return cacheFingerprint(values...)
+}
+
+func cacheFingerprint(values ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return hex.EncodeToString(sum[:])
 }
 
 func resolveStatePath(configPath string, statePath string) string {

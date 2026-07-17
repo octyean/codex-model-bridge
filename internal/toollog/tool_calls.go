@@ -17,12 +17,25 @@ import (
 	"codex-bridge/internal/tools"
 )
 
-const EnvToolLogPath = "CODEX_BRIDGE_TOOL_LOG"
+const (
+	EnvToolLogPath = "CODEX_BRIDGE_TOOL_LOG"
 
-var seenToolOutputs sync.Map
-var modelToolCalls sync.Map
-var logicalToolCalls sync.Map
-var requestContexts sync.Map
+	toolStateTTL        = 24 * time.Hour
+	maxToolStateEntries = 8192
+)
+
+type rememberedStateEntry struct {
+	Value    any
+	LastSeen time.Time
+}
+
+var (
+	toolStateMu      sync.Mutex
+	seenToolOutputs  = map[string]rememberedStateEntry{}
+	modelToolCalls   = map[string]rememberedStateEntry{}
+	logicalToolCalls = map[string]rememberedStateEntry{}
+	requestContexts  sync.Map
+)
 
 type requestContext struct {
 	SessionID     string
@@ -61,9 +74,9 @@ func ToolCall(requestID string, model string, profile string, callID string, ent
 		record["reasoning"] = incidentlog.TextSummary(reasoning)
 	}
 	attachRequestContext(record)
-	modelToolCalls.Store(callID, cloneRecord(record))
+	rememberState(modelToolCalls, scopedCallKey(requestStateScope(requestID), callID), cloneRecord(record))
 	if tools.IsNativeCommandProxyToolName(entry.Name()) {
-		logicalToolCalls.Store(callID, LogicalToolCall{Name: entry.Name(), Arguments: rawArguments})
+		rememberState(logicalToolCalls, scopedCallKey(requestSessionScope(requestID), callID), LogicalToolCall{Name: entry.Name(), Arguments: rawArguments})
 	}
 	appendRecord(record)
 }
@@ -75,6 +88,7 @@ func RememberRequestSession(requestID string, sessionID string, model string, up
 		return
 	}
 	requestContexts.Store(requestID, requestContext{SessionID: sessionID, Model: model, UpstreamModel: upstreamModel})
+	pruneRememberedState(time.Now())
 	toolruntime.RememberRequest(toolruntime.RequestContext{
 		RequestID:      requestID,
 		SessionID:      sessionID,
@@ -153,7 +167,7 @@ func ToolCallRerouted(requestID string, model string, profile string, callID str
 		"reason":           reason,
 	}
 	addEntryContract(record, entry)
-	if modelCall := rememberedToolCall(callID); modelCall != nil {
+	if modelCall := rememberedToolCall(requestID, callID); modelCall != nil {
 		record["model_call"] = modelCall
 	}
 	appendRecord(record)
@@ -176,7 +190,7 @@ func ToolCallFrame(requestID string, model string, profile string, callID string
 		"runtime_arguments":   runtimeArguments,
 	}
 	addEntryContract(record, entry)
-	if modelCall := rememberedToolCall(callID); modelCall != nil {
+	if modelCall := rememberedToolCall(requestID, callID); modelCall != nil {
 		record["model_call"] = modelCall
 	}
 	appendRecord(record)
@@ -205,15 +219,15 @@ func BrokerDecision(requestID string, model string, profile string, callID strin
 	if decision.RetryCount > 0 {
 		record["retry_count"] = decision.RetryCount
 	}
-	if modelCall := rememberedToolCall(callID); modelCall != nil {
+	if modelCall := rememberedToolCall(requestID, callID); modelCall != nil {
 		record["model_call"] = modelCall
 	}
 	appendRecord(record)
 }
 
 func ToolOutput(ctx OutputContext, callID string, descriptor adapters.ToolDescriptor, rawArguments string, rawOutput string, formattedOutput string) {
-	modelCall := takeRememberedToolCall(callID)
-	if seenToolOutput(callID, rawOutput) {
+	modelCall := takeRememberedToolCall(ctx.RequestID, callID)
+	if seenToolOutput(ctx.RequestID, callID, rawOutput) {
 		return
 	}
 	failureKind := adapters.PatchFailureNone
@@ -352,11 +366,22 @@ func isPatchWriteKind(kind string) bool {
 	return kind == tools.KindPatch || kind == tools.KindTextEditor
 }
 
-func seenToolOutput(callID string, rawOutput string) bool {
-	key := ConfiguredPath() + ":" + callID + ":" + outputHash(rawOutput)
-	if _, loaded := seenToolOutputs.LoadOrStore(key, true); loaded {
+func seenToolOutput(requestID string, callID string, rawOutput string) bool {
+	key := scopedCallKey(requestStateScope(requestID), callID)
+	if key == "" {
+		return false
+	}
+	key += "\x00" + outputHash(rawOutput)
+	now := time.Now()
+	toolStateMu.Lock()
+	defer toolStateMu.Unlock()
+	if entry, ok := seenToolOutputs[key]; ok && !entry.LastSeen.Before(now.Add(-toolStateTTL)) {
+		entry.LastSeen = now
+		seenToolOutputs[key] = entry
 		return true
 	}
+	seenToolOutputs[key] = rememberedStateEntry{LastSeen: now}
+	pruneRememberedMapLocked(seenToolOutputs, now)
 	return false
 }
 
@@ -365,8 +390,8 @@ func outputHash(text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func rememberedToolCall(callID string) map[string]any {
-	value, ok := modelToolCalls.Load(callID)
+func rememberedToolCall(requestID string, callID string) map[string]any {
+	value, ok := loadRememberedState(modelToolCalls, scopedCallKey(requestStateScope(requestID), callID), false)
 	if !ok {
 		return nil
 	}
@@ -374,8 +399,8 @@ func rememberedToolCall(callID string) map[string]any {
 	return cloneRecord(record)
 }
 
-func takeRememberedToolCall(callID string) map[string]any {
-	value, ok := modelToolCalls.LoadAndDelete(callID)
+func takeRememberedToolCall(requestID string, callID string) map[string]any {
+	value, ok := loadRememberedState(modelToolCalls, scopedCallKey(requestStateScope(requestID), callID), true)
 	if !ok {
 		return nil
 	}
@@ -383,8 +408,8 @@ func takeRememberedToolCall(callID string) map[string]any {
 	return cloneRecord(record)
 }
 
-func RememberedLogicalToolCall(callID string) (LogicalToolCall, bool) {
-	value, ok := logicalToolCalls.Load(callID)
+func RememberedLogicalToolCall(sessionID string, callID string) (LogicalToolCall, bool) {
+	value, ok := loadRememberedState(logicalToolCalls, scopedCallKey(sessionStateScope(sessionID), callID), false)
 	if !ok {
 		return LogicalToolCall{}, false
 	}
@@ -393,6 +418,110 @@ func RememberedLogicalToolCall(callID string) (LogicalToolCall, bool) {
 		return LogicalToolCall{}, false
 	}
 	return call, true
+}
+
+func rememberState(values map[string]rememberedStateEntry, key string, value any) {
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	toolStateMu.Lock()
+	defer toolStateMu.Unlock()
+	values[key] = rememberedStateEntry{Value: value, LastSeen: now}
+	pruneRememberedMapLocked(values, now)
+}
+
+func loadRememberedState(values map[string]rememberedStateEntry, key string, remove bool) (any, bool) {
+	if key == "" {
+		return nil, false
+	}
+	now := time.Now()
+	toolStateMu.Lock()
+	defer toolStateMu.Unlock()
+	entry, ok := values[key]
+	if !ok {
+		return nil, false
+	}
+	if entry.LastSeen.Before(now.Add(-toolStateTTL)) {
+		delete(values, key)
+		return nil, false
+	}
+	if remove {
+		delete(values, key)
+	} else {
+		entry.LastSeen = now
+		values[key] = entry
+	}
+	return entry.Value, true
+}
+
+func pruneRememberedState(now time.Time) {
+	toolStateMu.Lock()
+	defer toolStateMu.Unlock()
+	pruneRememberedMapLocked(seenToolOutputs, now)
+	pruneRememberedMapLocked(modelToolCalls, now)
+	pruneRememberedMapLocked(logicalToolCalls, now)
+}
+
+func pruneRememberedMapLocked(values map[string]rememberedStateEntry, now time.Time) {
+	cutoff := now.Add(-toolStateTTL)
+	for key, entry := range values {
+		if entry.LastSeen.Before(cutoff) {
+			delete(values, key)
+		}
+	}
+	for len(values) > maxToolStateEntries {
+		oldestKey := ""
+		var oldest time.Time
+		for key, entry := range values {
+			if oldestKey == "" || entry.LastSeen.Before(oldest) {
+				oldestKey = key
+				oldest = entry.LastSeen
+			}
+		}
+		delete(values, oldestKey)
+	}
+}
+
+func requestStateScope(requestID string) string {
+	if sessionID := requestSessionID(requestID); sessionID != "" {
+		return sessionStateScope(sessionID)
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return ""
+	}
+	return "request:" + requestID
+}
+
+func requestSessionScope(requestID string) string {
+	return sessionStateScope(requestSessionID(requestID))
+}
+
+func requestSessionID(requestID string) string {
+	value, ok := requestContexts.Load(requestID)
+	if !ok {
+		return ""
+	}
+	ctx, _ := value.(requestContext)
+	return strings.TrimSpace(ctx.SessionID)
+}
+
+func sessionStateScope(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	return "session:" + sessionID
+}
+
+func scopedCallKey(scope string, callID string) string {
+	scope = strings.TrimSpace(scope)
+	callID = strings.TrimSpace(callID)
+	if scope == "" || callID == "" {
+		return ""
+	}
+	return scope + "\x00" + callID
 }
 
 func modelCallToolName(record map[string]any) string {

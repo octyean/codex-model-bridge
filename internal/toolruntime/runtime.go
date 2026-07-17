@@ -20,6 +20,9 @@ const (
 	CapabilityInteract = "interact"
 	CapabilityStatus   = "status"
 	CapabilityUnknown  = "unknown"
+
+	sessionStateTTL  = 24 * time.Hour
+	maxSessionStates = 1024
 )
 
 type ToolInfo struct {
@@ -89,28 +92,16 @@ type Outcome struct {
 	ProgressKey string
 }
 
-type attempt struct {
-	Time          string
-	RequestID     string
-	CallID        string
-	Tool          string
-	Capability    string
-	ArgumentsHash string
-	OK            bool
-	Category      string
-	Progress      bool
-	OutputHash    string
-}
-
 type sessionState struct {
-	Attempts map[string][]attempt
+	NoProgressFailures map[string]int
+	LastSeen           time.Time
 }
 
 var (
 	mu              sync.Mutex
 	requestContexts = map[string]RequestContext{}
 	requestPlanned  = map[string]map[string]int{}
-	callProfiles    = map[string]Profile{}
+	callProfiles    = map[string]map[string]Profile{}
 	sessions        = map[string]*sessionState{}
 )
 
@@ -123,7 +114,9 @@ func RememberRequest(ctx RequestContext) {
 	requestContexts[ctx.RequestID] = ctx
 	requestPlanned[ctx.RequestID] = map[string]int{}
 	if strings.TrimSpace(ctx.SessionID) != "" {
-		ensureSessionLocked(ctx.SessionID)
+		now := time.Now()
+		ensureSessionLocked(ctx.SessionID, now)
+		pruneSessionsLocked(now)
 	}
 }
 
@@ -132,11 +125,12 @@ func ForgetRequest(requestID string) {
 	defer mu.Unlock()
 	delete(requestContexts, requestID)
 	delete(requestPlanned, requestID)
+	delete(callProfiles, requestID)
 }
 
 func Decide(ctx CallContext) Decision {
 	profile := ProfileTool(ctx.Tool)
-	rememberCallProfile(ctx.CallID, profile)
+	rememberCallProfile(ctx.RequestID, ctx.CallID, profile)
 	decision := Decision{
 		Action:       DecisionAllow,
 		Reason:       "runtime_signature_allowed",
@@ -181,7 +175,7 @@ func Decide(ctx CallContext) Decision {
 }
 
 func ObserveOutput(ctx OutputContext) Outcome {
-	profile, ok := callProfile(ctx.CallID)
+	profile, ok := callProfile(ctx.RequestID, ctx.CallID)
 	if !ok {
 		tool := ctx.Tool
 		if strings.TrimSpace(ctx.ModelCallTool) != "" {
@@ -205,24 +199,33 @@ func ObserveOutput(ctx OutputContext) Outcome {
 	return outcome
 }
 
-func rememberCallProfile(callID string, profile Profile) {
-	if strings.TrimSpace(callID) == "" || profile.Signature == "" {
+func rememberCallProfile(requestID string, callID string, profile Profile) {
+	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(callID) == "" || profile.Signature == "" {
 		return
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	callProfiles[callID] = profile
+	profiles := callProfiles[requestID]
+	if profiles == nil {
+		profiles = map[string]Profile{}
+		callProfiles[requestID] = profiles
+	}
+	profiles[callID] = profile
 }
 
-func callProfile(callID string) (Profile, bool) {
-	if strings.TrimSpace(callID) == "" {
+func callProfile(requestID string, callID string) (Profile, bool) {
+	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(callID) == "" {
 		return Profile{}, false
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	profile, ok := callProfiles[callID]
+	profiles := callProfiles[requestID]
+	profile, ok := profiles[callID]
 	if ok {
-		delete(callProfiles, callID)
+		delete(profiles, callID)
+		if len(profiles) == 0 {
+			delete(callProfiles, requestID)
+		}
 	}
 	return profile, ok
 }
@@ -317,19 +320,15 @@ func recordAttempt(ctx OutputContext, profile Profile, outcome Outcome) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	state := ensureSessionLocked(reqCtx.SessionID)
-	state.Attempts[profile.Signature] = append(state.Attempts[profile.Signature], attempt{
-		Time:          time.Now().Format(time.RFC3339Nano),
-		RequestID:     ctx.RequestID,
-		CallID:        ctx.CallID,
-		Tool:          profile.Tool,
-		Capability:    profile.Capability,
-		ArgumentsHash: profile.ArgumentsHash,
-		OK:            outcome.OK,
-		Category:      outcome.Category,
-		Progress:      outcome.Progress,
-		OutputHash:    outcome.OutputHash,
-	})
+	now := time.Now()
+	state := ensureSessionLocked(reqCtx.SessionID, now)
+	if outcome.Progress {
+		clear(state.NoProgressFailures)
+		return
+	}
+	if !outcome.OK {
+		state.NoProgressFailures[profile.Signature]++
+	}
 }
 
 func noProgressRetries(sessionID string, signature string) int {
@@ -342,13 +341,8 @@ func noProgressRetries(sessionID string, signature string) int {
 	if state == nil {
 		return 0
 	}
-	count := 0
-	for _, attempt := range state.Attempts[signature] {
-		if !attempt.OK && !attempt.Progress {
-			count++
-		}
-	}
-	return count
+	state.LastSeen = time.Now()
+	return state.NoProgressFailures[signature]
 }
 
 func duplicatePlanned(requestID string, signature string) bool {
@@ -374,13 +368,34 @@ func markPlanned(requestID string, signature string) {
 	planned[signature]++
 }
 
-func ensureSessionLocked(sessionID string) *sessionState {
+func ensureSessionLocked(sessionID string, now time.Time) *sessionState {
 	state := sessions[sessionID]
 	if state == nil {
-		state = &sessionState{Attempts: map[string][]attempt{}}
+		state = &sessionState{NoProgressFailures: map[string]int{}}
 		sessions[sessionID] = state
 	}
+	state.LastSeen = now
 	return state
+}
+
+func pruneSessionsLocked(now time.Time) {
+	cutoff := now.Add(-sessionStateTTL)
+	for sessionID, state := range sessions {
+		if state.LastSeen.Before(cutoff) {
+			delete(sessions, sessionID)
+		}
+	}
+	for len(sessions) > maxSessionStates {
+		oldestID := ""
+		var oldest time.Time
+		for sessionID, state := range sessions {
+			if oldestID == "" || state.LastSeen.Before(oldest) {
+				oldestID = sessionID
+				oldest = state.LastSeen
+			}
+		}
+		delete(sessions, oldestID)
+	}
 }
 
 func canonicalArguments(arguments string) string {

@@ -85,6 +85,17 @@ func UseMCPResourceProxy(adapter Adapter) bool {
 	return adapter.Name() != OpenAIName
 }
 
+func UseExplicitTaskEnd(adapter Adapter, upstreamModel string) bool {
+	model := strings.ToLower(strings.TrimSpace(upstreamModel))
+	return adapter.Name() != OpenAIName &&
+		model != "gpt" &&
+		!strings.HasPrefix(model, "gpt-") &&
+		!strings.HasPrefix(model, "chatgpt-") &&
+		!strings.HasPrefix(model, "o1") &&
+		!strings.HasPrefix(model, "o3") &&
+		!strings.HasPrefix(model, "o4")
+}
+
 func HasImageInput(caps Capabilities) bool {
 	for _, modality := range caps.InputModalities {
 		if strings.EqualFold(strings.TrimSpace(modality), "image") {

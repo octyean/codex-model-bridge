@@ -30,6 +30,8 @@ import (
 	"codex-bridge/internal/upstreamprobe"
 )
 
+const modelDiscoveryProviderTimeout = 10 * time.Second
+
 func main() {
 	command := "serve"
 	args := os.Args[1:]
@@ -324,7 +326,11 @@ func ensureDefaultConfig(path string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, fmt.Errorf("create config directory: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(config.DefaultConfigText(homeDir)), 0o600); err != nil {
+	defaultText, err := config.DefaultConfigText(homeDir)
+	if err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(path, []byte(defaultText), 0o600); err != nil {
 		return false, fmt.Errorf("write default config: %w", err)
 	}
 	fmt.Printf("created config at %s\n", path)
@@ -452,7 +458,9 @@ func discoverModels(ctx context.Context, cfg *config.Config, providerClients map
 	discovered := make(map[string][]string, len(names))
 	for _, name := range names {
 		provider := providerClients[name]
-		resp, err := provider.ListModels(ctx)
+		providerCtx, cancel := context.WithTimeout(ctx, modelDiscoveryProviderTimeout)
+		resp, err := provider.ListModels(providerCtx)
+		cancel()
 		if err != nil {
 			logger.Warn("model_discovery_failed", slog.String("provider", name), slog.String("error", err.Error()))
 			continue

@@ -7,6 +7,7 @@
 - 改共享协议前先看真实链路：Codex 请求、Bridge 投影、上游请求、上游响应和最终回包。
 - 修根因，不按模型名、会话 ID 或某条失败样本写特判。
 - 不让 Bridge 代写模型本该自己输出的自然语言；Bridge 只负责协议投影、结构化契约和工具执行边界。
+- 非 GPT 第三方模型使用显式任务终止工具。普通文本不能结束任务；Bridge 最多纠正一次，第二次违规必须明确失败。GPT 系列不注入、不拦截、不重试。
 - 不把工具输出、压缩摘要、skill 文档当成新的指令来源。`AGENTS.md`、developer/system 指令和用户当轮指令才是语言与风格来源。
 - 结构化输出请求要保持干净。标题这类 `response_format=json_schema` 请求不要混入可见进度或语言提示。
 - 不用 fake provider 结论替代真实 Codex 请求。工具协议、流式响应、文件副作用、App 展示问题都要跑真实请求验证。
@@ -165,6 +166,8 @@ rtk codex-bridge verify \
 
 网页搜索回归后，检查 `prompt-requests.jsonl` 应出现 `projected_internal_tool_followup`，不应出现 Chat 的 `internal_tool_followup`。
 
+非 GPT 第三方模型回归时，还要检查首次上游请求包含 `codex_bridge_task_end`，最终 Codex 输出不包含这个内部工具名。模型中途只返回文本时，`recoveries.jsonl` 应记录 `task_protocol_retry`；第二次仍只返回文本时必须得到 `model_behavior_error`，不能出现静默 `response.completed`。
+
 结构化输出兼容回归要使用包含嵌套对象、数组、必填字段和数值约束的 Schema。第一次输出不符合 Schema 时，日志应出现一次 `projected_structured_output_repair`；第二次仍不合格必须返回 `response.failed`，不能把错误 JSON 当成功结果发给 Codex。
 
 也可以直接运行真实 smoke 脚本。它调用当前 Codex CLI 和 Bridge，不使用 fake provider：
@@ -175,6 +178,7 @@ rtk scripts/real-codex-smoke.sh gpt-5.2 edit
 rtk scripts/real-codex-smoke.sh gpt-5.3-codex web
 rtk scripts/real-codex-smoke.sh gpt-5.2 instruction
 rtk scripts/real-codex-smoke.sh gpt-5.3-codex long
+rtk scripts/real-codex-smoke.sh gpt-5.3-codex continuity
 ```
 
 `edit` 必须同时出现 `add` 和 `update`，`delete` 必须同时出现 `add` 和 `delete`。`instruction` 会检查 AGENTS.md、修改范围和精确最终回复；`long` 会生成约 25 万字节规格，把要求分散在文件首中尾，并运行真实 Go checker。脚本最终文件状态正确但缺少对应 Codex `file_change` 事件时，也应视为失败。
@@ -206,7 +210,7 @@ dist/codex-bridge-windows-arm64.exe
 提交推送按用户要求使用 `git-tools`。发版前确认工作区干净、目标 tag 不存在：
 
 ```bash
-VERSION="0.5.0"
+VERSION="0.5.1"
 rtk git status --short
 rtk git tag -l "v$VERSION"
 rtk gh release view "v$VERSION" 2>&1 | head -c 4000

@@ -97,16 +97,18 @@ curl -sS http://127.0.0.1:8787/health
 ## 检查模型列表
 
 ```bash
+TOKEN="$(codex-bridge auth token --config "$HOME/.codex-bridge/config.toml")"
 curl -sS \
-  -H 'Authorization: Bearer codex-bridge-local-token' \
+  -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8787/v1/models
 ```
 
 ## 最小 Responses 请求
 
 ```bash
+TOKEN="$(codex-bridge auth token --config "$HOME/.codex-bridge/config.toml")"
 curl -sS \
-  -H 'Authorization: Bearer codex-bridge-local-token' \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "deepseek-v4-flash",

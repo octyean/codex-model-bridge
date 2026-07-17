@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/real-codex-smoke.sh MODEL [edit|delete|web|instruction|long]
+Usage: scripts/real-codex-smoke.sh MODEL [edit|delete|web|instruction|long|continuity]
 
 Runs a real Codex CLI request through the currently configured Bridge.
 USAGE
@@ -16,7 +16,7 @@ if [ -z "$MODEL" ]; then
   exit 1
 fi
 case "$MODE" in
-  edit|delete|web|instruction|long) ;;
+  edit|delete|web|instruction|long|continuity) ;;
   *)
     usage >&2
     exit 1
@@ -24,6 +24,10 @@ case "$MODE" in
 esac
 
 CODEX_BIN="${CODEX_BIN:-codex}"
+CODEX_ARGS=()
+if [ -n "${CODEX_BRIDGE_SMOKE_BASE_URL:-}" ]; then
+  CODEX_ARGS+=(-c "model_providers.mcodex.base_url=\"${CODEX_BRIDGE_SMOKE_BASE_URL}\"")
+fi
 WORKDIR="$(mktemp -d /tmp/codex-bridge-smoke.XXXXXX)"
 OUTPUT="$(mktemp /tmp/codex-bridge-smoke-output.XXXXXX)"
 LAST_MESSAGE="$(mktemp /tmp/codex-bridge-smoke-last.XXXXXX)"
@@ -137,9 +141,65 @@ EOF
     git -C "$WORKDIR" -c user.name=bridge-smoke -c user.email=bridge-smoke@example.invalid commit -qm baseline
     PROMPT='这是一次长上下文开发任务。严格遵守 AGENTS.md，完整读取规格，实现全部 REQUIREMENT，执行检查并只回复指定结果。'
     ;;
+  continuity)
+    mkdir -p "$WORKDIR/specs" "$WORKDIR/internal/summary" "$WORKDIR/cmd/check"
+    cat >"$WORKDIR/go.mod" <<'EOF'
+module bridgecontinuity
+
+go 1.24
+EOF
+    cat >"$WORKDIR/internal/summary/summary.go" <<'EOF'
+package summary
+
+func Build() string {
+	return ""
+}
+EOF
+    cat >"$WORKDIR/cmd/check/main.go" <<'EOF'
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"bridgecontinuity/internal/summary"
+)
+
+func main() {
+	const want = "alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel"
+	if got := summary.Build(); got != want {
+		fmt.Fprintf(os.Stderr, "got %q, want %q\n", got, want)
+		os.Exit(1)
+	}
+	fmt.Println("continuity-ok")
+}
+EOF
+    for word in alpha bravo charlie delta echo foxtrot golf hotel; do
+      printf 'Required segment: %s\n' "$word" >"$WORKDIR/specs/$word.txt"
+    done
+    cat >"$WORKDIR/AGENTS.md" <<'EOF'
+# Test Rules
+
+- Start by calling update_plan with separate inspect, implement, verify, and finish steps.
+- Read every file under `specs/` separately before editing.
+- Read exactly one `specs/` file per assistant response and wait for its tool result before reading the next file.
+- Only modify `internal/summary/summary.go`.
+- Build the result from the required segments in alphabetical file order, joined with `|`.
+- File changes must go through the Codex apply_patch capability, never through shell redirection or an inline script.
+- Run `go run ./cmd/check` after editing.
+- Mark every plan step completed before the final response.
+- Never stop at a progress message while plan steps remain unfinished.
+- The final response must contain only `bridge-continuity-ok`.
+EOF
+    git -C "$WORKDIR" init -q
+    git -C "$WORKDIR" add -A
+    git -C "$WORKDIR" -c user.name=bridge-smoke -c user.email=bridge-smoke@example.invalid commit -qm baseline
+    PROMPT='这是一次多阶段连续开发任务。严格遵守 AGENTS.md，建立计划，逐个读取全部规格，完成实现和检查，不要在中途说明下一步后停下。'
+    ;;
 esac
 
 "$CODEX_BIN" \
+  "${CODEX_ARGS[@]}" \
   --ask-for-approval never \
   --sandbox danger-full-access \
   exec \
@@ -176,7 +236,19 @@ case "$MODE" in
     [ "$(cat "$LAST_MESSAGE")" = "bridge-long-ok" ]
     grep -q '"kind":"update"' "$OUTPUT"
     ;;
+  continuity)
+    go -C "$WORKDIR" run ./cmd/check >/dev/null
+    [ "$(git -C "$WORKDIR" diff --name-only)" = "internal/summary/summary.go" ]
+    [ "$(cat "$LAST_MESSAGE")" = "bridge-continuity-ok" ]
+    grep -q '"kind":"update"' "$OUTPUT"
+    grep -q '"type":"todo_list"' "$OUTPUT"
+    ;;
 esac
+
+if grep -q 'codex_bridge_task_end' "$OUTPUT" || grep -q 'codex_bridge_task_end' "$LAST_MESSAGE"; then
+  printf '%s\n' 'bridge internal task-end tool leaked into Codex output' >&2
+  exit 1
+fi
 
 THREAD_ID="$(sed -nE 's/.*"thread_id":"([^"]+)".*/\1/p' "$OUTPUT" | head -n 1)"
 if [ -n "$THREAD_ID" ]; then

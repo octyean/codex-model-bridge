@@ -1,12 +1,10 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -134,6 +132,8 @@ type ModelConfig struct {
 	ExecutionMode                     string   `toml:"execution_mode,omitempty"`
 	SupportsResponsesOptions          *bool    `toml:"supports_responses_options,omitempty"`
 	SupportsResponsesStructuredOutput *bool    `toml:"supports_responses_structured_output,omitempty"`
+	DefaultReasoningLevel             string   `toml:"default_reasoning_level,omitempty"`
+	SupportedReasoningLevels          []string `toml:"supported_reasoning_levels,omitempty"`
 	ContextWindow                     int64    `toml:"context_window"`
 	SupportsParallelToolCalls         bool     `toml:"supports_parallel_tool_calls"`
 	ApplyPatchToolType                string   `toml:"apply_patch_tool_type"`
@@ -279,6 +279,24 @@ func (cfg *Config) Validate() error {
 		case "", ExecutionModeNativeResponses, ExecutionModeProjectedResponses, ExecutionModeChatCompletions:
 		default:
 			return fmt.Errorf("models.%s.execution_mode must be native_responses, projected_responses, or chat_completions", slug)
+		}
+		reasoningLevels := make(map[string]bool, len(model.SupportedReasoningLevels))
+		for _, rawLevel := range model.SupportedReasoningLevels {
+			level := normalizeReasoningLevel(rawLevel)
+			if level == "" {
+				return fmt.Errorf("models.%s.supported_reasoning_levels must not contain empty values", slug)
+			}
+			if reasoningLevels[level] {
+				return fmt.Errorf("models.%s.supported_reasoning_levels contains duplicate %q", slug, level)
+			}
+			reasoningLevels[level] = true
+		}
+		defaultLevel := normalizeReasoningLevel(model.DefaultReasoningLevel)
+		if model.DefaultReasoningLevel != "" && defaultLevel == "" {
+			return fmt.Errorf("models.%s.default_reasoning_level must not be empty", slug)
+		}
+		if defaultLevel != "" && len(reasoningLevels) > 0 && !reasoningLevels[defaultLevel] {
+			return fmt.Errorf("models.%s.default_reasoning_level %q is not in supported_reasoning_levels", slug, defaultLevel)
 		}
 	}
 	if err := cfg.validateExtensions(); err != nil {
@@ -577,7 +595,7 @@ func (cfg *Config) Catalog() ModelsResponse {
 			Slug:                       slug,
 			DisplayName:                model.DisplayName,
 			Description:                model.DisplayName + " through Codex Bridge",
-			DefaultReasoningLevel:      defaultReasoningLevel(supportsResponsesOptions),
+			DefaultReasoningLevel:      defaultReasoningLevel(model, supportsResponsesOptions),
 			SupportedReasoningLevels:   reasoningLevelsForModel(model, supportsResponsesOptions),
 			ShellType:                  "shell_command",
 			Visibility:                 "list",
@@ -613,29 +631,70 @@ func (cfg *Config) Catalog() ModelsResponse {
 	return ModelsResponse{Models: models}
 }
 
-func defaultReasoningLevel(enabled bool) string {
-	if enabled {
-		return "medium"
+func defaultReasoningLevel(model ModelConfig, enabled bool) string {
+	if !enabled {
+		return ""
 	}
-	return ""
+	if configured := normalizeReasoningLevel(model.DefaultReasoningLevel); configured != "" {
+		return configured
+	}
+	for _, level := range model.SupportedReasoningLevels {
+		if normalizeReasoningLevel(level) == "high" {
+			return "high"
+		}
+	}
+	for _, level := range model.SupportedReasoningLevels {
+		if normalized := normalizeReasoningLevel(level); normalized != "" {
+			return normalized
+		}
+	}
+	return "high"
 }
 
 func reasoningLevelsForModel(model ModelConfig, enabled bool) []ReasoningEffortPreset {
 	if !enabled {
 		return []ReasoningEffortPreset{}
 	}
-	levels := []ReasoningEffortPreset{
-		{Effort: "low", Description: "Fast responses with lighter reasoning"},
-		{Effort: "medium", Description: "Balanced reasoning for coding tasks"},
-		{Effort: "high", Description: "Deeper reasoning for complex changes"},
+	efforts := model.SupportedReasoningLevels
+	if len(efforts) == 0 {
+		efforts = []string{"low", "medium", "high"}
 	}
-	if enabled {
-		levels = append(levels, ReasoningEffortPreset{Effort: "xhigh", Description: "Maximum reasoning for the hardest coding tasks"})
-	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model.UpstreamModel)), "gpt-5.6") {
-		levels = append(levels, ReasoningEffortPreset{Effort: "max", Description: "Maximum reasoning for the hardest GPT-5.6 tasks"})
+
+	levels := make([]ReasoningEffortPreset, 0, len(efforts))
+	seen := make(map[string]bool, len(efforts))
+	for _, rawEffort := range efforts {
+		effort := normalizeReasoningLevel(rawEffort)
+		if effort == "" || seen[effort] {
+			continue
+		}
+		seen[effort] = true
+		levels = append(levels, ReasoningEffortPreset{
+			Effort:      effort,
+			Description: reasoningLevelDescription(effort),
+		})
 	}
 	return levels
+}
+
+func normalizeReasoningLevel(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func reasoningLevelDescription(effort string) string {
+	switch effort {
+	case "low":
+		return "Fast responses with lighter reasoning"
+	case "medium":
+		return "Balanced reasoning for coding tasks"
+	case "high":
+		return "Deeper reasoning for complex changes"
+	case "xhigh":
+		return "Maximum reasoning for the hardest coding tasks"
+	case "max":
+		return "Maximum provider-supported reasoning"
+	default:
+		return "Provider-defined reasoning level"
+	}
 }
 
 func defaultVerbosityForModel(enabled bool) any {
@@ -647,14 +706,9 @@ func defaultVerbosityForModel(enabled bool) any {
 
 func (cfg *Config) WriteCatalog() error {
 	catalog := cfg.Catalog()
-	data, err := json.MarshalIndent(catalog, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal catalog: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(cfg.Codex.ModelCatalogPath), 0o700); err != nil {
-		return fmt.Errorf("create catalog dir: %w", err)
-	}
-	if err := os.WriteFile(cfg.Codex.ModelCatalogPath, append(data, '\n'), 0o600); err != nil {
+	if err := withStateFileLock(cfg.Codex.ModelCatalogPath, func() error {
+		return writeStateJSONUnlocked(cfg.Codex.ModelCatalogPath, catalog)
+	}); err != nil {
 		return fmt.Errorf("write catalog: %w", err)
 	}
 	return nil
