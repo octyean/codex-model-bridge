@@ -3,8 +3,10 @@ package providers
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -119,6 +121,57 @@ func TestNormalizeUsageSupportsChatAndResponsesSchemas(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := NormalizeUsage(test.raw); got != test.want {
 				t.Fatalf("NormalizeUsage() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestStreamRequiresTerminalEvent(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantError bool
+	}{
+		{
+			name:      "accept finish reason without done marker",
+			body:      "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+			wantError: false,
+		},
+		{
+			name:      "reject clean eof without terminal event",
+			body:      "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+			wantError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+
+			stream, err := NewOpenAIChatClient(server.URL, "").Stream(context.Background(), ChatCompletionRequest{Model: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var streamErr error
+			done := false
+			for event := range stream {
+				if event.Err != nil {
+					streamErr = event.Err
+				}
+				done = done || event.Done
+			}
+			if test.wantError {
+				if streamErr == nil || !strings.Contains(streamErr.Error(), "before terminal event") {
+					t.Fatalf("stream error = %v", streamErr)
+				}
+				return
+			}
+			if streamErr != nil || !done {
+				t.Fatalf("stream error = %v, done = %v", streamErr, done)
 			}
 		})
 	}

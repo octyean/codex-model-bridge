@@ -7,6 +7,7 @@ import (
 
 	"codex-bridge/internal/diagnostics"
 	"codex-bridge/internal/providers"
+	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/tools"
 )
 
@@ -266,6 +267,16 @@ func sanitizeTaskProtocolText(text string) string {
 	return strings.ReplaceAll(text, tools.TaskEndToolName, taskProtocolPublicToolName)
 }
 
+func taskEndResultToEmit(result string, visibleTexts ...string) string {
+	sanitized := sanitizeTaskProtocolText(result)
+	for _, visible := range visibleTexts {
+		if strings.TrimSpace(sanitizeTaskProtocolText(visible)) == strings.TrimSpace(sanitized) {
+			return ""
+		}
+	}
+	return sanitized
+}
+
 func chatTaskProtocolRetryRequest(req providers.ChatCompletionRequest, message providers.ChatMessage, supportsRequired bool, adapterPrepare func(providers.ChatCompletionRequest) providers.ChatCompletionRequest) providers.ChatCompletionRequest {
 	followUp := req
 	if text := strings.TrimSpace(messageText(message.Content)); text != "" {
@@ -282,7 +293,7 @@ func chatTaskProtocolRetryRequest(req providers.ChatCompletionRequest, message p
 }
 
 func (s *Server) writeTaskProtocolRetry(sessionID string, requestID string, model string, upstreamModel string, profile string, detail string, text string, stream bool) {
-	s.writeSessionLog(sessionID, "recoveries.jsonl", map[string]any{
+	toollog.WriteRecovery(sessionID, map[string]any{
 		"event":          "task_protocol_retry",
 		"request_id":     requestID,
 		"model":          model,
@@ -295,7 +306,7 @@ func (s *Server) writeTaskProtocolRetry(sessionID string, requestID string, mode
 }
 
 func (s *Server) writeTaskProtocolFailure(sessionID string, requestID string, model string, upstreamModel string, profile string, detail string, text string, stream bool) {
-	s.writeSessionLog(sessionID, "recoveries.jsonl", map[string]any{
+	toollog.WriteRecovery(sessionID, map[string]any{
 		"event":          "task_protocol_failure",
 		"request_id":     requestID,
 		"model":          model,

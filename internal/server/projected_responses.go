@@ -13,6 +13,7 @@ import (
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/config"
 	"codex-bridge/internal/incidentlog"
+	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/requestdump"
 	"codex-bridge/internal/toollog"
@@ -119,6 +120,7 @@ func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), config.ExecutionModeProjectedResponses, resp, nil)
+	s.logUsage(requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), config.ExecutionModeProjectedResponses, config.ExecutionModeProjectedResponses, 0, adapter, optimization.CaptureResponseShape(upstreamReq), providers.NormalizeUsage(resp["usage"]))
 	logCtx := toollog.OutputContext{
 		RequestID:      requestID,
 		Model:          req.Model,
@@ -164,6 +166,7 @@ func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "projected_task_protocol_retry", retried, map[string]any{"sequence": taskProtocolRetries})
+			s.logUsage(requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), config.ExecutionModeProjectedResponses, "projected_task_protocol_retry", taskProtocolRetries, adapter, optimization.CaptureResponseShape(retryReq), providers.NormalizeUsage(retried["usage"]))
 			var retryUsage providers.NormalizedUsage
 			var retryInternalTools bool
 			retried, finalReq, retryUsage, retryInternalTools, retryErr = s.resolveProjectedInternalTools(r.Context(), provider, sessionID, retryReq, retried, toolCtx, adapter, logCtx)
@@ -188,7 +191,9 @@ func (s *Server) forwardProjectedResponses(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "projected_structured_output_repair", repaired, map[string]any{"sequence": 1})
-			totalUsage = addUsage(totalUsage, providers.NormalizeUsage(repaired["usage"]))
+			repairUsage := providers.NormalizeUsage(repaired["usage"])
+			s.logUsage(requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), config.ExecutionModeProjectedResponses, "projected_structured_output_repair", 1, adapter, optimization.CaptureResponseShape(repairReq), repairUsage)
+			totalUsage = addUsage(totalUsage, repairUsage)
 			resp = repaired
 			projected = projectResponseObject(r.Context(), repaired, req.Model, toolCtx, adapter, requestID, s.logger, nil, nil)
 			if repairErr := enforceProjectedResponseStructuredOutput(projected, responseFormat); repairErr != nil {
@@ -324,7 +329,9 @@ func (s *Server) resolveProjectedInternalTools(ctx context.Context, provider pro
 			return nil, currentReq, totalUsage, handled, err
 		}
 		s.writePromptResponse(sessionID, logCtx.RequestID, logCtx.Model, logCtx.UpstreamModel, logCtx.Profile, "projected_internal_tool_followup", next, map[string]any{"sequence": sequence})
-		totalUsage = addUsage(totalUsage, providers.NormalizeUsage(next["usage"]))
+		usage := providers.NormalizeUsage(next["usage"])
+		s.logUsage(logCtx.RequestID, logCtx.Model, logCtx.UpstreamModel, logCtx.Profile, config.ExecutionModeProjectedResponses, "projected_internal_tool_followup", sequence, adapter, optimization.CaptureResponseShape(followUp), usage)
+		totalUsage = addUsage(totalUsage, usage)
 		currentReq = followUp
 		currentResponse = next
 	}
@@ -446,7 +453,9 @@ func (s *Server) streamProjectedResponses(w http.ResponseWriter, r *http.Request
 			"event_count": eventCount,
 			"response_id": responseID,
 		}, map[string]any{"sequence": sequence})
-		totalUsage = addUsage(totalUsage, providers.NormalizeUsage(response["usage"]))
+		usage := providers.NormalizeUsage(response["usage"])
+		s.logUsage(requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), config.ExecutionModeProjectedResponses, stage, sequence, adapter, optimization.CaptureResponseShape(currentReq), usage)
+		totalUsage = addUsage(totalUsage, usage)
 
 		followUp, ok := s.projectedInternalToolFollowUpRequest(r.Context(), currentReq, response, toolCtx, adapter, logCtx)
 		if ok {
@@ -489,9 +498,7 @@ func (s *Server) streamProjectedResponses(w http.ResponseWriter, r *http.Request
 				taskEnded = true
 				taskEndStatus = status
 				visibleText := projectedResponseAssistantText(streamState.completedResponse(response))
-				if visibleText == "" {
-					taskEndResult = result
-				}
+				taskEndResult = taskEndResultToEmit(result, visibleText)
 			}
 		}
 
@@ -526,7 +533,9 @@ func (s *Server) streamProjectedResponses(w http.ResponseWriter, r *http.Request
 					"event_count": repairEvents,
 					"response_id": repairResponseID,
 				}, map[string]any{"sequence": 1})
-				totalUsage = addUsage(totalUsage, providers.NormalizeUsage(repaired["usage"]))
+				repairUsage := providers.NormalizeUsage(repaired["usage"])
+				s.logUsage(requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), config.ExecutionModeProjectedResponses, stage, repairSequence, adapter, optimization.CaptureResponseShape(repairReq), repairUsage)
+				totalUsage = addUsage(totalUsage, repairUsage)
 				projected = projectResponseObject(r.Context(), repaired, req.Model, toolCtx, adapter, requestID, s.logger, nil, nil)
 				if repairValidationErr := enforceProjectedResponseStructuredOutput(projected, responseFormat); repairValidationErr != nil {
 					failure := fmt.Errorf("structured output repair failed: %w", repairValidationErr)

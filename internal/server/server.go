@@ -293,7 +293,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		Profile:        profileName,
 		RequestSummary: requestSummary,
 	}
-	if followUp, followUpReq, ok, err := s.resolveInternalTools(r.Context(), provider, sessionID, chatReq, resp, toolCtx, adapter, logCtx); err != nil {
+	usage := providers.NormalizeUsage(resp.Usage)
+	if followUp, followUpReq, totalUsage, ok, err := s.resolveInternalTools(r.Context(), provider, sessionID, chatReq, resp, toolCtx, adapter, logCtx); err != nil {
 		extra := map[string]any{"stream": false, "internal_tools": true}
 		s.writeBridgeFailure(sessionID, requestID, req.Model, modelCfg.UpstreamModel, profileName, http.StatusBadGateway, err.Error(), extra)
 		incidentlog.Write("internal_tool_followup_limit", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"error": err.Error(), "stream": false}))
@@ -305,6 +306,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if ok {
 		resp = followUp
+		usage = totalUsage
 		shape = optimization.CaptureShape(followUpReq)
 		if len(resp.Choices) == 0 {
 			message := "upstream returned no choices"
@@ -317,11 +319,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	items := responseItemsFromMessage(r.Context(), resp.Choices[0].Message, toolCtx, adapter, requestID, req.Model, profileName, s.logger, s.localToolResultResolver(logCtx, toolCtx))
 	items = enforceStructuredOutput(items, chatReq.ResponseFormat)
-	usage := providers.NormalizeUsage(resp.Usage)
 	if emptyOutput(items) {
 		incidentlog.Write("empty_chat_response", s.incidentRecord(r, req, requestID, profileName, dumpPath, map[string]any{"stream": false, "output": outputSummary(items, usage)}))
 	}
-	s.logUsage(requestID, req.Model, profileName, adapter, shape, usage)
+	s.logUsage(requestID, req.Model, modelCfg.UpstreamModel, profileName, config.ExecutionModeChatCompletions, "", -1, adapter, shape, usage)
 	responseObject := codex.ResponseObject{
 		ID:        responseID(resp.ID),
 		Object:    "response",
@@ -611,7 +612,7 @@ streamLoop:
 	}
 	_ = writer.Event(responseCompleted)
 	s.writeBridgeResponse(sessionID, requestID, req.Model, chatReq.Model, profile, responseCompleted["response"], map[string]any{"stream": true})
-	s.logUsage(requestID, req.Model, profile, adapter, shape, usage)
+	s.logUsage(requestID, req.Model, chatReq.Model, profile, config.ExecutionModeChatCompletions, "", -1, adapter, shape, usage)
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", state.ToolCallCount()))
 }
 
@@ -628,13 +629,14 @@ func requestCanceled(r *http.Request, err error) bool {
 
 func (s *Server) incidentRecord(r *http.Request, req codex.ResponsesRequest, requestID string, profile string, dumpPath string, extra map[string]any) map[string]any {
 	record := map[string]any{
-		"request_id":      requestID,
-		"model":           req.Model,
-		"profile":         profile,
-		"headers":         incidentlog.Headers(r.Header),
-		"request_summary": incidentlog.RequestSummary(req.Raw),
-		"tool_names":      responseToolNames(req.Tools),
-		"tool_choice":     req.ToolChoice,
+		"request_id":       requestID,
+		"codex_session_id": incidentlog.CodexSessionID(req.Raw, r.Header),
+		"model":            req.Model,
+		"profile":          profile,
+		"headers":          incidentlog.Headers(r.Header),
+		"request_summary":  incidentlog.RequestSummary(req.Raw),
+		"tool_names":       responseToolNames(req.Tools),
+		"tool_choice":      req.ToolChoice,
 	}
 	if dumpPath != "" {
 		record["upstream_request_dump"] = dumpPath
@@ -870,14 +872,16 @@ func codexUsage(usage providers.NormalizedUsage) map[string]any {
 	}
 }
 
-func (s *Server) logUsage(requestID string, model string, profile string, adapter adapters.Adapter, shape optimization.Shape, usage providers.NormalizedUsage) {
+func (s *Server) logUsage(requestID string, model string, upstreamModel string, profile string, executionMode string, stage string, sequence int, adapter adapters.Adapter, shape optimization.Shape, usage providers.NormalizedUsage) {
 	if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.TotalTokens == 0 {
 		return
 	}
 	attrs := []slog.Attr{
 		slog.String("request_id", requestID),
 		slog.String("model", model),
+		slog.String("upstream_model", upstreamModel),
 		slog.String("profile", profile),
+		slog.String("execution_mode", executionMode),
 		slog.Int("input_tokens", usage.InputTokens),
 		slog.Int("cached_input_tokens", usage.CachedInputTokens),
 		slog.Int("fresh_input_tokens", usage.FreshInputTokens),
@@ -885,9 +889,18 @@ func (s *Server) logUsage(requestID string, model string, profile string, adapte
 		slog.Int("reasoning_tokens", usage.ReasoningTokens),
 		slog.Int("total_tokens", usage.TotalTokens),
 	}
+	if stage != "" {
+		attrs = append(attrs, slog.String("stage", stage))
+	}
+	if sequence >= 0 {
+		attrs = append(attrs, slog.Int("sequence", sequence))
+	}
 	if adapters.OptimizationOptions(adapter).CacheDiagnostics {
-		diagnostics := s.optimizer.Observe(model+"|"+profile, shape, usage)
-		attrs = append(attrs, optimization.LogAttrs(diagnostics)...)
+		key := strings.Join([]string{model, upstreamModel, profile, executionMode, stage}, "|")
+		if s.optimizer != nil {
+			diagnostics := s.optimizer.Observe(key, shape, usage)
+			attrs = append(attrs, optimization.LogAttrs(diagnostics)...)
+		}
 	}
 	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "upstream_usage", attrs...)
 }

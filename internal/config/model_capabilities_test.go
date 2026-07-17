@@ -4,9 +4,30 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"codex-bridge/internal/upstreamprobe"
 )
+
+func TestCapabilityWarningsReportsMissingThirdPartyVerification(t *testing.T) {
+	cfg := Config{
+		Providers: map[string]ProviderConfig{
+			"upstream": {Profile: "default"},
+		},
+		Models: map[string]ModelConfig{
+			"gpt-5.3-codex": {
+				Provider:      "upstream",
+				Profile:       "kimi",
+				UpstreamModel: "kimi-for-coding",
+			},
+		},
+	}
+
+	warnings := cfg.CapabilityWarnings(time.Now())
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "upstream/kimi-for-coding has no capability verification") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
 
 func TestVerifiedCapabilityRejectsCredentialAndProfileChanges(t *testing.T) {
 	model := ModelConfig{Provider: "upstream", UpstreamModel: "test-model", Profile: "default"}

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -207,6 +209,27 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func CheckUnknownFields(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var cfg Config
+	if err := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&cfg); err != nil {
+		var missing *toml.StrictMissingError
+		if errors.As(err, &missing) {
+			fields := make([]string, 0, len(missing.Errors))
+			for i := range missing.Errors {
+				fields = append(fields, strings.Join(missing.Errors[i].Key(), "."))
+			}
+			sort.Strings(fields)
+			return fmt.Errorf("unknown config fields: %s", strings.Join(fields, ", "))
+		}
+		return fmt.Errorf("strict config check: %w", err)
+	}
+	return nil
 }
 
 func (cfg *Config) Validate() error {
@@ -422,7 +445,7 @@ func DefaultContextWindowForModel(model string) int64 {
 	value := strings.ToLower(strings.TrimSpace(model))
 	switch {
 	case strings.Contains(value, "kimi"):
-		return 192000
+		return 256000
 	case strings.Contains(value, "mimo"):
 		return 1000000
 	case strings.Contains(value, "deepseek"):

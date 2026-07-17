@@ -24,6 +24,7 @@ type MCPProvider struct {
 	sessionID     string
 	initialized   bool
 	mu            sync.Mutex
+	sessionMu     sync.RWMutex
 	client        *http.Client
 }
 
@@ -119,8 +120,11 @@ func (p *MCPProvider) post(ctx context.Context, payload map[string]any) (mcpResp
 	if p.Authorization != "" {
 		req.Header.Set("Authorization", p.Authorization)
 	}
-	if p.sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", p.sessionID)
+	p.sessionMu.RLock()
+	sessionID := p.sessionID
+	p.sessionMu.RUnlock()
+	if sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID)
 	}
 	httpResp, err := p.client.Do(req)
 	if err != nil {
@@ -128,7 +132,9 @@ func (p *MCPProvider) post(ctx context.Context, payload map[string]any) (mcpResp
 	}
 	defer httpResp.Body.Close()
 	if sessionID := httpResp.Header.Get("Mcp-Session-Id"); sessionID != "" {
+		p.sessionMu.Lock()
 		p.sessionID = sessionID
+		p.sessionMu.Unlock()
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))

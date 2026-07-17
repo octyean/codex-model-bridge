@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/config"
 	"codex-bridge/internal/upstreamprobe"
 
@@ -19,6 +20,7 @@ type Options struct {
 	BaseURL         string
 	APIKey          string
 	DefaultModel    string
+	Profile         string
 	ReplaceUpstream bool
 }
 
@@ -29,6 +31,7 @@ type Result struct {
 	ProviderName              string
 	DefaultModel              string
 	Protocol                  string
+	Profile                   string
 	Models                    []string
 	ResponsesStream           bool
 	ResponsesTools            bool
@@ -46,6 +49,13 @@ func Run(options Options, probe upstreamprobe.Result) (Result, error) {
 	if strings.TrimSpace(options.ConfigPath) == "" {
 		return Result{}, fmt.Errorf("config path is required")
 	}
+	options.Profile = strings.TrimSpace(options.Profile)
+	if options.Profile != "" && !adapters.Known(options.Profile) {
+		return Result{}, fmt.Errorf("profile %q is not supported", options.Profile)
+	}
+	if options.Profile != "" {
+		options.Profile = adapters.Normalize(options.Profile)
+	}
 	if strings.TrimSpace(options.CodexHome) == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -61,9 +71,14 @@ func Run(options Options, probe upstreamprobe.Result) (Result, error) {
 		if loadErr != nil {
 			return Result{}, loadErr
 		}
+		profile := ""
+		if model, ok := cfg.Models[cfg.Codex.DefaultModel]; ok {
+			profile = cfg.ProfileName(model, cfg.Providers[model.Provider])
+		}
 		return Result{
 			ConfigPath:        options.ConfigPath,
 			DefaultModel:      cfg.Codex.DefaultModel,
+			Profile:           profile,
 			ExistingPreserved: true,
 		}, nil
 	} else if err != nil && !os.IsNotExist(err) {
@@ -94,6 +109,7 @@ func Run(options Options, probe upstreamprobe.Result) (Result, error) {
 		ProviderName:              "upstream",
 		DefaultModel:              cfg.Codex.DefaultModel,
 		Protocol:                  cfg.Providers["upstream"].Protocol,
+		Profile:                   cfg.Providers["upstream"].Profile,
 		Models:                    models,
 		ResponsesStream:           probe.ResponsesStreamOK,
 		ResponsesTools:            probe.ResponsesToolsOK,
@@ -118,6 +134,7 @@ func buildConfig(options Options, probe upstreamprobe.Result, localToken string)
 	if protocol == "" {
 		protocol = "chat_completions"
 	}
+	profile := firstNonEmpty(options.Profile, profileForModel(defaultModel))
 	cfg := config.Config{
 		Server: config.ServerConfig{Listen: "127.0.0.1:8787"},
 		Codex: config.CodexConfig{
@@ -142,7 +159,7 @@ func buildConfig(options Options, probe upstreamprobe.Result, localToken string)
 				Type:     "openai_compatible",
 				BaseURL:  options.BaseURL,
 				APIKey:   options.APIKey,
-				Profile:  profileForModel(defaultModel),
+				Profile:  profile,
 				Protocol: protocol,
 			},
 		},
@@ -151,8 +168,8 @@ func buildConfig(options Options, probe upstreamprobe.Result, localToken string)
 	cfg.AddDiscoveredModels("upstream", modelIDs)
 	for slug, model := range cfg.Models {
 		id := model.UpstreamModel
-		model.Profile = profileForModel(id)
-		model.ExecutionMode = executionModeForModel(id, protocol)
+		model.Profile = firstNonEmpty(options.Profile, profileForModel(id))
+		model.ExecutionMode = executionModeForModel(id, protocol, model.Profile)
 		if id == probe.ProbeModel && protocol == "responses" {
 			supportsOptions := probe.ResponsesOptionsOK
 			model.SupportsResponsesOptions = &supportsOptions
@@ -172,9 +189,15 @@ func buildConfig(options Options, probe upstreamprobe.Result, localToken string)
 	return cfg
 }
 
-func executionModeForModel(model string, protocol string) string {
+func executionModeForModel(model string, protocol string, profile string) string {
 	if protocol != "responses" {
 		return config.ExecutionModeChatCompletions
+	}
+	switch adapters.Normalize(profile) {
+	case adapters.OpenAIName:
+		return config.ExecutionModeNativeResponses
+	case adapters.DeepSeekName, adapters.KimiName, adapters.MimoName:
+		return config.ExecutionModeProjectedResponses
 	}
 	value := strings.ToLower(strings.TrimSpace(model))
 	if strings.HasPrefix(value, "gpt-") || strings.HasPrefix(value, "o3") || strings.HasPrefix(value, "o4") {

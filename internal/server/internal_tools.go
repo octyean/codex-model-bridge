@@ -24,10 +24,11 @@ func (s *Server) hasInternalTools(toolCtx tools.Context) bool {
 	return false
 }
 
-func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, sessionID string, req providers.ChatCompletionRequest, response *providers.ChatCompletionResponse, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, bool, error) {
+func (s *Server) resolveInternalTools(ctx context.Context, provider providers.ChatProvider, sessionID string, req providers.ChatCompletionRequest, response *providers.ChatCompletionResponse, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (*providers.ChatCompletionResponse, providers.ChatCompletionRequest, providers.NormalizedUsage, bool, error) {
 	current := response.Choices[0].Message
 	currentReq := req
 	resp := response
+	totalUsage := providers.NormalizeUsage(response.Usage)
 	handled := false
 	sequence := 0
 	taskProtocolRetries := 0
@@ -39,7 +40,7 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 				if taskProtocolRetries >= maxTaskProtocolRetries {
 					violation := taskProtocolViolation(protocolErr)
 					s.writeTaskProtocolFailure(sessionID, logCtx.RequestID, logCtx.Model, currentReq.Model, logCtx.Profile, violation.Error(), messageText(current.Content), false)
-					return nil, providers.ChatCompletionRequest{}, false, violation
+					return nil, providers.ChatCompletionRequest{}, totalUsage, false, violation
 				}
 				taskProtocolRetries++
 				handled = true
@@ -50,11 +51,12 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 				next, err := provider.Create(ctx, followUp)
 				if err != nil {
 					s.writePromptFailure(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "task_protocol_retry", err.Error(), map[string]any{"sequence": sequence})
-					return nil, providers.ChatCompletionRequest{}, false, err
+					return nil, providers.ChatCompletionRequest{}, totalUsage, false, err
 				}
 				s.writePromptResponse(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "task_protocol_retry", next, map[string]any{"sequence": sequence})
+				totalUsage = addUsage(totalUsage, providers.NormalizeUsage(next.Usage))
 				if len(next.Choices) == 0 {
-					return next, followUp, true, nil
+					return next, followUp, totalUsage, true, nil
 				}
 				resp = next
 				currentReq = followUp
@@ -63,7 +65,7 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 			}
 			if ended {
 				resp.Choices[0].Message = providers.ChatMessage{Role: "assistant", Content: sanitizeTaskProtocolText(result)}
-				return resp, currentReq, true, nil
+				return resp, currentReq, totalUsage, true, nil
 			}
 			current = chatWithoutTaskEndCalls(current, toolCtx)
 			resp.Choices[0].Message = current
@@ -73,7 +75,7 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 			break
 		}
 		if sequence >= maxInternalToolRounds {
-			return nil, providers.ChatCompletionRequest{}, false, fmt.Errorf("internal tool follow-up exceeded %d rounds", maxInternalToolRounds)
+			return nil, providers.ChatCompletionRequest{}, totalUsage, false, fmt.Errorf("internal tool follow-up exceeded %d rounds", maxInternalToolRounds)
 		}
 		sequence++
 		s.writePromptRequest(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "internal_tool_followup", providers.PreparedChatRequest(followUp), map[string]any{"sequence": sequence})
@@ -81,11 +83,12 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 		if err != nil {
 			s.logger.Error("internal_tool_followup_failed", "error", err.Error())
 			s.writePromptFailure(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "internal_tool_followup", err.Error(), map[string]any{"sequence": sequence})
-			return nil, providers.ChatCompletionRequest{}, false, err
+			return nil, providers.ChatCompletionRequest{}, totalUsage, false, err
 		}
 		s.writePromptResponse(sessionID, logCtx.RequestID, logCtx.Model, followUp.Model, logCtx.Profile, "internal_tool_followup", next, map[string]any{"sequence": sequence})
+		totalUsage = addUsage(totalUsage, providers.NormalizeUsage(next.Usage))
 		if len(next.Choices) == 0 {
-			return next, followUp, true, nil
+			return next, followUp, totalUsage, true, nil
 		}
 		resp = next
 		currentReq = followUp
@@ -93,9 +96,9 @@ func (s *Server) resolveInternalTools(ctx context.Context, provider providers.Ch
 		handled = true
 	}
 	if !handled {
-		return nil, providers.ChatCompletionRequest{}, false, nil
+		return nil, providers.ChatCompletionRequest{}, totalUsage, false, nil
 	}
-	return resp, currentReq, true, nil
+	return resp, currentReq, totalUsage, true, nil
 }
 
 func (s *Server) internalToolFollowUpRequest(ctx context.Context, req providers.ChatCompletionRequest, message providers.ChatMessage, toolCtx tools.Context, adapter adapters.Adapter, logCtx toollog.OutputContext) (providers.ChatCompletionRequest, bool) {

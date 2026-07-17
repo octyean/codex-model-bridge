@@ -92,13 +92,45 @@ func CaptureShape(req providers.ChatCompletionRequest) Shape {
 	systemText := systemPrompt(req.Messages)
 	tools := StabilizeTools(req.Tools)
 	toolsJSON, _ := json.Marshal(tools)
+	return captureShape(systemText, string(toolsJSON), len(req.Messages), len(req.Tools))
+}
+
+func CaptureResponseShape(req map[string]any) Shape {
+	input, _ := req["input"].([]any)
+	var systemText strings.Builder
+	for _, rawItem := range input {
+		item, _ := rawItem.(map[string]any)
+		role, _ := item["role"].(string)
+		if role != "system" && role != "developer" {
+			continue
+		}
+		if systemText.Len() > 0 {
+			systemText.WriteString("\n")
+		}
+		systemText.WriteString(contentText(item["content"]))
+	}
+	var tools []any
+	switch values := req["tools"].(type) {
+	case []any:
+		tools = values
+	case []map[string]any:
+		tools = make([]any, len(values))
+		for i := range values {
+			tools[i] = values[i]
+		}
+	}
+	toolsJSON, _ := json.Marshal(canonicalValue(tools))
+	return captureShape(systemText.String(), string(toolsJSON), len(input), len(tools))
+}
+
+func captureShape(systemText string, toolsJSON string, messageCount int, toolCount int) Shape {
 	return Shape{
 		SystemHash:       shortHash(systemText),
-		ToolsHash:        shortHash(string(toolsJSON)),
-		PrefixHash:       shortHash(map[string]any{"system": systemText, "tools": string(toolsJSON)}),
-		ToolSchemaTokens: estimateTokens(string(toolsJSON)),
-		MessageCount:     len(req.Messages),
-		ToolCount:        len(req.Tools),
+		ToolsHash:        shortHash(toolsJSON),
+		PrefixHash:       shortHash(map[string]any{"system": systemText, "tools": toolsJSON}),
+		ToolSchemaTokens: estimateTokens(toolsJSON),
+		MessageCount:     messageCount,
+		ToolCount:        toolCount,
 	}
 }
 

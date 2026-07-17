@@ -1,10 +1,24 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestCheckUnknownFieldsRejectsUnknownSetting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("read_top_k = 3\n[server]\nlisten = \"127.0.0.1:8787\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := CheckUnknownFields(path)
+	if err == nil || !strings.Contains(err.Error(), "read_top_k") {
+		t.Fatalf("CheckUnknownFields() error = %v, want read_top_k", err)
+	}
+}
 
 func TestReasoningLevelsDoNotDependOnUpstreamModelName(t *testing.T) {
 	levels := reasoningLevelsForModel(ModelConfig{UpstreamModel: "gpt-5.6-sol"}, true)

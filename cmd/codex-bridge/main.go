@@ -73,6 +73,7 @@ func main() {
 	upstreamBaseURL := flags.String("upstream-base-url", "", "Upstream OpenAI-compatible base URL")
 	upstreamAPIKey := flags.String("upstream-api-key", "", "Upstream API key")
 	probeModel := flags.String("model", "", "Model to use for upstream probing")
+	setupProfile := flags.String("profile", "", "Adapter profile to use during setup")
 	verifyModels := flags.String("models", "", "Comma-separated model slugs or upstream model IDs to verify")
 	verifyAll := flags.Bool("all", false, "Verify all configured models, optionally limited by --provider-name")
 	replaceUpstream := flags.Bool("replace-upstream", false, "Replace existing upstream config")
@@ -94,7 +95,7 @@ func main() {
 		return
 	}
 	if command == "setup" {
-		result, err := runSetup(*configPath, *codexHome, *upstreamBaseURL, *upstreamAPIKey, *probeModel, *replaceUpstream, *yes)
+		result, err := runSetup(*configPath, *codexHome, *upstreamBaseURL, *upstreamAPIKey, *probeModel, *setupProfile, *replaceUpstream, *yes)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -105,6 +106,7 @@ func main() {
 			return
 		}
 		fmt.Printf("protocol: %s\n", result.Protocol)
+		fmt.Printf("profile: %s\n", result.Profile)
 		fmt.Printf("default_model: %s\n", result.DefaultModel)
 		fmt.Printf("responses_stream: %t\n", result.ResponsesStream)
 		fmt.Printf("responses_tools: %t\n", result.ResponsesTools)
@@ -153,6 +155,10 @@ func main() {
 		return
 	}
 	if command == "config check" {
+		if err := config.CheckUnknownFields(*configPath); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		fmt.Printf("config ok: %s\n", *configPath)
 		for _, warning := range cfg.CapabilityWarnings(time.Now()) {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
@@ -187,6 +193,9 @@ func main() {
 	}
 
 	logger := logging.New(os.Stdout)
+	if err := config.CheckUnknownFields(*configPath); err != nil {
+		logger.Warn("config_unknown_fields", slog.String("error", err.Error()))
+	}
 	for _, warning := range cfg.CapabilityWarnings(time.Now()) {
 		logger.Warn("model_capability_verification_stale", slog.String("detail", warning))
 	}
@@ -337,11 +346,12 @@ func ensureDefaultConfig(path string) (bool, error) {
 	return true, nil
 }
 
-func runSetup(configPath string, codexHome string, baseURL string, apiKey string, model string, replaceUpstream bool, yes bool) (bridgesetup.Result, error) {
+func runSetup(configPath string, codexHome string, baseURL string, apiKey string, model string, profile string, replaceUpstream bool, yes bool) (bridgesetup.Result, error) {
 	if !replaceUpstream && configExists(configPath) {
 		return bridgesetup.Run(bridgesetup.Options{
 			ConfigPath: configPath,
 			CodexHome:  codexHome,
+			Profile:    profile,
 		}, upstreamprobe.Result{})
 	}
 	if strings.TrimSpace(baseURL) == "" && !yes {
@@ -376,6 +386,7 @@ func runSetup(configPath string, codexHome string, baseURL string, apiKey string
 		BaseURL:         baseURL,
 		APIKey:          apiKey,
 		DefaultModel:    model,
+		Profile:         profile,
 		ReplaceUpstream: replaceUpstream,
 	}, probe)
 }

@@ -113,8 +113,9 @@ func TestStreamInternalToolRoundsRetriesPlainTextThenAcceptsTaskEnd(t *testing.T
 	if len(trace.items) != 1 || responseItemText(t, trace.items[0]) != sanitizedProgress {
 		t.Fatalf("streamed progress items = %#v", trace.items)
 	}
-	if len(state.Done()) != 0 {
-		t.Fatalf("task end result duplicated visible text: %#v", state.Done())
+	items := state.Done()
+	if len(items) != 1 || responseItemText(t, items[0]) != "bridge-task-ok" {
+		t.Fatalf("task end result = %#v", items)
 	}
 	body := recorder.Body.String()
 	if !strings.Contains(body, `"delta":"`+sanitizedProgress+`"`) {
@@ -180,10 +181,11 @@ func (p *streamSequenceProvider) Stream(_ context.Context, req providers.ChatCom
 		events = p.streams[0]
 		p.streams = p.streams[1:]
 	}
-	ch := make(chan providers.StreamEvent, len(events))
+	ch := make(chan providers.StreamEvent, len(events)+1)
 	for _, event := range events {
 		ch <- event
 	}
+	ch <- providers.StreamEvent{Done: true}
 	close(ch)
 	return ch, nil
 }

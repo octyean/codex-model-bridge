@@ -7,12 +7,15 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/config"
+	"codex-bridge/internal/diagnostics"
 	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
 	"codex-bridge/internal/toollog"
@@ -110,7 +113,7 @@ func TestChatTaskProtocolFailsAfterOneRetry(t *testing.T) {
 	}
 	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
-	_, _, _, err := server.resolveInternalTools(
+	_, _, _, _, err := server.resolveInternalTools(
 		context.Background(),
 		provider,
 		"",
@@ -125,6 +128,82 @@ func TestChatTaskProtocolFailsAfterOneRetry(t *testing.T) {
 	}
 	if len(provider.chatRequests) != maxTaskProtocolRetries {
 		t.Fatalf("retry requests = %d, want %d", len(provider.chatRequests), maxTaskProtocolRetries)
+	}
+}
+
+func TestResolveInternalToolsAccumulatesUsage(t *testing.T) {
+	toolCtx := taskEndTestContext()
+	chatTools := tools.AddTaskEndTool(nil, &toolCtx)
+	initial := chatAssistantResponse(t, "plain text")
+	initial.Usage = map[string]any{"prompt_tokens": 10, "completion_tokens": 1}
+	followUp := chatAssistantResponse(t, "")
+	followUp.Choices[0].Message.ToolCalls = []providers.ChatToolCall{{
+		Function: providers.ChatCallFunction{Name: tools.TaskEndToolName, Arguments: `{"status":"completed","result":"done"}`},
+	}}
+	followUp.Usage = map[string]any{"prompt_tokens": 20, "completion_tokens": 2}
+	provider := &taskProtocolProvider{chatResponses: []*providers.ChatCompletionResponse{followUp}}
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	_, _, usage, ok, err := server.resolveInternalTools(
+		context.Background(),
+		provider,
+		"",
+		providers.ChatCompletionRequest{Model: "kimi-for-coding", Tools: chatTools},
+		initial,
+		toolCtx,
+		adapters.Get(adapters.KimiName),
+		toollog.OutputContext{RequestID: "req_test", Model: "bridge-model", UpstreamModel: "kimi-for-coding", Profile: "kimi"},
+	)
+	if err != nil || !ok {
+		t.Fatalf("resolveInternalTools ok=%v error=%v", ok, err)
+	}
+	if usage.InputTokens != 30 || usage.OutputTokens != 3 || usage.TotalTokens != 33 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestTaskEndResultToEmitSkipsOnlyExactVisibleResult(t *testing.T) {
+	if got := taskEndResultToEmit("final", "progress"); got != "final" {
+		t.Fatalf("different result = %q", got)
+	}
+	if got := taskEndResultToEmit("final", " final "); got != "" {
+		t.Fatalf("duplicate result = %q", got)
+	}
+}
+
+func TestTaskProtocolRecoveryWritesGlobalAndSessionLogs(t *testing.T) {
+	dir := t.TempDir()
+	toolLogPath := filepath.Join(dir, "tool-calls.jsonl")
+	t.Setenv(toollog.EnvToolLogPath, toolLogPath)
+	sessionID := "thread-test"
+
+	(&Server{}).writeTaskProtocolRetry(
+		sessionID,
+		"req_test",
+		"gpt-5.3-codex",
+		"kimi-for-coding",
+		"kimi",
+		"missing task end",
+		"plain text",
+		true,
+	)
+
+	paths := []string{
+		filepath.Join(dir, "recoveries.jsonl"),
+		diagnostics.SessionLogPath(toolLogPath, sessionID, "recoveries.jsonl"),
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["event"] != "task_protocol_retry" || record["codex_session_id"] != sessionID {
+			t.Fatalf("%s record = %#v", path, record)
+		}
 	}
 }
 

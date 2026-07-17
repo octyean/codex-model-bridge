@@ -167,43 +167,38 @@ func (cfg *Config) loadCapabilityCache() error {
 
 func (cfg *Config) CapabilityWarnings(now time.Time) []string {
 	var warnings []string
-	for providerName, models := range cfg.verifiedCapabilities.Models {
-		for modelName, capability := range models {
-			if !cfg.usesThirdPartyProfile(providerName, modelName) {
-				continue
-			}
-			provider, ok := cfg.Providers[providerName]
-			if !ok {
-				continue
-			}
-			switch {
-			case capability.ProbeVersion != upstreamprobe.ProbeVersion:
-				warnings = append(warnings, fmt.Sprintf("%s/%s uses probe version %d; run verify again", providerName, modelName, capability.ProbeVersion))
-			case capability.CredentialFingerprint != providerCredentialFingerprint(provider) ||
-				capability.ProfileFingerprint != cfg.providerProfileFingerprint(providerName, modelName, provider):
-				warnings = append(warnings, fmt.Sprintf("%s/%s provider credentials or profile changed; run verify again", providerName, modelName))
-			case capability.VerifiedAt.IsZero() || now.Sub(capability.VerifiedAt) > cfg.CapabilityMaxAge():
-				warnings = append(warnings, fmt.Sprintf("%s/%s capability verification expired; run verify again", providerName, modelName))
-			}
+	seen := map[string]bool{}
+	for _, model := range cfg.Models {
+		provider, ok := cfg.Providers[model.Provider]
+		if !ok {
+			continue
+		}
+		profile := cfg.ProfileName(model, provider)
+		if profile == adapters.DefaultName || profile == adapters.OpenAIName {
+			continue
+		}
+		key := model.Provider + "\x00" + model.UpstreamModel
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		capability, ok := cfg.verifiedCapabilities.Models[model.Provider][model.UpstreamModel]
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("%s/%s has no capability verification; run verify", model.Provider, model.UpstreamModel))
+			continue
+		}
+		switch {
+		case capability.ProbeVersion != upstreamprobe.ProbeVersion:
+			warnings = append(warnings, fmt.Sprintf("%s/%s uses probe version %d; run verify again", model.Provider, model.UpstreamModel, capability.ProbeVersion))
+		case capability.CredentialFingerprint != providerCredentialFingerprint(provider) ||
+			capability.ProfileFingerprint != cfg.providerProfileFingerprint(model.Provider, model.UpstreamModel, provider):
+			warnings = append(warnings, fmt.Sprintf("%s/%s provider credentials or profile changed; run verify again", model.Provider, model.UpstreamModel))
+		case capability.VerifiedAt.IsZero() || now.Sub(capability.VerifiedAt) > cfg.CapabilityMaxAge():
+			warnings = append(warnings, fmt.Sprintf("%s/%s capability verification expired; run verify again", model.Provider, model.UpstreamModel))
 		}
 	}
 	sort.Strings(warnings)
 	return warnings
-}
-
-func (cfg *Config) usesThirdPartyProfile(providerName string, upstreamModel string) bool {
-	provider, ok := cfg.Providers[providerName]
-	if !ok {
-		return false
-	}
-	for _, model := range cfg.Models {
-		if model.Provider != providerName || model.UpstreamModel != upstreamModel {
-			continue
-		}
-		profile := cfg.ProfileName(model, provider)
-		return profile != adapters.DefaultName && profile != adapters.OpenAIName
-	}
-	return false
 }
 
 func normalizeCapabilityCache(cache *modelCapabilityCache) {

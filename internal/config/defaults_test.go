@@ -28,6 +28,12 @@ func TestDefaultConfigTextUsesRandomLocalToken(t *testing.T) {
 	}
 }
 
+func TestDefaultContextWindowForKimiForCoding(t *testing.T) {
+	if got := DefaultContextWindowForModel("kimi-for-coding"); got != 256000 {
+		t.Fatalf("context window = %d, want 256000", got)
+	}
+}
+
 func configValue(text string, key string) string {
 	prefix := key + " = \""
 	for _, line := range strings.Split(text, "\n") {

@@ -8,6 +8,7 @@ import (
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
+	"codex-bridge/internal/config"
 	"codex-bridge/internal/incidentlog"
 	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
@@ -61,7 +62,7 @@ func (s *Server) streamInternalToolResponse(w http.ResponseWriter, r *http.Reque
 	}
 	_ = writer.Event(responseCompleted)
 	s.writeBridgeResponse(sessionID, requestID, req.Model, chatReq.Model, profile, responseCompleted["response"], map[string]any{"stream": true, "internal_tools": true})
-	s.logUsage(requestID, req.Model, profile, adapter, finalShape, usage)
+	s.logUsage(requestID, req.Model, chatReq.Model, profile, config.ExecutionModeChatCompletions, "", -1, adapter, finalShape, usage)
 	s.logger.Info("request_completed", slog.String("request_id", requestID), slog.String("status", "completed"), slog.Int("tool_call_count", finalState.ToolCallCount()))
 }
 
@@ -108,11 +109,16 @@ func (s *Server) streamInternalToolRounds(r *http.Request, writer *codex.SSEWrit
 				if finalState.textAdded || finalState.reasoningAdded {
 					trace.captureNarrative(writer, finalState)
 				}
-				if len(trace.items) > 0 {
+				visibleTexts := make([]string, 0, len(trace.items))
+				for _, item := range trace.items {
+					visibleTexts = append(visibleTexts, messageOutputText(item))
+				}
+				result = taskEndResultToEmit(result, visibleTexts...)
+				if result == "" {
 					return emptyStreamState(r, toolCtx, adapter, requestID, model, profile, s.logger, localResolver), shape, totalUsage, nil
 				}
 				completed := newStreamState(r.Context(), toolCtx, adapter, requestID, model, profile, s.logger, localResolver)
-				completed.text = sanitizeTaskProtocolText(result)
+				completed.text = result
 				return completed, shape, totalUsage, nil
 			}
 		}

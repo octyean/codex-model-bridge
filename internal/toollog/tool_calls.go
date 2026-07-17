@@ -349,15 +349,31 @@ func diagnosticLevel(failureKind adapters.PatchFailureKind, outcome toolruntime.
 }
 
 func writeRecovery(record map[string]any) {
+	out := cloneRecord(record)
+	out["event"] = "tool_recovery"
+	WriteRecovery(recordSessionID(out), out)
+}
+
+func WriteRecovery(sessionID string, record map[string]any) {
 	path := ConfiguredPath()
-	if path == "" {
+	if path == "" || record == nil {
 		return
 	}
 	out := cloneRecord(record)
-	out["event"] = "tool_recovery"
-	out["time"] = time.Now().Format(time.RFC3339Nano)
+	if _, ok := out["time"]; !ok {
+		out["time"] = time.Now().Format(time.RFC3339Nano)
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = recordSessionID(out)
+	}
+	if sessionID != "" {
+		if recordSessionID(out) == "" {
+			out["codex_session_id"] = sessionID
+		}
+	}
 	diagnostics.WriteGlobalJSONL(filepath.Join(filepath.Dir(path), "recoveries.jsonl"), out)
-	if sessionID := recordSessionID(out); sessionID != "" {
+	if sessionID != "" {
 		diagnostics.WriteSessionRecord(path, sessionID, "recoveries.jsonl", out)
 	}
 }

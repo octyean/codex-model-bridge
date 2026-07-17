@@ -14,6 +14,14 @@ Windows 双击运行：exe 同目录下的 config.toml
 chmod 600 config/config.toml
 ```
 
+修改配置后建议先检查：
+
+```bash
+codex-bridge config check --config ~/.codex-bridge/config.toml
+```
+
+`config check` 会严格检查字段名，拼错或已经移除的字段会直接报错并返回非零状态。服务启动仍保持兼容读取，不会因为未知字段中断，但会记录 `config_unknown_fields` 告警，便于清理未生效配置。
+
 ## 自动配置
 
 推荐先让内置向导探测上游能力并生成配置：
@@ -24,6 +32,7 @@ codex-bridge setup \
   --upstream-base-url https://api.example.com/v1 \
   --upstream-api-key sk-xxx \
   --model kimi-for-coding \
+  --profile kimi \
   --yes
 ```
 
@@ -32,6 +41,8 @@ codex-bridge setup \
 ```toml
 protocol = "responses"
 ```
+
+模型名无法可靠判断 adapter 时，例如上游只暴露内部别名 `k3`，应显式传 `--profile kimi`。可用值与配置文件中的 `profile` 相同：`default`、`deepseek`、`kimi`、`mimo`、`openai`。
 
 已有配置默认会保留；需要更换上游时加：
 
@@ -157,7 +168,7 @@ supports_responses_options = true
 supports_responses_structured_output = true
 default_reasoning_level = "high"
 supported_reasoning_levels = ["high", "max"]
-context_window = 192000
+context_window = 256000
 supports_parallel_tool_calls = true
 apply_patch_tool_type = "freeform"
 ```
@@ -195,10 +206,12 @@ codex-bridge verify \
 - `deepseek`
 - `kimi`
 - `mimo`
+- `openai`
 
 `default` 适合普通 OpenAI-compatible 模型。`deepseek` 适合 DeepSeek 这类对工具调用和补丁格式更挑剔的模型。
 `kimi` 适合 Kimi for Coding，会把 Codex 的文件编辑能力翻译成 `write_file`、`replace_text`、`insert_text_at_line`、`insert_text_after_match`、`move_file`、`delete_file` 这组结构化 function tools。
 `mimo` 适合 Mimo，保留图片输入能力，并使用和 Kimi 相同的结构化文件编辑工具。
+`openai` 用于明确启用 OpenAI 原生 Responses 工具和图片能力；标准 GPT / o 系列模型通常会由 Bridge 自动识别，不必手写。
 
 ## 自动发现模型
 

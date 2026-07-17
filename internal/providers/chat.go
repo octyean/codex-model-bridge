@@ -306,6 +306,7 @@ func (c *OpenAIChatClient) Stream(ctx context.Context, req ChatCompletionRequest
 		defer resp.Body.Close()
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		finished := false
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" || strings.HasPrefix(line, ":") {
@@ -324,11 +325,23 @@ func (c *OpenAIChatClient) Stream(ctx context.Context, req ChatCompletionRequest
 				out <- StreamEvent{Err: err}
 				return
 			}
+			for _, choice := range chunk.Choices {
+				if strings.TrimSpace(choice.FinishReason) != "" {
+					finished = true
+					break
+				}
+			}
 			out <- StreamEvent{Chunk: chunk}
 		}
 		if err := scanner.Err(); err != nil {
 			out <- StreamEvent{Err: err}
+			return
 		}
+		if finished {
+			out <- StreamEvent{Done: true}
+			return
+		}
+		out <- StreamEvent{Err: errors.New("chat completion stream closed before terminal event")}
 	}()
 	return out, nil
 }
