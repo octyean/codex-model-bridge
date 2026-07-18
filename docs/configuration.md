@@ -20,7 +20,7 @@ chmod 600 config/config.toml
 codex-bridge config check --config ~/.codex-bridge/config.toml
 ```
 
-`config check` 会严格检查字段名，拼错或已经移除的字段会直接报错并返回非零状态。服务启动仍保持兼容读取，不会因为未知字段中断，但会记录 `config_unknown_fields` 告警，便于清理未生效配置。
+`config check` 会严格检查字段名，拼错或已经移除的字段会直接报错并返回非零状态。检查通过后还会按 slug 排序列出 display name、provider、真实 `upstream_model`、profile、execution mode 和能力验证状态，便于直接核对 Codex 显示模型与上游模型的映射。输出不会显示 API key。服务启动仍保持兼容读取，不会因为未知字段中断，但会记录 `config_unknown_fields` 告警，便于清理未生效配置。
 
 ## 自动配置
 
@@ -191,6 +191,8 @@ codex-bridge verify \
 
 `--models` 同时接受 Codex slug 和真实 `upstream_model`。必须显式传 `--models`，或者明确使用 `--all` 验证全部已配置模型；两者不能同时使用。结果默认写入配置文件同目录的 `model-capabilities.json`，不会修改 `config.toml`；provider 使用 `protocol = "auto"` 时，Bridge 会优先采用仍在有效期内的真实验证结果。
 
+每个 probe 结果会标记 `supported`、`unsupported` 或 `inconclusive`。429、5xx、超时、网络错误和鉴权失败属于 `inconclusive`，Bridge 会重试一次；如果仍不能得出结论，本次结果只展示，不覆盖旧缓存，输出中的 cache 状态为 `preserved`。明确的 400、404、405、422 协议拒绝和成功响应中的协议缺失才会作为不支持记录。工具能力探测会强制选择 `probe_tool`，避免把模型没有按自然语言提示调用工具误判成协议不支持。
+
 能力缓存当前为 version 3。每条模型记录包含 `probe_version`、`verified_at`、`expires_at`，以及凭据和有效 profile 的不可逆指纹；缓存文件不会保存 API key 明文。探测逻辑升级、记录过期、凭据变化或 profile 变化后，Bridge 不会继续把旧结果当作当前能力。服务启动和 `config check` 会只针对第三方 profile 提示需要重新验证的模型。
 
 `model-capabilities.json` 和 `model-slots.json` 使用同一套跨进程状态写入规则：写入前获取锁，锁内重新读取并合并，再通过原子替换保存。多个 setup、verify 或服务进程同时运行时，不会用旧快照覆盖其他进程刚写入的模型记录。
@@ -249,7 +251,7 @@ Codex App 里看到的是模型目录，真正发给上游的是 `upstream_model
 
 ## 诊断日志保留
 
-Bridge 启动时只清理自己管理的 `sessions/` 目录，不会删除同级其他文件或用户目录：
+Bridge 启动时会清理自己管理的 `sessions/` 目录，运行期间每 6 小时再执行一次；不会删除同级其他文件或用户目录：
 
 ```toml
 [diagnostics]
@@ -257,7 +259,7 @@ retention_days = 14
 max_total_mb = 1024
 ```
 
-不配置时默认保留 14 天，session 目录总量上限为 1GB。清理结果会写入 `session_logs_pruned` 启动日志。全局 `tool-calls.jsonl`、`incidents.jsonl`、`recoveries.jsonl` 和 `sessions/index.jsonl` 单文件达到 64MB 后自动轮转，保留 3 份历史文件。
+不配置时默认保留 14 天，session 目录总量上限为 1GB。每次清理结果都会写入 `session_logs_pruned` 日志。全局 `tool-calls.jsonl`、`incidents.jsonl`、`recoveries.jsonl` 和 `sessions/index.jsonl` 单文件达到 64MB 后自动轮转，保留 3 份历史文件。
 
 示例：
 

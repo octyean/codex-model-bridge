@@ -402,16 +402,22 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, reques
 				return
 			}
 			if event.Done {
-				s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", map[string]any{
-					"stream":      true,
-					"event_count": streamSeq,
-				}, nil)
 				return
 			}
 			streamSeq++
 			s.writePromptStreamEvent(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", streamSeq, event.Data)
 			replaceResponseModel(event.Data, req.Model)
 			_ = writer.Event(event.Data)
+			if terminalType, terminalResponse, ok := nativeTerminalEvent(event.Data); ok {
+				extra := map[string]any{
+					"stream":        true,
+					"event_count":   streamSeq,
+					"terminal_type": terminalType,
+				}
+				s.writePromptResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), "native_responses", terminalResponse, extra)
+				s.writeBridgeResponse(sessionID, requestID, req.Model, modelCfg.UpstreamModel, adapter.Name(), terminalResponse, extra)
+				return
+			}
 		}
 		return
 	}
@@ -855,6 +861,20 @@ func replaceResponseModel(value map[string]any, model string) {
 		if _, exists := response["model"]; exists {
 			response["model"] = model
 		}
+	}
+}
+
+func nativeTerminalEvent(event map[string]any) (string, map[string]any, bool) {
+	eventType, _ := event["type"].(string)
+	switch eventType {
+	case "response.completed", "response.failed", "response.incomplete":
+		response, _ := event["response"].(map[string]any)
+		if response == nil {
+			response = event
+		}
+		return eventType, response, true
+	default:
+		return "", nil, false
 	}
 }
 

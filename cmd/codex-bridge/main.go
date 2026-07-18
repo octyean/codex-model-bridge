@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"codex-bridge/internal/codexconfig"
@@ -30,7 +31,10 @@ import (
 	"codex-bridge/internal/upstreamprobe"
 )
 
-const modelDiscoveryProviderTimeout = 10 * time.Second
+const (
+	modelDiscoveryProviderTimeout = 10 * time.Second
+	sessionLogPruneInterval       = 6 * time.Hour
+)
 
 func main() {
 	command := "serve"
@@ -160,6 +164,10 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("config ok: %s\n", *configPath)
+		if err := writeConfigSummary(os.Stdout, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		for _, warning := range cfg.CapabilityWarnings(time.Now()) {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 		}
@@ -218,6 +226,9 @@ func main() {
 	logRequestDumpStatus(logger)
 	logIncidentLogStatus(logger)
 	pruneSessionLogs(cfg, logger)
+	pruneCtx, stopSessionLogPruner := context.WithCancel(context.Background())
+	defer stopSessionLogPruner()
+	go pruneSessionLogsPeriodically(pruneCtx, cfg, logger)
 
 	handler := server.New(cfg, providerClients, logger)
 	httpServer := &http.Server{
@@ -245,6 +256,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	stopSessionLogPruner()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -312,6 +324,52 @@ func pruneSessionLogs(cfg *config.Config, logger *slog.Logger) {
 		slog.Int("remaining_sessions", result.Remaining),
 		slog.Int64("remaining_bytes", result.RemainingSize),
 	)
+}
+
+func pruneSessionLogsPeriodically(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+	ticker := time.NewTicker(sessionLogPruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pruneSessionLogs(cfg, logger)
+		}
+	}
+}
+
+func writeConfigSummary(writer io.Writer, cfg *config.Config) error {
+	table := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(table, "SLUG\tDISPLAY NAME\tPROVIDER\tUPSTREAM MODEL\tPROFILE\tEXECUTION MODE\tVERIFICATION")
+	slugs := make([]string, 0, len(cfg.Models))
+	for slug := range cfg.Models {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	for _, slug := range slugs {
+		model := cfg.Models[slug]
+		provider := cfg.Providers[model.Provider]
+		displayName := strings.TrimSpace(model.DisplayName)
+		if displayName == "" {
+			displayName = slug
+		}
+		verification := "unverified"
+		if _, ok := cfg.VerifiedCapability(model, provider); ok {
+			verification = "verified"
+		}
+		plan := cfg.ExecutionPlan(model, provider)
+		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			slug,
+			displayName,
+			model.Provider,
+			model.UpstreamModel,
+			plan.Profile,
+			plan.Mode,
+			verification,
+		)
+	}
+	return table.Flush()
 }
 
 func windowsDefaultConfigPath() string {
@@ -513,6 +571,7 @@ func discoverModels(ctx context.Context, cfg *config.Config, providerClients map
 type verifyProviderOutput struct {
 	Provider string                 `json:"provider"`
 	Results  []upstreamprobe.Result `json:"results"`
+	Cache    map[string]string      `json:"cache"`
 }
 
 type verifyOutput struct {
@@ -555,6 +614,7 @@ func runVerify(ctx context.Context, cfg *config.Config, providerName string, req
 		Providers: make([]verifyProviderOutput, 0, len(providerNames)),
 	}
 	failed := false
+	cacheUpdated := false
 	for _, name := range providerNames {
 		provider := cfg.Providers[name]
 		models, err := verifyModelIDs(cfg, name, requestedModels, verifyAll)
@@ -564,6 +624,7 @@ func runVerify(ctx context.Context, cfg *config.Config, providerName string, req
 		providerOutput := verifyProviderOutput{
 			Provider: name,
 			Results:  make([]upstreamprobe.Result, 0, len(models)),
+			Cache:    make(map[string]string, len(models)),
 		}
 		for _, model := range models {
 			result := upstreamprobe.Run(ctx, upstreamprobe.Options{
@@ -571,16 +632,23 @@ func runVerify(ctx context.Context, cfg *config.Config, providerName string, req
 				APIKey:  provider.APIKey,
 				Model:   model,
 			})
-			cfg.UpdateVerifiedCapability(name, provider, result)
+			if cfg.UpdateVerifiedCapability(name, provider, result) {
+				providerOutput.Cache[model] = "updated"
+				cacheUpdated = true
+			} else {
+				providerOutput.Cache[model] = "preserved"
+			}
 			providerOutput.Results = append(providerOutput.Results, result)
-			if !result.ResponsesReady() && !result.ChatReady() {
+			if result.Outcome != upstreamprobe.ProbeOutcomeSupported {
 				failed = true
 			}
 		}
 		output.Providers = append(output.Providers, providerOutput)
 	}
-	if err := cfg.WriteCapabilityCache(); err != nil {
-		return false, fmt.Errorf("write capability cache: %w", err)
+	if cacheUpdated {
+		if err := cfg.WriteCapabilityCache(); err != nil {
+			return false, fmt.Errorf("write capability cache: %w", err)
+		}
 	}
 	data, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {

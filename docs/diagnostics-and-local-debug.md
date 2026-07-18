@@ -58,13 +58,13 @@ export CODEX_BRIDGE_LOG_STREAM_EVENTS=1
 
 `sessions/index.jsonl` 用来从会话 ID、请求 ID、模型和用户最后一段提示词反查。拿到 Codex 的 `thread_id` 后，优先看对应目录。
 
-服务启动时会按 `[diagnostics]` 清理 Bridge 自己管理的 session 目录，默认保留 14 天、总量不超过 1GB。启动日志 `session_logs_pruned` 会记录删除目录数和释放字节数。清理范围只限 `sessions/<session_id>/`，不会碰同级全局 JSONL 或用户其他目录。
+服务启动时会按 `[diagnostics]` 清理 Bridge 自己管理的 session 目录，运行期间每 6 小时再执行一次。默认保留 14 天、总量不超过 1GB；每次 `session_logs_pruned` 日志都会记录删除目录数和释放字节数。清理范围只限 `sessions/<session_id>/`，不会碰同级全局 JSONL 或用户其他目录。
 
 全局 `tool-calls.jsonl`、`incidents.jsonl`、`recoveries.jsonl` 和 `sessions/index.jsonl` 会在达到 64MB 时轮转，保留 3 份历史文件。session 目录仍按上面的时间和总容量规则清理，两套策略互不替代。
 
 会话日志默认会把大字段压成摘要，保留 hash、字节数、预览和关键计数；完整上游请求在 `upstream-requests/*.json.gz` 里按需查。dump 目录会自动清理，默认最多保留 7 天或 512MiB，避免长会话把磁盘打满。
 
-`prompt-stream-events.jsonl` 只在设置 `CODEX_BRIDGE_LOG_STREAM_EVENTS=1` 时保存上游流式原始 chunk；`prompt-responses.jsonl` 保存同一轮流式响应聚合后的 message、事件计数或上游失败对象，排查时先看聚合，再按需开启 chunk 细查时序。`bridge-responses.jsonl` 保存 Bridge 最终返回给 Codex 的成功响应或失败对象；过大的响应会在会话日志中转成摘要。
+`prompt-stream-events.jsonl` 只在设置 `CODEX_BRIDGE_LOG_STREAM_EVENTS=1` 时保存上游流式原始 chunk；`prompt-responses.jsonl` 保存同一轮流式响应聚合后的 message、Native Responses 真实终态或上游失败对象。Native 流记录会带 `terminal_type` 和 `event_count`，即使上游以正常 EOF 结束而没有发送 `[DONE]`，只要已经出现 `response.completed`、`response.failed` 或 `response.incomplete`，终态仍会完整记录。`bridge-responses.jsonl` 保存 Bridge 最终返回给 Codex 的成功响应或失败对象；过大的响应会在会话日志中转成摘要。
 
 ## 关键字段
 
@@ -112,7 +112,7 @@ export CODEX_BRIDGE_LOG_STREAM_EVENTS=1
 | MCP resource proxy、bridge 内置 `web_search` proxy、`file_search` -> `search_files` proxy | 不需要直转 | bridge 转成本地可执行工具或代理工具 |
 | `computer`、`image_generation`、`code_interpreter` 等 hosted tools | 上游支持时原样直转 | 不能凭空执行，只能记录为 unsupported 并提示可替代路径 |
 
-Projected Responses 和 Chat Completions 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 `read_file`、`list_files` 和 `search_files`。这三个是给第三方模型看的逻辑工具，返回 Codex Harness 时会投影成原生 `exec_command`；App 因此显示 `command_execution`。需要读取完整文件时继续用 `read_file`，不要把本地路径伪装成 MCP resource。
+Projected Responses 和 Chat Completions 下，只要 Codex 侧提供 `exec_command`，Bridge 就会暴露 `read_file`、`list_files` 和 `search_files`。这三个是给第三方模型看的逻辑工具，返回 Codex Harness 时会投影成原生 `exec_command`；App 因此显示 `command_execution`。Linux/macOS 只依赖系统自带的 `sed`、`find`、`grep`，Windows 使用 PowerShell，不要求目标机器安装 `rtk` 或 `rg`。需要读取完整文件时继续用 `read_file`，不要把本地路径伪装成 MCP resource。
 
 Bridge 内置 `web_search` 需要服务端执行和模型续答。Projected Responses 会在内部执行 `codex_web_search`，把结果作为 `function_call_output` 再次提交给 `/responses`；私有 function call 不会泄漏给 Codex Harness。对应日志阶段是 `projected_internal_tool_followup`。
 

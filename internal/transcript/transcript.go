@@ -623,26 +623,63 @@ func hiddenTextEditorHistoryCallSummary(call hiddenFileEditCall) string {
 }
 
 func hiddenTextEditorHistoryOutputSummary(output string, call hiddenFileEditCall) string {
-	formattedOutput := strings.ReplaceAll(output, "APPLY_PATCH_SUCCEEDED", "TEXT_EDITOR_EDIT_SUCCEEDED")
-	formattedOutput = strings.ReplaceAll(formattedOutput, "apply_patch verification failed", "text editor verification failed")
-	if (strings.Contains(formattedOutput, "TEXT_EDITOR_EDIT_SUCCEEDED") || adapters.PatchSucceeded(formattedOutput)) && !strings.Contains(formattedOutput, "TEXT_EDITOR_EDIT_SUCCEEDED") {
-		formattedOutput += "\nTEXT_EDITOR_EDIT_SUCCEEDED"
-	}
-	files := call.files
-	if len(files) > 0 && patchOutputLacksFiles(output) {
-		formattedOutput += "\nchanged_files: " + strings.Join(files, ", ")
-	}
+	kind := adapters.ClassifyPatchFailure(output)
+	state := "failed"
+	lowerOutput := strings.ToLower(output)
 	if call.alreadyApplied {
-		formattedOutput += "\nTEXT_EDITOR_ALREADY_APPLIED\nfile_edit_state: already_applied\nrequired_next_action: read_only_verify_current_file_or_summarize\nforbidden_next_action: repeat_same_text_editor_edit"
+		kind = adapters.PatchFailureAlreadyApplied
+		state = "already_applied"
+	} else if adapters.PatchSucceeded(output) ||
+		strings.Contains(lowerOutput, "apply_patch_succeeded") ||
+		strings.Contains(lowerOutput, "text_editor_edit_succeeded") ||
+		strings.Contains(lowerOutput, "file_edit_state: completed") {
+		kind = adapters.PatchFailureNone
+		state = "completed"
+	} else {
+		switch kind {
+		case adapters.PatchFailureAlreadyApplied:
+			state = "already_applied"
+		case adapters.PatchFailureNoProgress:
+			state = "not_modified"
+		case adapters.PatchFailureInvalidArguments:
+			state = "rejected"
+		case adapters.PatchFailurePermissionOrSandbox:
+			state = "blocked"
+		case adapters.PatchFailureNone:
+			kind = adapters.PatchFailureUnknown
+		}
 	}
-	if recovery := adapters.TextEditorRecoveryText(adapters.ClassifyPatchFailure(formattedOutput)); recovery != "" && !strings.Contains(formattedOutput, "required_next_action:") {
-		formattedOutput += "\n\n" + recovery
-	}
-	return "TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN\n" + formattedOutput
-}
 
-func patchOutputLacksFiles(output string) bool {
-	return len(adapters.PatchSucceededFiles(output)) == 0
+	failureKind := string(kind)
+	if failureKind == "" {
+		failureKind = "none"
+	}
+	changedFiles := "none_known"
+	if len(call.files) > 0 {
+		changedFiles = strings.Join(call.files, ", ")
+	}
+	lines := []string{
+		"TEXT_EDITOR_HISTORY_OUTPUT_HIDDEN",
+		"file_edit_state: " + state,
+		"failure_kind: " + failureKind,
+		"changed_files: " + changedFiles,
+	}
+	if kind == adapters.PatchFailureNone {
+		lines = append(lines,
+			"required_next_action: continue_from_current_file_state",
+			"forbidden_next_action: reconstruct_or_repeat_hidden_edit",
+			"recovery: use read-only inspection if current state is needed; edit only a different missing change.",
+		)
+	} else {
+		for _, line := range strings.Split(adapters.TextEditorRecoveryText(kind), "\n") {
+			if strings.HasPrefix(line, "required_next_action:") ||
+				strings.HasPrefix(line, "forbidden_next_action:") ||
+				strings.HasPrefix(line, "recovery:") {
+				lines = append(lines, line)
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func toolSearchCall(item map[string]any) providers.ChatToolCall {

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -80,27 +81,60 @@ func fileSearchSpecFromArguments(arguments string, ctx Context) fileSearchSpec {
 
 func FileSearchCommand(arguments string, ctx Context) ExecCommand {
 	spec := fileSearchSpecFromArguments(arguments, ctx)
-	contentArgs := []string{"rg", "--line-number", "--no-heading", "--color", "never", "--smart-case", "--trim", "--fixed-strings"}
-	if spec.Glob != "" {
-		contentArgs = append(contentArgs, "--glob", spec.Glob)
-	}
-	contentArgs = append(contentArgs, "--", spec.Query, spec.Path)
-	fileArgs := []string{"rg", "--files"}
-	if spec.Glob != "" {
-		fileArgs = append(fileArgs, "--glob", spec.Glob)
-	}
-	fileArgs = append(fileArgs, spec.Path)
-	pathArgs := []string{"rg", "--color", "never", "--smart-case", "--fixed-strings", "--", spec.Query}
-	return ExecCommand{
-		Cmd:             "( " + shellJoin(contentArgs) + " 2>&1 || true; " + shellJoin(fileArgs) + " 2>/dev/null | " + shellJoin(pathArgs) + " 2>&1 || true ) | head -n " + strconv.Itoa(spec.MaxResults) + " | head -c 30000",
-		Workdir:         ctx.Workspace,
-		MaxOutputTokens: 12000,
-	}
+	return fileSearchCommandForOS(runtime.GOOS, spec, ctx.Workspace)
 }
 
-func shellJoin(args []string) string {
-	for i, arg := range args {
-		args[i] = shellQuote(arg)
+func fileSearchCommandForOS(goos string, spec fileSearchSpec, workdir string) ExecCommand {
+	if goos == "windows" {
+		files := "Get-ChildItem -LiteralPath " + powerShellQuote(spec.Path) + " -File -Recurse -Force"
+		if spec.Glob != "" {
+			clauses := make([]string, 0)
+			for _, pattern := range fileSearchGlobPatterns(spec.Glob) {
+				pattern = "*" + strings.ReplaceAll(pattern, "/", `\`)
+				clauses = append(clauses, "$_.FullName -like "+powerShellQuote(pattern))
+			}
+			files += " | Where-Object { " + strings.Join(clauses, " -or ") + " }"
+		}
+		command := "& { $bridgeFiles = @(" + files + "); " +
+			"$bridgeFiles | Select-String -SimpleMatch -Pattern " + powerShellQuote(spec.Query) +
+			" | ForEach-Object { '{0}:{1}:{2}' -f $_.Path, $_.LineNumber, $_.Line.Trim() }; " +
+			"$bridgeFiles | Where-Object { $_.FullName.IndexOf(" + powerShellQuote(spec.Query) +
+			", [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.FullName } }" +
+			" | Select-Object -First " + strconv.Itoa(spec.MaxResults)
+		return localResourceExecCommand(goos, command, workdir)
 	}
-	return strings.Join(args, " ")
+
+	find := "find " + shellQuote(spec.Path) + " -type f"
+	if spec.Glob != "" {
+		if strings.Contains(spec.Glob, "/") {
+			clauses := make([]string, 0)
+			for _, pattern := range fileSearchGlobPatterns(spec.Glob) {
+				clauses = append(clauses, "-path "+shellQuote("*/"+pattern))
+			}
+			find += " \\( " + strings.Join(clauses, " -o ") + " \\)"
+		} else {
+			find += " -name " + shellQuote(spec.Glob)
+		}
+	}
+	ignoreCase := ""
+	if spec.Query == strings.ToLower(spec.Query) {
+		ignoreCase = " -i"
+	}
+	query := shellQuote(spec.Query)
+	contentSearch := find + " -exec grep -nH -F" + ignoreCase + " -- " + query + " {} +"
+	pathSearch := find + " -print | grep -F" + ignoreCase + " -- " + query
+	command := "( " + contentSearch + "; " + pathSearch + " ) | head -n " + strconv.Itoa(spec.MaxResults)
+	return localResourceExecCommand(goos, command, workdir)
+}
+
+func fileSearchGlobPatterns(glob string) []string {
+	pattern := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(glob), `\`, "/"), "./")
+	patterns := []string{pattern}
+	for strings.Contains(pattern, "**/") {
+		pattern = strings.Replace(pattern, "**/", "", 1)
+		if pattern != patterns[len(patterns)-1] {
+			patterns = append(patterns, pattern)
+		}
+	}
+	return patterns
 }

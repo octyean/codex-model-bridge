@@ -176,3 +176,77 @@ func TestStreamRequiresTerminalEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestStreamResponseRequiresTypedTerminalEvent(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantTerminal string
+		wantError    bool
+	}{
+		{
+			name:         "accept completed followed by eof",
+			body:         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\"}}\n\n",
+			wantTerminal: "response.completed",
+		},
+		{
+			name:         "accept failed followed by eof",
+			body:         "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_test\",\"status\":\"failed\"}}\n\n",
+			wantTerminal: "response.failed",
+		},
+		{
+			name:         "accept incomplete followed by eof",
+			body:         "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_test\",\"status\":\"incomplete\"}}\n\n",
+			wantTerminal: "response.incomplete",
+		},
+		{
+			name:      "reject partial followed by eof",
+			body:      "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+			wantError: true,
+		},
+		{
+			name:      "reject done marker without terminal event",
+			body:      "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: [DONE]\n\n",
+			wantError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+
+			stream, err := NewOpenAIChatClient(server.URL, "").StreamResponse(context.Background(), map[string]any{"model": "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var streamErr error
+			done := false
+			terminal := ""
+			for event := range stream {
+				if event.Err != nil {
+					streamErr = event.Err
+				}
+				if eventType, _ := event.Data["type"].(string); isResponseTerminalEvent(event.Data) {
+					terminal = eventType
+				}
+				done = done || event.Done
+			}
+			if test.wantError {
+				if streamErr == nil || !strings.Contains(streamErr.Error(), "before terminal event") {
+					t.Fatalf("stream error = %v", streamErr)
+				}
+				if done {
+					t.Fatal("truncated stream reported done")
+				}
+				return
+			}
+			if streamErr != nil || !done || terminal != test.wantTerminal {
+				t.Fatalf("stream error = %v, done = %v, terminal = %q", streamErr, done, terminal)
+			}
+		})
+	}
+}

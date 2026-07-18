@@ -3,16 +3,21 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"codex-bridge/internal/adapters"
 	"codex-bridge/internal/codex"
 	"codex-bridge/internal/config"
+	"codex-bridge/internal/diagnostics"
 	"codex-bridge/internal/optimization"
 	"codex-bridge/internal/providers"
+	"codex-bridge/internal/toollog"
 )
 
 func TestLogUsageIncludesExecutionContextAndSeparatesUpstreamModels(t *testing.T) {
@@ -70,5 +75,58 @@ func TestIncidentRecordIncludesCodexSessionID(t *testing.T) {
 
 	if record["codex_session_id"] != "thread-test" {
 		t.Fatalf("incident record = %#v", record)
+	}
+}
+
+func TestNativeResponsesStreamWritesTerminalResponseLogs(t *testing.T) {
+	dir := t.TempDir()
+	toolLogPath := filepath.Join(dir, "tool-calls.jsonl")
+	t.Setenv(toollog.EnvToolLogPath, toolLogPath)
+	sessionID := "thread-native"
+	response := map[string]any{
+		"id":     "resp_test",
+		"model":  "gpt-upstream",
+		"status": "completed",
+		"output": []any{},
+	}
+	provider := &taskProtocolProvider{responseStreams: [][]providers.ResponseStreamEvent{{
+		{Data: map[string]any{"type": "response.completed", "response": response}},
+	}}}
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/v1/responses", nil)
+
+	server.forwardResponses(
+		recorder,
+		request,
+		"req_test",
+		sessionID,
+		codex.ResponsesRequest{Model: "bridge-model", Stream: true, Raw: map[string]any{"model": "bridge-model", "stream": true}},
+		config.ModelConfig{UpstreamModel: "gpt-upstream"},
+		provider,
+		adapters.Get(adapters.OpenAIName),
+		"",
+	)
+
+	for _, fileName := range []string{"prompt-responses.jsonl", "bridge-responses.jsonl"} {
+		path := diagnostics.SessionLogPath(toolLogPath, sessionID, fileName)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["terminal_type"] != "response.completed" || record["event_count"] != float64(1) {
+			t.Fatalf("%s record = %#v", fileName, record)
+		}
+		body, _ := record["body"].(map[string]any)
+		if body["id"] != "resp_test" || body["model"] != "bridge-model" || body["status"] != "completed" {
+			t.Fatalf("%s body = %#v", fileName, body)
+		}
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, `"type":"response.completed"`) || !strings.Contains(body, `"model":"bridge-model"`) {
+		t.Fatalf("stream body = %s", body)
 	}
 }

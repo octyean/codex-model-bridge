@@ -90,3 +90,44 @@ func TestCapabilityCacheDoesNotPersistAPIKey(t *testing.T) {
 		t.Fatal("capability cache persisted the API key")
 	}
 }
+
+func TestUpdateVerifiedCapabilityPreservesCacheAfterInconclusiveProbe(t *testing.T) {
+	provider := ProviderConfig{
+		Type:    "openai_compatible",
+		BaseURL: "https://example.test/v1",
+		APIKey:  "secret-api-key",
+		Profile: "kimi",
+	}
+	model := ModelConfig{Provider: "upstream", UpstreamModel: "test-model", Profile: "kimi"}
+	cfg := Config{
+		Providers: map[string]ProviderConfig{"upstream": provider},
+		Models:    map[string]ModelConfig{"test-model": model},
+	}
+	initial := upstreamprobe.Result{
+		ProbeModel:                  model.UpstreamModel,
+		ResponsesStreamOK:           true,
+		ResponsesToolsOK:            true,
+		ResponsesToolStreamOK:       true,
+		ResponsesToolContinuationOK: true,
+		RecommendedProtocol:         "responses",
+	}
+	if !cfg.UpdateVerifiedCapability("upstream", provider, initial) {
+		t.Fatal("initial capability was not cached")
+	}
+	before, ok := cfg.VerifiedCapability(model, provider)
+	if !ok {
+		t.Fatal("initial capability is unavailable")
+	}
+
+	inconclusive := upstreamprobe.Result{
+		ProbeModel:   model.UpstreamModel,
+		Inconclusive: map[string]string{"responses_stream": "upstream status 429"},
+	}
+	if cfg.UpdateVerifiedCapability("upstream", provider, inconclusive) {
+		t.Fatal("inconclusive capability replaced the cache")
+	}
+	after, ok := cfg.VerifiedCapability(model, provider)
+	if !ok || after.VerifiedAt != before.VerifiedAt || after.RecommendedProtocol != "responses" {
+		t.Fatalf("cached capability changed: before=%#v after=%#v ok=%v", before, after, ok)
+	}
+}

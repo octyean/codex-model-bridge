@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"codex-bridge/internal/providers"
@@ -40,12 +41,18 @@ func readFileDescription() string {
 
 func ReadFileCommand(arguments string, ctx Context) ExecCommand {
 	spec := readFileSpecFromArguments(arguments, ctx)
+	return readFileCommandForOS(runtime.GOOS, spec, ctx.Workspace)
+}
+
+func readFileCommandForOS(goos string, spec localResourceRead, workdir string) ExecCommand {
 	end := spec.StartLine + spec.LineLimit - 1
-	return ExecCommand{
-		Cmd:             "rtk sed -n " + shellQuote(fmt.Sprintf("%d,%dp", spec.StartLine, end)) + " " + shellQuote(spec.Path) + " 2>&1 | head -c 30000",
-		Workdir:         ctx.Workspace,
-		MaxOutputTokens: 12000,
+	command := "sed -n " + shellQuote(fmt.Sprintf("%d,%dp", spec.StartLine, end)) + " " + shellQuote(spec.Path)
+	if goos == "windows" {
+		command = "Get-Content -LiteralPath " + powerShellQuote(spec.Path) +
+			" | Select-Object -Skip " + fmt.Sprintf("%d", spec.StartLine-1) +
+			" -First " + fmt.Sprintf("%d", spec.LineLimit)
 	}
+	return localResourceExecCommand(goos, command, workdir)
 }
 
 func readFileSpecFromArguments(arguments string, ctx Context) localResourceRead {

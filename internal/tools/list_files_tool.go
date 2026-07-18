@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -46,15 +47,28 @@ func listFilesDescription() string {
 
 func ListFilesCommand(arguments string, ctx Context) ExecCommand {
 	spec := listFilesSpecFromArguments(arguments, ctx)
-	depth := " -maxdepth 1 -mindepth 1"
-	if spec.Recursive {
-		depth = ""
+	return listFilesCommandForOS(runtime.GOOS, spec, ctx.Workspace)
+}
+
+func listFilesCommandForOS(goos string, spec listFilesSpec, workdir string) ExecCommand {
+	var command string
+	if goos == "windows" {
+		recurse := ""
+		if spec.Recursive {
+			recurse = " -Recurse"
+		}
+		command = "Get-ChildItem -LiteralPath " + powerShellQuote(spec.Path) + recurse +
+			" -Force | Sort-Object FullName | Select-Object -First " + strconv.Itoa(spec.MaxResults) +
+			" | ForEach-Object { $_.FullName }"
+	} else {
+		path := shellQuote(spec.Path)
+		find := "find " + path + " ! -path " + path
+		if !spec.Recursive {
+			find += " -prune"
+		}
+		command = find + " -print | sort | head -n " + strconv.Itoa(spec.MaxResults)
 	}
-	return ExecCommand{
-		Cmd:             "find " + shellQuote(spec.Path) + depth + " -print 2>&1 | sort | head -n " + strconv.Itoa(spec.MaxResults) + " | head -c 30000",
-		Workdir:         ctx.Workspace,
-		MaxOutputTokens: 12000,
-	}
+	return localResourceExecCommand(goos, command, workdir)
 }
 
 func listFilesSpecFromArguments(arguments string, ctx Context) listFilesSpec {

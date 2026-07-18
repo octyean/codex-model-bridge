@@ -5,18 +5,27 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
 )
 
-const ProbeVersion = 2
+const (
+	ProbeVersion             = 3
+	ProbeOutcomeSupported    = "supported"
+	ProbeOutcomeUnsupported  = "unsupported"
+	ProbeOutcomeInconclusive = "inconclusive"
+)
 
 type Result struct {
 	ProbeVersion                int               `json:"probe_version"`
+	Outcome                     string            `json:"outcome"`
 	BaseURL                     string            `json:"base_url"`
 	ModelsURL                   string            `json:"models_url"`
 	ResponsesURL                string            `json:"responses_url"`
@@ -37,6 +46,7 @@ type Result struct {
 	ChatFirstEventMS            int64             `json:"chat_first_event_ms,omitempty"`
 	RecommendedProtocol         string            `json:"recommended_protocol"`
 	Failures                    map[string]string `json:"failures,omitempty"`
+	Inconclusive                map[string]string `json:"inconclusive,omitempty"`
 	Error                       string            `json:"error,omitempty"`
 }
 
@@ -133,6 +143,9 @@ func Run(ctx context.Context, options Options) Result {
 		result.RecommendedProtocol = "chat_completions"
 	} else {
 		result.RecommendedProtocol = "chat_completions"
+	}
+	result.Outcome = result.outcome()
+	if result.Outcome != ProbeOutcomeSupported {
 		result.Error = result.failureSummary()
 	}
 	return result
@@ -146,8 +159,19 @@ func (r Result) ChatReady() bool {
 	return r.ChatStreamOK && r.ChatToolsOK && r.ChatToolStreamOK
 }
 
+func (r Result) Cacheable() bool {
+	return strings.TrimSpace(r.ProbeModel) != "" && len(r.Inconclusive) == 0
+}
+
 func (r *Result) recordFailure(stage string, err error) {
 	if err == nil {
+		return
+	}
+	if isInconclusiveError(err) {
+		if r.Inconclusive == nil {
+			r.Inconclusive = map[string]string{}
+		}
+		r.Inconclusive[stage] = err.Error()
 		return
 	}
 	if r.Failures == nil {
@@ -156,26 +180,38 @@ func (r *Result) recordFailure(stage string, err error) {
 	r.Failures[stage] = err.Error()
 }
 
+func (r Result) outcome() string {
+	if len(r.Inconclusive) > 0 {
+		return ProbeOutcomeInconclusive
+	}
+	if r.ResponsesReady() || r.ChatReady() {
+		return ProbeOutcomeSupported
+	}
+	return ProbeOutcomeUnsupported
+}
+
 func (r Result) failureSummary() string {
-	if len(r.Failures) == 0 {
+	failures := make(map[string]string, len(r.Failures)+len(r.Inconclusive))
+	for stage, message := range r.Failures {
+		failures[stage] = message
+	}
+	for stage, message := range r.Inconclusive {
+		failures[stage] = message
+	}
+	if len(failures) == 0 {
 		return "no compatible upstream protocol was detected"
 	}
-	stages := make([]string, 0, len(r.Failures))
-	for stage := range r.Failures {
+	stages := make([]string, 0, len(failures))
+	for stage := range failures {
 		stages = append(stages, stage)
 	}
 	sort.Strings(stages)
 	stage := stages[0]
-	return stage + ": " + r.Failures[stage]
+	return stage + ": " + failures[stage]
 }
 
 func listModels(ctx context.Context, client *http.Client, targetURL string, apiKey string) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	applyHeaders(req, apiKey)
-	resp, err := client.Do(req)
+	resp, err := doProbeRequest(ctx, client, http.MethodGet, targetURL, apiKey, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -247,9 +283,10 @@ func probeChatStream(ctx context.Context, client *http.Client, targetURL string,
 
 func probeResponsesTools(ctx context.Context, client *http.Client, targetURL string, apiKey string, model string) (map[string]any, error) {
 	body := map[string]any{
-		"model": model,
-		"input": "Call probe_tool with value ok. After receiving the tool output, reply with probe-complete.",
-		"tools": responsesProbeTools(),
+		"model":       model,
+		"input":       "Call probe_tool with value ok. After receiving the tool output, reply with probe-complete.",
+		"tools":       responsesProbeTools(),
+		"tool_choice": map[string]any{"type": "function", "name": "probe_tool"},
 	}
 	var response map[string]any
 	if err := postJSON(ctx, client, targetURL, apiKey, body, &response); err != nil {
@@ -269,7 +306,8 @@ func probeChatTools(ctx context.Context, client *http.Client, targetURL string, 
 			"role":    "user",
 			"content": "Call probe_tool with value ok. Do not answer in normal text.",
 		}},
-		"tools": chatProbeTools(),
+		"tools":       chatProbeTools(),
+		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "probe_tool"}},
 	}
 	var response map[string]any
 	if err := postJSON(ctx, client, targetURL, apiKey, body, &response); err != nil {
@@ -293,10 +331,11 @@ func probeChatTools(ctx context.Context, client *http.Client, targetURL string, 
 
 func probeResponsesToolStream(ctx context.Context, client *http.Client, targetURL string, apiKey string, model string) error {
 	body := map[string]any{
-		"model":  model,
-		"stream": true,
-		"input":  "Call probe_tool with value ok. Do not answer in normal text.",
-		"tools":  responsesProbeTools(),
+		"model":       model,
+		"stream":      true,
+		"input":       "Call probe_tool with value ok. Do not answer in normal text.",
+		"tools":       responsesProbeTools(),
+		"tool_choice": map[string]any{"type": "function", "name": "probe_tool"},
 	}
 	var call map[string]any
 	completed := false
@@ -418,7 +457,8 @@ func probeChatToolStream(ctx context.Context, client *http.Client, targetURL str
 			"role":    "user",
 			"content": "Call probe_tool with value ok. Do not answer in normal text.",
 		}},
-		"tools": chatProbeTools(),
+		"tools":       chatProbeTools(),
+		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "probe_tool"}},
 	}
 	name := ""
 	arguments := ""
@@ -534,12 +574,7 @@ func postJSON(ctx context.Context, client *http.Client, targetURL string, apiKey
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	applyHeaders(req, apiKey)
-	resp, err := client.Do(req)
+	resp, err := doProbeRequest(ctx, client, http.MethodPost, targetURL, apiKey, data, "")
 	if err != nil {
 		return err
 	}
@@ -555,14 +590,8 @@ func streamJSONEvents(ctx context.Context, client *http.Client, targetURL string
 	if err != nil {
 		return 0, false, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(data))
-	if err != nil {
-		return 0, false, err
-	}
-	applyHeaders(req, apiKey)
-	req.Header.Set("Accept", "text/event-stream")
 	start := time.Now()
-	resp, err := client.Do(req)
+	resp, err := doProbeRequest(ctx, client, http.MethodPost, targetURL, apiKey, data, "text/event-stream")
 	if err != nil {
 		return 0, false, err
 	}
@@ -616,9 +645,90 @@ func applyHeaders(req *http.Request, apiKey string) {
 	}
 }
 
+type probeHTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *probeHTTPError) Error() string {
+	return fmt.Sprintf("upstream status %d: %s", e.StatusCode, e.Body)
+}
+
 func readHTTPError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	return &probeHTTPError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+}
+
+func doProbeRequest(ctx context.Context, client *http.Client, method string, targetURL string, apiKey string, body []byte, accept string) (*http.Response, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, targetURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		applyHeaders(req, apiKey)
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		resp, err := client.Do(req)
+		if attempt == 1 || !shouldRetryProbe(ctx, resp, err) {
+			return resp, err
+		}
+		if resp != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, errors.New("probe request retry exhausted")
+}
+
+func shouldRetryProbe(ctx context.Context, resp *http.Response, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if err != nil {
+		var networkError net.Error
+		return errors.As(err, &networkError)
+	}
+	if resp == nil {
+		return false
+	}
+	return resp.StatusCode == http.StatusRequestTimeout ||
+		resp.StatusCode == http.StatusTooEarly ||
+		resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode >= http.StatusInternalServerError
+}
+
+func isInconclusiveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var httpErr *probeHTTPError
+	if errors.As(err, &httpErr) {
+		switch httpErr.StatusCode {
+		case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity:
+			return false
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+			return true
+		default:
+			return httpErr.StatusCode >= http.StatusInternalServerError || httpErr.StatusCode >= http.StatusBadRequest
+		}
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return true
+	}
+	var urlError *url.Error
+	return errors.As(err, &urlError)
 }
 
 func chatCompletionsURL(baseURL string) string {

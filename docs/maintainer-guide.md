@@ -210,7 +210,7 @@ dist/codex-bridge-windows-arm64.exe
 提交推送按用户要求使用 `git-tools`。发版前确认工作区干净、目标 tag 不存在：
 
 ```bash
-VERSION="0.5.2"
+VERSION="0.5.3"
 rtk git status --short
 rtk git tag -l "v$VERSION"
 rtk gh release view "v$VERSION" 2>&1 | head -c 4000

@@ -19,10 +19,42 @@ func convertToolSearch(toolDescription string, raw map[string]any) []convertedTo
 
 func toolSearchDescription(description string) string {
 	const boundary = "Use tool_search only when the needed callable tool is not already visible. Do not use it to read files, find local paths, inspect repositories, or choose between already visible tools."
+	if compacted, ok := compactOneMCPToolSearchDescription(description); ok {
+		description = compacted
+	}
 	if description == "" {
 		return boundary
 	}
 	return description + "\n" + boundary
+}
+
+func compactOneMCPToolSearchDescription(description string) (string, bool) {
+	if !strings.Contains(description, "# 1MCP - Model Context Protocol Proxy") {
+		return "", false
+	}
+	connected := markdownSection(description, "## Currently Connected Servers")
+	instructions := markdownSection(description, "## Server-Specific Instructions")
+	if connected == "" || instructions == "" {
+		return "", false
+	}
+	return strings.Join([]string{
+		"Search deferred callable tools exposed through 1MCP.",
+		connected,
+		"Returned tool names use `{server}_1mcp_{tool}`. Search by capability or exact tool intent, then call the returned tool.",
+		instructions,
+	}, "\n\n"), true
+}
+
+func markdownSection(text string, heading string) string {
+	start := strings.Index(text, heading)
+	if start < 0 {
+		return ""
+	}
+	section := text[start:]
+	if next := strings.Index(section[len(heading):], "\n## "); next >= 0 {
+		section = section[:len(heading)+next]
+	}
+	return strings.TrimSpace(section)
 }
 
 func ToolSearchArguments(arguments string) any {

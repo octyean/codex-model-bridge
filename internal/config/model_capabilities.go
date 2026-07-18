@@ -86,7 +86,10 @@ func (cfg *Config) VerifiedCapability(model ModelConfig, provider ProviderConfig
 	return capability, true
 }
 
-func (cfg *Config) UpdateVerifiedCapability(providerName string, provider ProviderConfig, result upstreamprobe.Result) {
+func (cfg *Config) UpdateVerifiedCapability(providerName string, provider ProviderConfig, result upstreamprobe.Result) bool {
+	if !result.Cacheable() {
+		return false
+	}
 	if cfg.verifiedCapabilities.Models == nil {
 		cfg.verifiedCapabilities = modelCapabilityCache{
 			Version: modelCapabilityCacheVersion,
@@ -118,6 +121,7 @@ func (cfg *Config) UpdateVerifiedCapability(providerName string, provider Provid
 		ChatToolStreamOK:            result.ChatToolStreamOK,
 		Failures:                    result.Failures,
 	}
+	return true
 }
 
 func (cfg *Config) WriteCapabilityCache() error {

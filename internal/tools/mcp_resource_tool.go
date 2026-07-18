@@ -171,6 +171,24 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+func powerShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func localResourceExecCommand(goos string, command string, workdir string) ExecCommand {
+	if goos == "windows" {
+		command = "$bridgeOutput = & { " + command + " } 2>&1 | Out-String; " +
+			"if ($bridgeOutput.Length -gt 30000) { $bridgeOutput.Substring(0, 30000) } else { $bridgeOutput }"
+	} else {
+		command = "( " + command + " ) 2>&1 | head -c 30000"
+	}
+	return ExecCommand{
+		Cmd:             command,
+		Workdir:         workdir,
+		MaxOutputTokens: 12000,
+	}
+}
+
 func marshalObject(value map[string]any) string {
 	if len(value) == 0 {
 		return "{}"

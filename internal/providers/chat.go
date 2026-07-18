@@ -262,6 +262,7 @@ func (c *OpenAIChatClient) StreamResponse(ctx context.Context, req map[string]an
 		defer resp.Body.Close()
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		terminal := false
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" || strings.HasPrefix(line, ":") {
@@ -272,7 +273,11 @@ func (c *OpenAIChatClient) StreamResponse(ctx context.Context, req map[string]an
 			}
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if data == "[DONE]" {
-				out <- ResponseStreamEvent{Done: true}
+				if terminal {
+					out <- ResponseStreamEvent{Done: true}
+				} else {
+					out <- ResponseStreamEvent{Err: errors.New("responses stream ended before terminal event")}
+				}
 				return
 			}
 			var event map[string]any
@@ -280,13 +285,32 @@ func (c *OpenAIChatClient) StreamResponse(ctx context.Context, req map[string]an
 				out <- ResponseStreamEvent{Err: err}
 				return
 			}
+			if isResponseTerminalEvent(event) {
+				terminal = true
+			}
 			out <- ResponseStreamEvent{Data: event}
 		}
 		if err := scanner.Err(); err != nil {
 			out <- ResponseStreamEvent{Err: err}
+			return
 		}
+		if terminal {
+			out <- ResponseStreamEvent{Done: true}
+			return
+		}
+		out <- ResponseStreamEvent{Err: errors.New("responses stream closed before terminal event")}
 	}()
 	return out, nil
+}
+
+func isResponseTerminalEvent(event map[string]any) bool {
+	eventType, _ := event["type"].(string)
+	switch eventType {
+	case "response.completed", "response.failed", "response.incomplete":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *OpenAIChatClient) Stream(ctx context.Context, req ChatCompletionRequest) (<-chan StreamEvent, error) {
