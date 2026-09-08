@@ -64,14 +64,14 @@ type OutputContext struct {
 }
 
 type Profile struct {
-	Tool          string
-	ToolKey       string
-	Capability    string
-	ArgumentsHash string
-	Signature     string
-	ReadOnly      bool
-	Risk          string
-	Source        []string
+	Tool          string   `json:"tool"`
+	ToolKey       string   `json:"tool_key"`
+	Capability    string   `json:"capability"`
+	ArgumentsHash string   `json:"arguments_hash"`
+	Signature     string   `json:"signature"`
+	ReadOnly      bool     `json:"read_only"`
+	Risk          string   `json:"risk"`
+	Source        []string `json:"source"`
 }
 
 type Decision struct {
@@ -85,11 +85,11 @@ type Decision struct {
 }
 
 type Outcome struct {
-	OK          bool
-	Category    string
-	Progress    bool
-	OutputHash  string
-	ProgressKey string
+	OK          bool   `json:"ok"`
+	Category    string `json:"category"`
+	Progress    bool   `json:"progress"`
+	OutputHash  string `json:"output_hash"`
+	ProgressKey string `json:"progress_key"`
 }
 
 type sessionState struct {

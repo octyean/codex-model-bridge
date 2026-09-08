@@ -1,6 +1,8 @@
 package toolruntime
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -133,5 +135,29 @@ func TestRememberRequestPrunesExpiredSessions(t *testing.T) {
 	mu.Unlock()
 	if exists {
 		t.Fatal("expired session state should be pruned")
+	}
+}
+
+func TestRuntimeLogTypesUseSnakeCaseJSON(t *testing.T) {
+	data, err := json.Marshal(struct {
+		Profile Profile `json:"profiled_tool"`
+		Outcome Outcome `json:"runtime_outcome"`
+	}{
+		Profile: Profile{Tool: "replace_text", ToolKey: "write", ArgumentsHash: "hash"},
+		Outcome: Outcome{OK: true, Category: "success", Progress: true, OutputHash: "output"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, expected := range []string{`"tool_key"`, `"arguments_hash"`, `"ok"`, `"category"`, `"progress"`, `"output_hash"`} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("JSON missing %s: %s", expected, text)
+		}
+	}
+	for _, unexpected := range []string{`"ToolKey"`, `"ArgumentsHash"`, `"OK"`, `"Category"`, `"Progress"`, `"OutputHash"`} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("JSON contains %s: %s", unexpected, text)
+		}
 	}
 }

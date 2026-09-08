@@ -44,6 +44,9 @@ func TestRunUsesExplicitProfileForUnknownModelName(t *testing.T) {
 	if model.ExecutionMode != config.ExecutionModeProjectedResponses {
 		t.Fatalf("execution mode = %q, want projected_responses", model.ExecutionMode)
 	}
+	if cfg.Server.ShutdownTimeoutSeconds != 30 {
+		t.Fatalf("shutdown timeout = %d, want 30", cfg.Server.ShutdownTimeoutSeconds)
+	}
 }
 
 func TestRunRejectsUnknownExplicitProfile(t *testing.T) {

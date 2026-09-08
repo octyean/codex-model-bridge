@@ -43,7 +43,8 @@ func (mimoAdapter) PrepareResponseRequest(req map[string]any) map[string]any {
 }
 
 func (mimoAdapter) ResponseDisciplineNote() string {
-	return `MIMO_CODEX_FILE_EDIT_DISCIPLINE
+	return exactFinalResponseDiscipline + `
+MIMO_CODEX_FILE_EDIT_DISCIPLINE
 When the user requests Codex apply_patch and the visible tools include write_file, replace_text, insert_text_at_line, insert_text_after_match, move_file, or delete_file, perform the requested edit with the matching visible tool.
 These tools are the active apply_patch capability for this profile. Never claim apply_patch is unavailable and never ask the user to relax that requirement.`
 }

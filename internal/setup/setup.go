@@ -136,7 +136,10 @@ func buildConfig(options Options, probe upstreamprobe.Result, localToken string)
 	}
 	profile := firstNonEmpty(options.Profile, profileForModel(defaultModel))
 	cfg := config.Config{
-		Server: config.ServerConfig{Listen: "127.0.0.1:8787"},
+		Server: config.ServerConfig{
+			Listen:                 "127.0.0.1:8787",
+			ShutdownTimeoutSeconds: 30,
+		},
 		Codex: config.CodexConfig{
 			ModelCatalogPath: filepath.ToSlash(filepath.Join(options.CodexHome, "models.codex-bridge.json")),
 			DefaultModel:     defaultModel,
@@ -199,8 +202,7 @@ func executionModeForModel(model string, protocol string, profile string) string
 	case adapters.DeepSeekName, adapters.KimiName, adapters.MimoName:
 		return config.ExecutionModeProjectedResponses
 	}
-	value := strings.ToLower(strings.TrimSpace(model))
-	if strings.HasPrefix(value, "gpt-") || strings.HasPrefix(value, "o3") || strings.HasPrefix(value, "o4") {
+	if config.IsOpenAINativeModel(model) {
 		return config.ExecutionModeNativeResponses
 	}
 	return config.ExecutionModeProjectedResponses

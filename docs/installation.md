@@ -11,9 +11,14 @@ curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scr
 脚本会在首次安装时询问上游 URL 和 API key，并自动探测上游是否支持 `/responses` 流式协议。适合服务器或批量安装的非交互写法：
 
 ```bash
+export CODEX_BRIDGE_BASE_URL="https://api.deepseek.com"
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
-  env CODEX_BRIDGE_BASE_URL="https://api.deepseek.com" CODEX_BRIDGE_API_KEY="sk-xxx" bash
+  bash
+unset CODEX_BRIDGE_API_KEY CODEX_BRIDGE_BASE_URL
 ```
+
+本地首次安装直接运行交互命令更安全，API key 输入不会回显。自动化环境应从自己的 secret store 导出 `CODEX_BRIDGE_API_KEY`，执行完成后清理变量；安装脚本不会再把 key 放进 `codex-bridge` 的命令参数。
 
 安装脚本会自动完成这些事：
 
@@ -35,15 +40,22 @@ CODEX_BRIDGE_MODEL="deepseek-v4-flash"
 CODEX_BRIDGE_HOME="$HOME/.codex-bridge"
 CODEX_BRIDGE_CONFIG="$HOME/.codex-bridge/config.toml"
 CODEX_BRIDGE_REPLACE_UPSTREAM=1
+CODEX_BRIDGE_ENABLE_DIAGNOSTICS=1
 ```
 
 重复执行同一条安装命令即可更新二进制和重启服务。已有配置默认不会被覆盖，也不会静默更换 URL/API key；未打开替换开关时也不会重新要求填写上游或探测上游协议。
 
+`CODEX_BRIDGE_ENABLE_DIAGNOSTICS=1` 只为 Linux systemd 或 macOS launchd 服务设置 `CODEX_BRIDGE_TOOL_LOG`。这会启用工具、事故和按会话拆分的诊断日志；默认关闭，不会同时开启 `CODEX_BRIDGE_DUMP_UPSTREAM_REQUEST` 或 `CODEX_BRIDGE_LOG_STREAM_EVENTS`。
+
 需要更换上游时显式打开替换开关：
 
 ```bash
+export CODEX_BRIDGE_REPLACE_UPSTREAM=1
+export CODEX_BRIDGE_BASE_URL="https://api.example.com/v1"
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
-  env CODEX_BRIDGE_REPLACE_UPSTREAM=1 CODEX_BRIDGE_BASE_URL="https://api.example.com/v1" CODEX_BRIDGE_API_KEY="sk-xxx" bash
+  bash
+unset CODEX_BRIDGE_API_KEY CODEX_BRIDGE_BASE_URL CODEX_BRIDGE_REPLACE_UPSTREAM
 ```
 
 ## Windows

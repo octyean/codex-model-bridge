@@ -145,10 +145,11 @@ rtk tail -n 80 "$LOG_DIR/incidents.jsonl" 2>/dev/null || true
 第三方 Responses 模型还要验证 probe 的组合能力：
 
 ```bash
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 codex-bridge probe \
   --upstream-base-url https://api.example.com/v1 \
-  --upstream-api-key sk-xxx \
   --model kimi-for-coding
+unset CODEX_BRIDGE_API_KEY
 ```
 
 推荐 Responses 至少要求 `responses_stream_ok`、`responses_tools_ok`、`responses_tool_stream_ok` 和 `responses_tool_continuation_ok` 全部为 `true`。`responses_structured_output_ok=false` 不会强制改走 Chat，Bridge 会使用 Projected Responses 的结构化输出兼容路径。

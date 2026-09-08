@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"codex-bridge/internal/adapters"
 
@@ -35,7 +36,16 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen string `toml:"listen"`
+	Listen                 string `toml:"listen"`
+	ShutdownTimeoutSeconds int    `toml:"shutdown_timeout_seconds,omitempty"`
+}
+
+func (cfg *Config) ShutdownTimeout() time.Duration {
+	seconds := cfg.Server.ShutdownTimeoutSeconds
+	if seconds == 0 {
+		seconds = 30
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 type CodexConfig struct {
@@ -235,6 +245,9 @@ func CheckUnknownFields(path string) error {
 func (cfg *Config) Validate() error {
 	if cfg.Server.Listen == "" {
 		return fmt.Errorf("server.listen is required")
+	}
+	if cfg.Server.ShutdownTimeoutSeconds < 0 {
+		return fmt.Errorf("server.shutdown_timeout_seconds must be zero or greater")
 	}
 	if cfg.Codex.ModelCatalogPath == "" {
 		return fmt.Errorf("codex.model_catalog_path is required")
@@ -455,7 +468,16 @@ func DefaultContextWindowForModel(model string) int64 {
 	}
 }
 
-var desktopModelSlots = []string{"gpt-5.3-codex", "gpt-5.2", "gpt-5.4-mini", "gpt-5.5", "gpt-5.4"}
+var desktopModelSlots = []string{
+	"gpt-5.3-codex",
+	"gpt-5.2",
+	"gpt-5.4-mini",
+	"gpt-5.5",
+	"gpt-5.4",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
+}
 
 func DesktopModelSlug(model string) string {
 	value := strings.ToLower(strings.TrimSpace(model))
@@ -492,7 +514,7 @@ func desktopModelPriority(model string) int {
 
 func desktopVisibleModel(slug string) bool {
 	switch strings.TrimSpace(slug) {
-	case "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2":
+	case "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2":
 		return true
 	default:
 		return false
@@ -523,13 +545,13 @@ func (cfg *Config) ensureDefaultModel() {
 func (cfg *Config) ProfileName(model ModelConfig, provider ProviderConfig) string {
 	modelProfile := adapters.Normalize(model.Profile)
 	providerProfile := adapters.Normalize(provider.Profile)
-	if isOpenAINativeModel(model.UpstreamModel) && modelProfile == adapters.DefaultName && providerProfile == adapters.DefaultName {
+	if IsOpenAINativeModel(model.UpstreamModel) && modelProfile == adapters.DefaultName && providerProfile == adapters.DefaultName {
 		return adapters.OpenAIName
 	}
 	if strings.TrimSpace(model.Profile) != "" {
 		return modelProfile
 	}
-	if isOpenAINativeModel(model.UpstreamModel) && providerProfile == adapters.DefaultName {
+	if IsOpenAINativeModel(model.UpstreamModel) && providerProfile == adapters.DefaultName {
 		return adapters.OpenAIName
 	}
 	if strings.TrimSpace(provider.Profile) != "" {
@@ -549,19 +571,19 @@ func (cfg *Config) UpstreamProtocol(model ModelConfig, provider ProviderConfig) 
 	case "responses", "chat_completions":
 		return provider.Protocol
 	case "auto":
-		if isOpenAINativeModel(model.UpstreamModel) {
+		if IsOpenAINativeModel(model.UpstreamModel) {
 			return "responses"
 		}
 	}
-	if provider.Protocol == "" && provider.Type == "openai_compatible" && isOpenAINativeModel(model.UpstreamModel) {
+	if provider.Protocol == "" && provider.Type == "openai_compatible" && IsOpenAINativeModel(model.UpstreamModel) {
 		return "responses"
 	}
 	return "chat_completions"
 }
 
-func isOpenAINativeModel(model string) bool {
+func IsOpenAINativeModel(model string) bool {
 	value := strings.ToLower(strings.TrimSpace(model))
-	return strings.HasPrefix(value, "gpt-") || strings.HasPrefix(value, "o3") || strings.HasPrefix(value, "o4")
+	return strings.HasPrefix(value, "gpt-") || strings.HasPrefix(value, "o1") || strings.HasPrefix(value, "o3") || strings.HasPrefix(value, "o4")
 }
 
 func (cfg *Config) BridgeBaseURL() string {
@@ -715,6 +737,8 @@ func reasoningLevelDescription(effort string) string {
 		return "Maximum reasoning for the hardest coding tasks"
 	case "max":
 		return "Maximum provider-supported reasoning"
+	case "ultra":
+		return "Maximum reasoning with automatic task delegation"
 	default:
 		return "Provider-defined reasoning level"
 	}

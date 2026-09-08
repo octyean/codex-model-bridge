@@ -15,6 +15,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 CONFIG_PATH="$ROOT_DIR/config/config.toml"
 INSTALL_DIR="${CODEX_BRIDGE_HOME:-$HOME/.codex-bridge}"
 BINARY_PATH="${CODEX_BRIDGE_BINARY:-}"
+ENABLE_DIAGNOSTICS="${CODEX_BRIDGE_ENABLE_DIAGNOSTICS:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -92,6 +93,10 @@ case "$(uname -s)" in
   Linux)
     SERVICE_DIR="$HOME/.config/systemd/user"
     SERVICE_FILE="$SERVICE_DIR/codex-bridge.service"
+    DIAGNOSTICS_ENVIRONMENT=""
+    if [ "$ENABLE_DIAGNOSTICS" = "1" ] || [ "$ENABLE_DIAGNOSTICS" = "true" ]; then
+      DIAGNOSTICS_ENVIRONMENT="Environment=\"CODEX_BRIDGE_TOOL_LOG=$LOG_DIR/tool-calls.jsonl\""
+    fi
     mkdir -p "$SERVICE_DIR"
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -101,6 +106,7 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart=$INSTALL_BIN --config $CONFIG_PATH
+$DIAGNOSTICS_ENVIRONMENT
 Restart=always
 RestartSec=2
 WorkingDirectory=$(dirname "$CONFIG_PATH")
@@ -117,6 +123,14 @@ EOF
     LABEL="com.codex-bridge"
     PLIST_DIR="$HOME/Library/LaunchAgents"
     PLIST_FILE="$PLIST_DIR/$LABEL.plist"
+    DIAGNOSTICS_ENVIRONMENT=""
+    if [ "$ENABLE_DIAGNOSTICS" = "1" ] || [ "$ENABLE_DIAGNOSTICS" = "true" ]; then
+      DIAGNOSTICS_ENVIRONMENT="  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_BRIDGE_TOOL_LOG</key>
+    <string>$LOG_DIR/tool-calls.jsonl</string>
+  </dict>"
+    fi
     mkdir -p "$PLIST_DIR"
     cat > "$PLIST_FILE" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -133,6 +147,7 @@ EOF
   </array>
   <key>WorkingDirectory</key>
   <string>$(dirname "$CONFIG_PATH")</string>
+$DIAGNOSTICS_ENVIRONMENT
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

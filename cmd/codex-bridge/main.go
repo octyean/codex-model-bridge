@@ -29,11 +29,14 @@ import (
 	bridgesetup "codex-bridge/internal/setup"
 	"codex-bridge/internal/toollog"
 	"codex-bridge/internal/upstreamprobe"
+
+	"golang.org/x/term"
 )
 
 const (
 	modelDiscoveryProviderTimeout = 10 * time.Second
 	sessionLogPruneInterval       = 6 * time.Hour
+	upstreamAPIKeyEnv             = "CODEX_BRIDGE_API_KEY"
 )
 
 func main() {
@@ -75,7 +78,7 @@ func main() {
 	providerDisplayName := flags.String("provider-display-name", "Codex Bridge", "Codex model provider display name")
 	baseURL := flags.String("base-url", "", "Bridge base URL to write into Codex config, defaults to server.listen + /v1")
 	upstreamBaseURL := flags.String("upstream-base-url", "", "Upstream OpenAI-compatible base URL")
-	upstreamAPIKey := flags.String("upstream-api-key", "", "Upstream API key")
+	upstreamAPIKey := flags.String("upstream-api-key", "", "Upstream API key; prefer CODEX_BRIDGE_API_KEY to avoid command history")
 	probeModel := flags.String("model", "", "Model to use for upstream probing")
 	setupProfile := flags.String("profile", "", "Adapter profile to use during setup")
 	verifyModels := flags.String("models", "", "Comma-separated model slugs or upstream model IDs to verify")
@@ -85,10 +88,11 @@ func main() {
 	if err := flags.Parse(args); err != nil {
 		os.Exit(1)
 	}
+	resolvedUpstreamAPIKey := resolveUpstreamAPIKey(*upstreamAPIKey)
 	if command == "probe" {
 		result := upstreamprobe.Run(context.Background(), upstreamprobe.Options{
 			BaseURL: *upstreamBaseURL,
-			APIKey:  *upstreamAPIKey,
+			APIKey:  resolvedUpstreamAPIKey,
 			Model:   *probeModel,
 		})
 		data, _ := json.MarshalIndent(result, "", "  ")
@@ -99,7 +103,7 @@ func main() {
 		return
 	}
 	if command == "setup" {
-		result, err := runSetup(*configPath, *codexHome, *upstreamBaseURL, *upstreamAPIKey, *probeModel, *setupProfile, *replaceUpstream, *yes)
+		result, err := runSetup(*configPath, *codexHome, *upstreamBaseURL, resolvedUpstreamAPIKey, *probeModel, *setupProfile, *replaceUpstream, *yes)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -258,10 +262,11 @@ func main() {
 	}
 	stopSessionLogPruner()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownTimeout := cfg.ShutdownTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := httpServer.Shutdown(ctx); err != nil {
-		logger.Warn("server_graceful_shutdown_timed_out", slog.String("error", err.Error()))
+		logger.Warn("server_graceful_shutdown_timed_out", slog.Duration("timeout", shutdownTimeout), slog.String("error", err.Error()))
 		if closeErr := httpServer.Close(); closeErr != nil {
 			logger.Error("server_force_close_failed", slog.String("error", closeErr.Error()))
 		}
@@ -355,8 +360,12 @@ func writeConfigSummary(writer io.Writer, cfg *config.Config) error {
 			displayName = slug
 		}
 		verification := "unverified"
-		if _, ok := cfg.VerifiedCapability(model, provider); ok {
+		if !cfg.RequiresCapabilityVerification(model, provider) {
+			verification = "not_required"
+		} else if _, ok := cfg.VerifiedCapability(model, provider); ok {
 			verification = "verified"
+		} else {
+			verification = "verification_required"
 		}
 		plan := cfg.ExecutionPlan(model, provider)
 		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
@@ -419,9 +428,10 @@ func runSetup(configPath string, codexHome string, baseURL string, apiKey string
 		}
 	}
 	if strings.TrimSpace(apiKey) == "" && !yes {
-		fmt.Print("Upstream API key: ")
-		if _, err := fmt.Scanln(&apiKey); err != nil {
-			return bridgesetup.Result{}, fmt.Errorf("read upstream API key: %w", err)
+		var err error
+		apiKey, err = readUpstreamAPIKey()
+		if err != nil {
+			return bridgesetup.Result{}, err
 		}
 	}
 	if strings.TrimSpace(baseURL) == "" {
@@ -447,6 +457,27 @@ func runSetup(configPath string, codexHome string, baseURL string, apiKey string
 		Profile:         profile,
 		ReplaceUpstream: replaceUpstream,
 	}, probe)
+}
+
+func resolveUpstreamAPIKey(flagValue string) string {
+	if value := strings.TrimSpace(flagValue); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv(upstreamAPIKeyEnv))
+}
+
+func readUpstreamAPIKey() (string, error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", fmt.Errorf("upstream API key is required; set %s or pass --upstream-api-key", upstreamAPIKeyEnv)
+	}
+	fmt.Fprint(os.Stderr, "Upstream API key: ")
+	value, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", fmt.Errorf("read upstream API key: %w", err)
+	}
+	return strings.TrimSpace(string(value)), nil
 }
 
 func configExists(path string) bool {
@@ -552,11 +583,14 @@ func discoverModels(ctx context.Context, cfg *config.Config, providerClients map
 		}
 		report := cfg.AddDiscoveredModelsReport(name, ids)
 		assignments, _ := json.Marshal(report.Assignments)
+		skippedModels, skippedOmitted := summarizeSkippedModels(report.Skipped, 12)
 		logger.Info("model_discovery_completed",
 			slog.String("provider", name),
 			slog.Int("upstream_models", report.Discovered),
 			slog.Int("added", report.Added),
 			slog.Int("skipped", len(report.Skipped)),
+			slog.Any("skipped_models", skippedModels),
+			slog.Int("skipped_omitted", skippedOmitted),
 			slog.String("assignments", string(assignments)),
 		)
 	}
@@ -566,6 +600,13 @@ func discoverModels(ctx context.Context, cfg *config.Config, providerClients map
 			slog.String("error", err.Error()),
 		)
 	}
+}
+
+func summarizeSkippedModels(models []string, limit int) ([]string, int) {
+	if len(models) <= limit {
+		return models, 0
+	}
+	return models[:limit], len(models) - limit
 }
 
 type verifyProviderOutput struct {

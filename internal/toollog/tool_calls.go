@@ -41,6 +41,7 @@ type requestContext struct {
 	SessionID     string
 	Model         string
 	UpstreamModel string
+	Profile       string
 }
 
 type LogicalToolCall struct {
@@ -87,7 +88,7 @@ func RememberRequestSession(requestID string, sessionID string, model string, up
 	if sessionID == "" && upstreamModel == "" {
 		return
 	}
-	requestContexts.Store(requestID, requestContext{SessionID: sessionID, Model: model, UpstreamModel: upstreamModel})
+	requestContexts.Store(requestID, requestContext{SessionID: sessionID, Model: model, UpstreamModel: upstreamModel, Profile: profile})
 	pruneRememberedState(time.Now())
 	toolruntime.RememberRequest(toolruntime.RequestContext{
 		RequestID:      requestID,
@@ -128,6 +129,7 @@ func PatchToolCall(requestID string, callID string, entry tools.Entry, rawArgume
 	}
 	appendRecord(map[string]any{
 		"time":          time.Now().Format(time.RFC3339Nano),
+		"event":         "patch_tool_call",
 		"request_id":    requestID,
 		"call_id":       callID,
 		"tool":          entry.Name(),
@@ -610,6 +612,11 @@ func attachRequestContext(record map[string]any) {
 	if _, ok := record["upstream_model"]; !ok {
 		if ctx.UpstreamModel != "" {
 			record["upstream_model"] = ctx.UpstreamModel
+		}
+	}
+	if _, ok := record["profile"]; !ok {
+		if ctx.Profile != "" {
+			record["profile"] = ctx.Profile
 		}
 	}
 }

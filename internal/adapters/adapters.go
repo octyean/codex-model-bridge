@@ -17,6 +17,9 @@ const (
 	OpenAIName   = "openai"
 )
 
+const exactFinalResponseDiscipline = `EXACT_FINAL_RESPONSE
+When an active instruction requires only or exactly specific final text, output exactly that text with no prefix, suffix, or completion summary.`
+
 type Capabilities struct {
 	InputModalities             []string
 	SupportsImageDetailOriginal bool

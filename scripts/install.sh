@@ -13,6 +13,7 @@ BASE_URL="${CODEX_BRIDGE_BASE_URL:-}"
 API_KEY="${CODEX_BRIDGE_API_KEY:-}"
 MODEL="${CODEX_BRIDGE_MODEL:-deepseek-v4-flash}"
 REPLACE_UPSTREAM="${CODEX_BRIDGE_REPLACE_UPSTREAM:-0}"
+ENABLE_DIAGNOSTICS="${CODEX_BRIDGE_ENABLE_DIAGNOSTICS:-0}"
 
 detect_asset() {
   local os
@@ -58,9 +59,7 @@ write_config() {
     if [ -z "$API_KEY" ]; then
       if [ -r /dev/tty ]; then
         printf "Upstream API key: " >/dev/tty
-        stty -echo </dev/tty || true
-        IFS= read -r API_KEY </dev/tty
-        stty echo </dev/tty || true
+        IFS= read -r -s API_KEY </dev/tty
         printf "\n" >/dev/tty
       else
         echo "CODEX_BRIDGE_API_KEY is required" >&2
@@ -70,12 +69,16 @@ write_config() {
   fi
   local args=(setup --config "$CONFIG_PATH" --codex-home "$CODEX_DIR" --model "$MODEL" --yes)
   if [ "$needs_upstream" = "1" ]; then
-    args+=(--upstream-base-url "$BASE_URL" --upstream-api-key "$API_KEY")
+    args+=(--upstream-base-url "$BASE_URL")
   fi
   if [ "$REPLACE_UPSTREAM" = "1" ] || [ "$REPLACE_UPSTREAM" = "true" ]; then
     args+=(--replace-upstream)
   fi
-  "$BIN_PATH" "${args[@]}"
+  if [ "$needs_upstream" = "1" ]; then
+    CODEX_BRIDGE_API_KEY="$API_KEY" "$BIN_PATH" "${args[@]}"
+  else
+    "$BIN_PATH" "${args[@]}"
+  fi
 }
 
 install_service() {
@@ -87,6 +90,10 @@ install_service() {
       fi
       local service_dir="$HOME/.config/systemd/user"
       local service_file="$service_dir/codex-bridge.service"
+      local diagnostics_environment=""
+      if [ "$ENABLE_DIAGNOSTICS" = "1" ] || [ "$ENABLE_DIAGNOSTICS" = "true" ]; then
+        diagnostics_environment="Environment=\"CODEX_BRIDGE_TOOL_LOG=$LOG_DIR/tool-calls.jsonl\""
+      fi
       mkdir -p "$service_dir"
       cat > "$service_file" <<EOF
 [Unit]
@@ -96,6 +103,7 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart=$BIN_PATH --config $CONFIG_PATH
+$diagnostics_environment
 Restart=always
 RestartSec=2
 WorkingDirectory=$(dirname "$CONFIG_PATH")
@@ -113,6 +121,14 @@ EOF
       local label="com.codex-bridge"
       local plist_dir="$HOME/Library/LaunchAgents"
       local plist_file="$plist_dir/$label.plist"
+      local diagnostics_environment=""
+      if [ "$ENABLE_DIAGNOSTICS" = "1" ] || [ "$ENABLE_DIAGNOSTICS" = "true" ]; then
+        diagnostics_environment="  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_BRIDGE_TOOL_LOG</key>
+    <string>$LOG_DIR/tool-calls.jsonl</string>
+  </dict>"
+      fi
       mkdir -p "$plist_dir" "$LOG_DIR"
       cat > "$plist_file" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -129,6 +145,7 @@ EOF
   </array>
   <key>WorkingDirectory</key>
   <string>$(dirname "$CONFIG_PATH")</string>
+$diagnostics_environment
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

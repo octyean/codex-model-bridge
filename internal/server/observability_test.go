@@ -64,7 +64,19 @@ func TestLogUsageIncludesExecutionContextAndSeparatesUpstreamModels(t *testing.T
 func TestIncidentRecordIncludesCodexSessionID(t *testing.T) {
 	request := httptest.NewRequest("POST", "/v1/responses", nil)
 	request.Header.Set("X-Codex-Thread-Id", "thread-test")
-	record := (&Server{}).incidentRecord(
+	server := &Server{cfg: &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"upstream": {Protocol: "responses"},
+		},
+		Models: map[string]config.ModelConfig{
+			"gpt-5.3-codex": {
+				Provider:      "upstream",
+				Profile:       "kimi",
+				UpstreamModel: "kimi-for-coding",
+			},
+		},
+	}}
+	record := server.incidentRecord(
 		request,
 		codex.ResponsesRequest{Model: "gpt-5.3-codex", Raw: map[string]any{}},
 		"req_test",
@@ -75,6 +87,9 @@ func TestIncidentRecordIncludesCodexSessionID(t *testing.T) {
 
 	if record["codex_session_id"] != "thread-test" {
 		t.Fatalf("incident record = %#v", record)
+	}
+	if record["upstream_model"] != "kimi-for-coding" || record["execution_mode"] != config.ExecutionModeProjectedResponses {
+		t.Fatalf("incident execution context = %#v", record)
 	}
 }
 

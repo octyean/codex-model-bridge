@@ -23,6 +23,14 @@ export CODEX_BRIDGE_INCIDENT_LOG="$HOME/.codex-bridge/logs/incidents.jsonl"
 
 `CODEX_BRIDGE_INCIDENT_LOG` 可以不显式设置。未设置时，bridge 会优先从 `CODEX_BRIDGE_TOOL_LOG` 推导出同目录下的 `incidents.jsonl`。
 
+一键安装或 `scripts/install-service.sh` 默认不打开持久诊断。需要让 systemd/launchd 服务长期保留工具、事故和会话日志时，在安装前设置：
+
+```bash
+export CODEX_BRIDGE_ENABLE_DIAGNOSTICS=1
+```
+
+安装器只会写入 `CODEX_BRIDGE_TOOL_LOG=~/.codex-bridge/logs/tool-calls.jsonl`。完整上游请求 dump 和逐条流式事件仍保持关闭，需要排查对应问题时再单独开启。
+
 默认不会逐条保存上游流式 chunk。只有排查流式时序问题时，再临时设置：
 
 ```bash
@@ -89,6 +97,7 @@ export CODEX_BRIDGE_LOG_STREAM_EVENTS=1
 | `diagnostic_level` | 诊断等级：`ok`、`recoverable`、`incident`、`fatal` |
 | `request_summary` | 请求摘要，包含最后一段用户提示词预览和 hash |
 | `upstream_request_dump` | 对应上游请求 dump 文件路径 |
+| `execution_mode` | 本次请求实际选择的 `native_responses`、`projected_responses` 或 `chat_completions` |
 
 排查模型映射问题时，重点对比 `model` 和 `upstream_model`。例如 Codex 侧选择 `gpt-5.3-codex`，实际发给上游可能是 `kimi-for-coding`。
 
@@ -127,6 +136,7 @@ Bridge 内置 `web_search` 需要服务端执行和模型续答。Projected Resp
 | `tool_call_frame` | 工具调用三视图，包含 `model_arguments`、`canonical_arguments`、`runtime_arguments`、`transformer`、`argument_mode`、`schema_quality` |
 | `tool_broker_decision` | Broker 对模型工具调用的运行时决策，包含 `action`、`reason`、`profiled_tool`、`progress_key` |
 | `runtime_outcome` | 工具输出观察结果，挂在 `tool_output` 中，包含 `ok`、`category`、`progress`、`output_hash` |
+| `patch_tool_call` | `apply_patch` 进入 Bridge 文本编辑器时的原始调用，包含 `model`、`upstream_model`、`profile`、参数和目标文件 |
 | `upstream_retry_status` | 上游请求重试和累计状态，包含 `action`、`retry_count`、`wait_ms`、`total_wait_ms`、`status_code`、`total_requests`、`retried_requests`、`failed_requests`、`error_rate_permille` |
 
 `upstream_retry_status` 的 `action=retry` 表示本次请求仍会重试，`action=failed` 表示重试预算已经耗尽。排查偶发 502 时先按 `upstream_model` 和时间查看这条事件，再进入对应 session 的 `prompt-responses.jsonl` 和请求 dump。

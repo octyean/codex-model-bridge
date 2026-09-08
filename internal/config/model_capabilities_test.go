@@ -29,6 +29,16 @@ func TestCapabilityWarningsReportsMissingThirdPartyVerification(t *testing.T) {
 	}
 }
 
+func TestCapabilityVerificationIsNotRequiredForOpenAIProfile(t *testing.T) {
+	cfg := Config{}
+	model := ModelConfig{Profile: "openai", UpstreamModel: "gpt-5.6-sol"}
+	provider := ProviderConfig{Profile: "default"}
+
+	if cfg.RequiresCapabilityVerification(model, provider) {
+		t.Fatal("OpenAI profile should not require third-party capability verification")
+	}
+}
+
 func TestVerifiedCapabilityRejectsCredentialAndProfileChanges(t *testing.T) {
 	model := ModelConfig{Provider: "upstream", UpstreamModel: "test-model", Profile: "default"}
 	provider := ProviderConfig{

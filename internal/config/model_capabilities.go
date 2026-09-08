@@ -177,8 +177,7 @@ func (cfg *Config) CapabilityWarnings(now time.Time) []string {
 		if !ok {
 			continue
 		}
-		profile := cfg.ProfileName(model, provider)
-		if profile == adapters.DefaultName || profile == adapters.OpenAIName {
+		if !cfg.RequiresCapabilityVerification(model, provider) {
 			continue
 		}
 		key := model.Provider + "\x00" + model.UpstreamModel
@@ -203,6 +202,11 @@ func (cfg *Config) CapabilityWarnings(now time.Time) []string {
 	}
 	sort.Strings(warnings)
 	return warnings
+}
+
+func (cfg *Config) RequiresCapabilityVerification(model ModelConfig, provider ProviderConfig) bool {
+	profile := cfg.ProfileName(model, provider)
+	return profile != adapters.DefaultName && profile != adapters.OpenAIName
 }
 
 func normalizeCapabilityCache(cache *modelCapabilityCache) {

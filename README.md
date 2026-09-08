@@ -35,19 +35,28 @@ curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scr
 非交互安装：
 
 ```bash
+export CODEX_BRIDGE_BASE_URL="https://api.deepseek.com"
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
-  env CODEX_BRIDGE_BASE_URL="https://api.deepseek.com" CODEX_BRIDGE_API_KEY="sk-xxx" bash
+  bash
+unset CODEX_BRIDGE_API_KEY CODEX_BRIDGE_BASE_URL
 ```
 
-安装脚本会下载二进制、询问或读取上游 URL/API key、探测流式协议、创建 `~/.codex-bridge/config.toml`、写入 Codex provider，并注册用户级服务。重复执行同一条命令即可更新；已有配置不会被覆盖，也不会重新要求填写上游或探测上游。
+安装脚本会下载二进制、询问或读取上游 URL/API key、探测流式协议、创建 `~/.codex-bridge/config.toml`、写入 Codex provider，并注册用户级服务。交互输入 API key 时终端不会回显；脚本也不会把 key 放进 `codex-bridge` 的命令参数。重复执行同一条命令即可更新；已有配置不会被覆盖，也不会重新要求填写上游或探测上游。
 脚本只补充 `codex_bridge` provider 和模型目录，不会覆盖你已有的 Codex 默认模型。
 
 更换上游时显式执行：
 
 ```bash
+export CODEX_BRIDGE_REPLACE_UPSTREAM=1
+export CODEX_BRIDGE_BASE_URL="https://api.example.com/v1"
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 curl -fsSL https://raw.githubusercontent.com/octyean/codex-model-bridge/main/scripts/install.sh | \
-  env CODEX_BRIDGE_REPLACE_UPSTREAM=1 CODEX_BRIDGE_BASE_URL="https://api.example.com/v1" CODEX_BRIDGE_API_KEY="sk-xxx" bash
+  bash
+unset CODEX_BRIDGE_API_KEY CODEX_BRIDGE_BASE_URL CODEX_BRIDGE_REPLACE_UPSTREAM
 ```
+
+安装时设置 `CODEX_BRIDGE_ENABLE_DIAGNOSTICS=1`，会为 systemd/launchd 服务开启工具、事故和会话诊断日志。默认关闭，也不会自动开启完整上游请求 dump 或逐条流式事件日志。
 
 Windows 用户可从 [GitHub Releases latest](https://github.com/octyean/codex-model-bridge/releases/latest) 下载对应 exe，放到固定目录后双击运行。首次运行会在 exe 同目录创建 `config.toml`。
 

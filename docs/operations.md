@@ -15,10 +15,11 @@ codex-bridge config check --config config/config.toml
 只探测，不修改配置：
 
 ```bash
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 codex-bridge probe \
   --upstream-base-url https://api.example.com/v1 \
-  --upstream-api-key sk-xxx \
   --model kimi-for-coding
+unset CODEX_BRIDGE_API_KEY
 ```
 
 输出里重点看：
@@ -56,30 +57,36 @@ codex-bridge verify \
 首次生成配置：
 
 ```bash
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 codex-bridge setup \
   --config ~/.codex-bridge/config.toml \
   --upstream-base-url https://api.example.com/v1 \
-  --upstream-api-key sk-xxx \
   --model kimi-for-coding \
   --yes
+unset CODEX_BRIDGE_API_KEY
 ```
 
 已有配置默认保留。需要更换上游时：
 
 ```bash
+export CODEX_BRIDGE_API_KEY="sk-new"
 codex-bridge setup \
   --config ~/.codex-bridge/config.toml \
   --upstream-base-url https://api.new.example/v1 \
-  --upstream-api-key sk-new \
   --replace-upstream \
   --yes
+unset CODEX_BRIDGE_API_KEY
 ```
+
+交互执行 `setup` 时可以省略环境变量和 `--yes`，API key 会隐藏输入。`--upstream-api-key` 只保留兼容，不推荐把真实 key 放进命令参数。
 
 ## 启动服务
 
 ```bash
 codex-bridge --config config/config.toml
 ```
+
+`server.shutdown_timeout_seconds` 控制服务收到 SIGINT/SIGTERM 后等待在途请求完成的时间，省略时默认 30 秒。超时才会强制关闭。
 
 看到类似日志表示服务已启动：
 

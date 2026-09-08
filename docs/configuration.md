@@ -27,14 +27,17 @@ codex-bridge config check --config ~/.codex-bridge/config.toml
 推荐先让内置向导探测上游能力并生成配置：
 
 ```bash
+export CODEX_BRIDGE_API_KEY="sk-xxx"
 codex-bridge setup \
   --config ~/.codex-bridge/config.toml \
   --upstream-base-url https://api.example.com/v1 \
-  --upstream-api-key sk-xxx \
   --model kimi-for-coding \
   --profile kimi \
   --yes
+unset CODEX_BRIDGE_API_KEY
 ```
+
+不传 `--yes` 时，`setup` 会在终端隐藏读取 API key。命令行仍兼容 `--upstream-api-key`，但 key 会进入进程参数和 shell 历史，不建议日常使用。
 
 `setup` 会探测 `/models`、`/responses` 流式和 `/chat/completions` 流式能力。上游支持 `/responses` 流式时，会写入：
 
@@ -53,7 +56,9 @@ protocol = "responses"
 只想查看探测结果、不写配置时，用：
 
 ```bash
-codex-bridge probe --upstream-base-url https://api.example.com/v1 --upstream-api-key sk-xxx --model kimi-for-coding
+export CODEX_BRIDGE_API_KEY="sk-xxx"
+codex-bridge probe --upstream-base-url https://api.example.com/v1 --model kimi-for-coding
+unset CODEX_BRIDGE_API_KEY
 ```
 
 ## 手写配置
@@ -63,6 +68,7 @@ codex-bridge probe --upstream-base-url https://api.example.com/v1 --upstream-api
 ```toml
 [server]
 listen = "127.0.0.1:8787"
+shutdown_timeout_seconds = 30
 
 [codex]
 model_catalog_path = "/home/you/.codex/models.codex-bridge.json"
@@ -119,10 +125,12 @@ supports_parallel_tool_calls = true
 apply_patch_tool_type = "freeform"
 ```
 
+`server.shutdown_timeout_seconds` 是收到 SIGINT/SIGTERM 后等待在途请求完成的最长时间。省略或写 `0` 时使用 30 秒默认值，不能为负数；超时后 Bridge 才会强制关闭连接。
+
 `type` 支持两种写法：
 
 - `openai_chat_compatible`：老兼容模式，始终向上游请求 `/chat/completions`。
-- `openai_compatible`：同时支持 Chat Completions 和 Responses。`protocol` 可写 `chat_completions`、`responses` 或 `auto`；不写时，`gpt-*`、`o3*`、`o4*` upstream 模型会走 `/responses`，其他模型走 `/chat/completions`。
+- `openai_compatible`：同时支持 Chat Completions 和 Responses。`protocol` 可写 `chat_completions`、`responses` 或 `auto`；不写时，`gpt-*`、`o1*`、`o3*`、`o4*` upstream 模型会走 `/responses`，其他模型走 `/chat/completions`。
 
 如果上游是 OpenAI 原生 GPT / o 系列模型，建议使用：
 
@@ -177,8 +185,16 @@ apply_patch_tool_type = "freeform"
 - `supports_responses_options` 控制 reasoning 和 verbosity 是否向 Codex 宣告并发送给上游。
 - `supports_responses_structured_output` 控制是否原样发送 `text.format=json_schema`。设为 `false` 时仍走 Responses，Bridge 会改用 JSON Schema 指令并校正最终输出。
 - `default_reasoning_level` 控制 Codex 默认思考强度；不写时默认使用 `high`。
-- `supported_reasoning_levels` 按顺序声明模型真实支持的思考档位。不写时使用 `low`、`medium`、`high`；`xhigh`、`max` 等额外能力应写在模型配置中，不再通过模型名硬编码。
+- `supported_reasoning_levels` 按顺序声明模型真实支持的思考档位。不写时使用 `low`、`medium`、`high`；`xhigh`、`max`、`ultra` 等额外能力应写在模型配置中，不再通过模型名硬编码。
 - setup 只把实际 probe 过的模型能力写入生成配置，不会拿一个模型的可选能力替其他模型做结论。
+
+例如要让 GPT-5.6 系列在 Codex 模型选择器中显示 Ultra：
+
+```toml
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
+```
+
+Bridge 只按这份模型配置生成目录，不会仅凭 `gpt-5.6-*` 名称猜测能力。`ultra` 是否能被目标上游实际执行，仍要用对应模型发起真实 Codex 请求确认。
 
 已有配置建议用 `verify` 逐模型实测：
 

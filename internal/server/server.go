@@ -644,6 +644,14 @@ func (s *Server) incidentRecord(r *http.Request, req codex.ResponsesRequest, req
 		"tool_names":       responseToolNames(req.Tools),
 		"tool_choice":      req.ToolChoice,
 	}
+	if s.cfg != nil {
+		if model, ok := s.cfg.Models[req.Model]; ok {
+			record["upstream_model"] = model.UpstreamModel
+			if provider, ok := s.cfg.Providers[model.Provider]; ok {
+				record["execution_mode"] = s.cfg.ExecutionPlan(model, provider).Mode
+			}
+		}
+	}
 	if dumpPath != "" {
 		record["upstream_request_dump"] = dumpPath
 	}

@@ -26,6 +26,9 @@ func TestDefaultConfigTextUsesRandomLocalToken(t *testing.T) {
 	if firstToken == "codex-bridge-local-token" || secondToken == "codex-bridge-local-token" {
 		t.Fatal("default config used the legacy fixed token")
 	}
+	if !strings.Contains(first, "shutdown_timeout_seconds = 30") {
+		t.Fatal("default config omitted shutdown timeout")
+	}
 }
 
 func TestDefaultContextWindowForKimiForCoding(t *testing.T) {

@@ -6,6 +6,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"codex-bridge/internal/adapters"
 )
 
 func TestCheckUnknownFieldsRejectsUnknownSetting(t *testing.T) {
@@ -17,19 +20,6 @@ func TestCheckUnknownFieldsRejectsUnknownSetting(t *testing.T) {
 	err := CheckUnknownFields(path)
 	if err == nil || !strings.Contains(err.Error(), "read_top_k") {
 		t.Fatalf("CheckUnknownFields() error = %v, want read_top_k", err)
-	}
-}
-
-func TestReasoningLevelsDoNotDependOnUpstreamModelName(t *testing.T) {
-	levels := reasoningLevelsForModel(ModelConfig{UpstreamModel: "gpt-5.6-sol"}, true)
-	efforts := make([]string, 0, len(levels))
-	for _, level := range levels {
-		efforts = append(efforts, level.Effort)
-	}
-
-	want := []string{"low", "medium", "high"}
-	if !reflect.DeepEqual(efforts, want) {
-		t.Fatalf("reasoning efforts = %v, want %v", efforts, want)
 	}
 }
 
@@ -54,7 +44,7 @@ func TestReasoningLevelsUseModelConfiguration(t *testing.T) {
 	model := ModelConfig{
 		UpstreamModel:            "k3",
 		DefaultReasoningLevel:    "high",
-		SupportedReasoningLevels: []string{"high", "max"},
+		SupportedReasoningLevels: []string{"high", "max", "ultra"},
 	}
 	if got := defaultReasoningLevel(model, true); got != "high" {
 		t.Fatalf("default reasoning level = %q, want high", got)
@@ -64,6 +54,7 @@ func TestReasoningLevelsUseModelConfiguration(t *testing.T) {
 	want := []ReasoningEffortPreset{
 		{Effort: "high", Description: "Deeper reasoning for complex changes"},
 		{Effort: "max", Description: "Maximum provider-supported reasoning"},
+		{Effort: "ultra", Description: "Maximum reasoning with automatic task delegation"},
 	}
 	if !reflect.DeepEqual(levels, want) {
 		t.Fatalf("reasoning levels = %#v, want %#v", levels, want)
@@ -103,6 +94,28 @@ func TestValidateRejectsReasoningDefaultOutsideSupportedLevels(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "default_reasoning_level") {
 		t.Fatalf("Validate() error = %v, want default_reasoning_level error", err)
+	}
+}
+
+func TestShutdownTimeoutDefaultsToThirtySeconds(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.ShutdownTimeout(); got != 30*time.Second {
+		t.Fatalf("shutdown timeout = %s, want 30s", got)
+	}
+	cfg.Server.ShutdownTimeoutSeconds = 45
+	if got := cfg.ShutdownTimeout(); got != 45*time.Second {
+		t.Fatalf("shutdown timeout = %s, want 45s", got)
+	}
+}
+
+func TestValidateRejectsNegativeShutdownTimeout(t *testing.T) {
+	cfg := Config{Server: ServerConfig{
+		Listen:                 "127.0.0.1:8787",
+		ShutdownTimeoutSeconds: -1,
+	}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "shutdown_timeout_seconds") {
+		t.Fatalf("Validate() error = %v, want shutdown_timeout_seconds error", err)
 	}
 }
 
@@ -167,12 +180,28 @@ func TestDesktopModelSlugUsesStableCompatibilitySlots(t *testing.T) {
 		"mimo-v2.5-pro":   "gpt-5.2",
 		"mimo-v2.5":       "gpt-5.4-mini",
 		"gpt-5.4":         "gpt-5.4",
+		"gpt-5.6-sol":     "gpt-5.6-sol",
+		"gpt-5.6-terra":   "gpt-5.6-terra",
+		"gpt-5.6-luna":    "gpt-5.6-luna",
 		"other-model":     "",
 	}
 	for model, want := range cases {
 		if got := DesktopModelSlug(model); got != want {
 			t.Fatalf("DesktopModelSlug(%q) = %q, want %q", model, got, want)
 		}
+	}
+}
+
+func TestOpenAIReasoningModelsUseNativeResponses(t *testing.T) {
+	cfg := Config{}
+	model := ModelConfig{UpstreamModel: "o1"}
+	provider := ProviderConfig{Type: "openai_compatible", Protocol: "auto"}
+
+	if got := cfg.ProfileName(model, provider); got != adapters.OpenAIName {
+		t.Fatalf("profile = %q, want openai", got)
+	}
+	if got := cfg.UpstreamProtocol(model, provider); got != "responses" {
+		t.Fatalf("protocol = %q, want responses", got)
 	}
 }
 

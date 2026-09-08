@@ -15,6 +15,7 @@ func DefaultConfigText(homeDir string) (string, error) {
 	}
 	return fmt.Sprintf(`[server]
 listen = "127.0.0.1:8787"
+shutdown_timeout_seconds = 30
 
 [codex]
 model_catalog_path = "%s"

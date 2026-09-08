@@ -1,6 +1,9 @@
 package adapters
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestUseExplicitTaskEndOnlyForThirdPartyNonGPTModels(t *testing.T) {
 	tests := []struct {
@@ -23,5 +26,14 @@ func TestUseExplicitTaskEndOnlyForThirdPartyNonGPTModels(t *testing.T) {
 				t.Fatalf("UseExplicitTaskEnd(%q, %q) = %v, want %v", test.adapter.Name(), test.model, actual, test.expected)
 			}
 		})
+	}
+}
+
+func TestThirdPartyAdaptersPreserveExactFinalConstraints(t *testing.T) {
+	for _, name := range []string{KimiName, MimoName} {
+		note := Get(name).ResponseDisciplineNote()
+		if !strings.Contains(note, "output exactly that text with no prefix, suffix, or completion summary") {
+			t.Fatalf("%s response discipline is missing exact-final rule:\n%s", name, note)
+		}
 	}
 }

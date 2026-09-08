@@ -1,6 +1,10 @@
 package toollog
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +57,33 @@ func TestRememberedToolStateIsScopedBySession(t *testing.T) {
 	}
 	if !seenToolOutput(requestA, callID, "same output") {
 		t.Fatal("repeated session A output should be seen")
+	}
+}
+
+func TestPatchToolCallIncludesNamedEventAndRequestContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tool-calls.jsonl")
+	t.Setenv(EnvToolLogPath, path)
+	requestID := "request-" + t.Name()
+	RememberRequestSession(requestID, "session-"+t.Name(), "gpt-5.3-codex", "kimi-for-coding", "kimi", nil)
+	t.Cleanup(func() { ForgetRequestSession(requestID) })
+
+	entry := tools.Entry{Descriptor: adapters.ToolDescriptor{
+		Name:         tools.TextEditorWriteToolName,
+		Kind:         tools.KindTextEditor,
+		OriginalType: "apply_patch",
+	}}
+	PatchToolCall(requestID, "call-"+t.Name(), entry, `{"path":"a.txt","file_text":"ok"}`, map[string]any{"type": "custom_tool_call"})
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["event"] != "patch_tool_call" || record["profile"] != "kimi" || record["upstream_model"] != "kimi-for-coding" {
+		t.Fatalf("patch tool log = %#v", record)
 	}
 }
 
